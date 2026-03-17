@@ -1,0 +1,111 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  enterprise-membership-sample — Porth Admin UI.
+  Public example demonstrating porth-common portability.
+  Deploys a React SPA to S3/CloudFront backed by the Porth API.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment
+
+  PorthApiUrl:
+    Type: String
+    Description: >
+      Base URL of the deployed Porth API
+      (output PorthApiUrl from the Components stack)
+
+Resources:
+
+  # ── S3 bucket for React SPA static assets ────────────────────────────────
+
+  AdminUIBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub porth-admin-ui-${Environment}-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  AdminUIBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AdminUIBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${AdminUIBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub >-
+                  arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}
+
+  # ── CloudFront OAC + Distribution ────────────────────────────────────────
+
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub porth-admin-oac-${Environment}
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        DefaultRootObject: index.html
+        Enabled: true
+        HttpVersion: http2
+        IPV6Enabled: true
+        Comment: !Sub Porth Admin UI - ${Environment}
+        # SPA fallback: serve index.html for all 403/404 so React Router handles routing
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          # CachingOptimized managed policy
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt AdminUIBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt CloudFrontOAC.Id
+            S3OriginConfig: {}
+
+Outputs:
+
+  AdminUIBucketName:
+    Description: S3 bucket for the React admin SPA
+    Value: !Ref AdminUIBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-AdminUIBucketName
+
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID (used for cache invalidation in CI)
+    Value: !Ref CloudFrontDistribution
+    Export:
+      Name: !Sub ${AWS::StackName}-CloudFrontDistributionId
+
+  CloudFrontUrl:
+    Description: Public URL of the Porth Admin UI
+    Value: !Sub https://${CloudFrontDistribution.DomainName}
+    Export:
+      Name: !Sub ${AWS::StackName}-CloudFrontUrl
