@@ -23,7 +23,7 @@ export default function TenantsPage() {
       </div>
       <div className="grid gap-3">
         {tenants.map(t => (
-          <Link key={t.id} to={`/organizations/${orgId}/tenants/${t.id}/users`}
+          <Link key={t.id} to={`/admin/tenant/users`}
             className="bg-white border border-gray-200 rounded-lg px-5 py-4 flex items-center justify-between hover:border-indigo-300 transition-colors">
             <div>
               <p className="font-medium text-gray-900">{t.name}</p>
