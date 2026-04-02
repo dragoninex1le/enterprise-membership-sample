@@ -4,7 +4,7 @@ export interface TenantIdpConfig {
   tenantId: string
   domain: string
   clientId: string
-  audience: string
+  audience?: string
 }
 
 function getTenantIdFromSubdomain(): string | null {
@@ -37,6 +37,12 @@ export function useTenantConfig(): {
     }
 
     const apiBase = import.meta.env.VITE_API_BASE_URL
+    if (!apiBase) {
+      setError('VITE_API_BASE_URL is not configured.')
+      setLoading(false)
+      return
+    }
+
     fetch(`${apiBase}/tenants/${encodeURIComponent(tenantId)}`)
       .then(res => {
         if (!res.ok) throw new Error(`Tenant lookup failed: ${res.status}`)
@@ -44,12 +50,10 @@ export function useTenantConfig(): {
       })
       .then(tenant => {
         const idp = tenant.idp_config_override ?? null
-        if (!idp?.issuer || !idp?.client_id || !idp?.audience) {
+        if (!idp?.domain || !idp?.client_id) {
           throw new Error(`Tenant ${tenantId} has no IdP configuration`)
         }
-        // Auth0 issuer is https://{domain}/ — extract the domain
-        const domain = idp.issuer.replace(/^https?:\/\//, '').replace(/\/$/, '')
-        setConfig({ tenantId, domain, clientId: idp.client_id, audience: idp.audience })
+        setConfig({ tenantId, domain: idp.domain, clientId: idp.client_id, audience: idp.audience })
       })
       .catch(err => setError(err.message))
       .finally(() => setLoading(false))

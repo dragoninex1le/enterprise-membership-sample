@@ -32,7 +32,7 @@ function TenantBootstrap() {
       clientId={config.clientId}
       authorizationParams={{
         redirect_uri: window.location.origin,
-        audience: config.audience,
+        ...(config.audience ? { audience: config.audience } : {}),
       }}
     >
       <App />
