@@ -71,6 +71,7 @@ jobs:
             --parameter-overrides \
               Environment=prod \
               PorthApiUrl=${{ env.PORTH_API_URL }} \
+              AcmCertificateArn=${{ secrets.ACM_CERTIFICATE_ARN }} \
             --no-fail-on-empty-changeset
 
       - name: Resolve stack outputs
