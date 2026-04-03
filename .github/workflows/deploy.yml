@@ -43,14 +43,6 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Resolve Porth API URL from CloudFormation
-        run: |
-          PORTH_API_URL=$(aws cloudformation describe-stacks \
-            --stack-name porth-components \
-            --query "Stacks[0].Outputs[?OutputKey=='PorthApiUrl'].OutputValue" \
-            --output text)
-          echo "PORTH_API_URL=$PORTH_API_URL" >> $GITHUB_ENV
-
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
@@ -60,7 +52,7 @@ jobs:
         run: npm run build
         env:
           # Auth0 config is fetched at runtime from GET /tenants/{tenantId} — no build-time secrets needed
-          VITE_API_BASE_URL: ${{ env.PORTH_API_URL }}
+          VITE_API_BASE_URL: ${{ secrets.PORTH_API_URL }}
 
       - name: SAM deploy (infrastructure)
         run: |
@@ -70,7 +62,7 @@ jobs:
             --capabilities CAPABILITY_IAM \
             --parameter-overrides \
               Environment=prod \
-              PorthApiUrl=${{ env.PORTH_API_URL }} \
+              PorthApiUrl=${{ secrets.PORTH_API_URL }} \
             --no-fail-on-empty-changeset
 
       - name: Resolve stack outputs
