@@ -34,7 +34,7 @@ export default function OrganizationsPage() {
           {orgs.map(org => (
             <Link
               key={org.id}
-              to={`/organizations/${org.id}/tenants`}
+              to={`/admin/platform/organizations/${org.id}/tenants`}
               className="bg-white border border-gray-200 rounded-lg px-5 py-4 flex items-center justify-between hover:border-indigo-300 transition-colors"
             >
               <div>
