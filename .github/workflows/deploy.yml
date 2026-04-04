@@ -37,6 +37,15 @@ jobs:
       - name: Install SAM CLI
         uses: aws-actions/setup-sam@v2
 
+      - name: Validate required secrets
+        run: |
+          if [ -z "${{ secrets.ACM_CERTIFICATE_ARN }}" ]; then
+            echo "❌ ACM_CERTIFICATE_ARN secret is not set."
+            echo "Add it under repo Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          echo "✅ ACM_CERTIFICATE_ARN is present"
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -71,6 +80,7 @@ jobs:
             --parameter-overrides \
               Environment=prod \
               PorthApiUrl=${{ env.PORTH_API_URL }} \
+              AcmCertificateArn=${{ secrets.ACM_CERTIFICATE_ARN }} \
             --no-fail-on-empty-changeset
 
       - name: Resolve stack outputs
@@ -84,8 +94,13 @@ jobs:
             --stack-name ${{ env.SAM_STACK_NAME }} \
             --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" \
             --output text)
+          CF_DOMAIN=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.SAM_STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDomainName'].OutputValue" \
+            --output text)
           echo "bucket=$BUCKET" >> $GITHUB_OUTPUT
           echo "cf_id=$CF_ID" >> $GITHUB_OUTPUT
+          echo "CloudFront alias target (use for Route 53 record): $CF_DOMAIN"
 
       - name: Sync assets to S3
         run: |

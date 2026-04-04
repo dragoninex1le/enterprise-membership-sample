@@ -18,6 +18,24 @@ Parameters:
       Base URL of the deployed Porth API
       (output PorthApiUrl from the Components stack)
 
+  AcmCertificateArn:
+    Type: String
+    NoEcho: true
+    Description: >
+      ARN of the ACM certificate for the CloudFront distribution.
+      Must be in us-east-1 (CloudFront requirement). Must cover the value
+      supplied for CloudFrontAlias.
+    AllowedPattern: 'arn:aws:acm:us-east-1:[0-9]{12}:certificate/[a-f0-9-]+'
+    ConstraintDescription: Must be a valid ACM certificate ARN in us-east-1.
+
+  CloudFrontAlias:
+    Type: String
+    Default: '*.porth-sample.components-dev.estynsoftware.cloud'
+    Description: >
+      Alternate domain name (CNAME alias) for the CloudFront distribution.
+      Must be covered by the ACM certificate supplied in AcmCertificateArn.
+      Override per environment (e.g. *.porth-sample.components-staging.estynsoftware.cloud).
+
 Resources:
 
   # ── S3 bucket for React SPA static assets ────────────────────────────────
@@ -63,6 +81,12 @@ Resources:
     Type: AWS::CloudFront::Distribution
     Properties:
       DistributionConfig:
+        Aliases:
+          - !Ref CloudFrontAlias
+        ViewerCertificate:
+          AcmCertificateArn: !Ref AcmCertificateArn
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
         DefaultRootObject: index.html
         Enabled: true
         HttpVersion: http2
@@ -105,7 +129,13 @@ Outputs:
       Name: !Sub ${AWS::StackName}-CloudFrontDistributionId
 
   CloudFrontUrl:
-    Description: Public URL of the Porth Admin UI
+    Description: Public URL of the Porth Admin UI (CloudFront default domain)
     Value: !Sub https://${CloudFrontDistribution.DomainName}
     Export:
       Name: !Sub ${AWS::StackName}-CloudFrontUrl
+
+  CloudFrontDomainName:
+    Description: CloudFront domain name — use as Route 53 alias target for the CloudFrontAlias record
+    Value: !GetAtt CloudFrontDistribution.DomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-CloudFrontDomainName
