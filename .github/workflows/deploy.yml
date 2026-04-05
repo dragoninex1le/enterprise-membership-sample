@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  AWS_REGION: eu-west-2
+  AWS_REGION: us-east-1
   SAM_STACK_NAME: enterprise-membership-sample
   NODE_VERSION: '20'
 
@@ -97,7 +97,6 @@ jobs:
 
       - name: Bootstrap platform tenant
         env:
-          AWS_REGION: us-east-1
           PORTH_ENVIRONMENT: prod
         run: python3 scripts/bootstrap_platform_tenant.py
 
