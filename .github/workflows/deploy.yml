@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: eu-west-2
   SAM_STACK_NAME: enterprise-membership-sample
   NODE_VERSION: '20'
 
@@ -39,26 +39,22 @@ jobs:
 
       - name: Validate required secrets
         run: |
-          if [ -z "${{ secrets.ACM_CERTIFICATE_ARN }}" ]; then
-            echo "❌ ACM_CERTIFICATE_ARN secret is not set."
-            echo "Add it under repo Settings → Secrets and variables → Actions."
+          MISSING=()
+          [ -z "${{ secrets.ACM_CERTIFICATE_ARN }}" ]       && MISSING+=("ACM_CERTIFICATE_ARN")
+          [ -z "${{ secrets.PORTH_API_URL }}" ]             && MISSING+=("PORTH_API_URL")
+          [ -z "${{ secrets.PLATFORM_AUTH0_DOMAIN }}" ]     && MISSING+=("PLATFORM_AUTH0_DOMAIN")
+          [ -z "${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}" ]  && MISSING+=("PLATFORM_AUTH0_CLIENT_ID")
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "❌ Missing required secrets: ${MISSING[*]}"
             exit 1
           fi
-          echo "✅ ACM_CERTIFICATE_ARN is present"
+          echo "✅ All required secrets present"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-
-      - name: Resolve Porth API URL from CloudFormation
-        run: |
-          PORTH_API_URL=$(aws cloudformation describe-stacks \
-            --stack-name porth-components \
-            --query "Stacks[0].Outputs[?OutputKey=='PorthApiUrl'].OutputValue" \
-            --output text)
-          echo "PORTH_API_URL=$PORTH_API_URL" >> $GITHUB_ENV
 
       - name: Install frontend dependencies
         working-directory: frontend
@@ -68,8 +64,10 @@ jobs:
         working-directory: frontend
         run: npm run build
         env:
-          # Auth0 config is fetched at runtime from GET /tenants/{tenantId} — no build-time secrets needed
-          VITE_API_BASE_URL: ${{ env.PORTH_API_URL }}
+          VITE_API_BASE_URL: ${{ secrets.PORTH_API_URL }}
+          VITE_AUTH0_DOMAIN: ${{ secrets.VITE_AUTH0_DOMAIN }}
+          VITE_AUTH0_CLIENT_ID: ${{ secrets.VITE_AUTH0_CLIENT_ID }}
+          VITE_AUTH0_AUDIENCE: ${{ secrets.VITE_AUTH0_AUDIENCE }}
 
       - name: SAM deploy (infrastructure)
         run: |
@@ -79,7 +77,7 @@ jobs:
             --capabilities CAPABILITY_IAM \
             --parameter-overrides \
               Environment=prod \
-              PorthApiUrl=${{ env.PORTH_API_URL }} \
+              PorthApiUrl=${{ secrets.PORTH_API_URL }} \
               AcmCertificateArn=${{ secrets.ACM_CERTIFICATE_ARN }} \
             --no-fail-on-empty-changeset
 
@@ -94,13 +92,14 @@ jobs:
             --stack-name ${{ env.SAM_STACK_NAME }} \
             --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" \
             --output text)
-          CF_DOMAIN=$(aws cloudformation describe-stacks \
-            --stack-name ${{ env.SAM_STACK_NAME }} \
-            --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDomainName'].OutputValue" \
-            --output text)
           echo "bucket=$BUCKET" >> $GITHUB_OUTPUT
           echo "cf_id=$CF_ID" >> $GITHUB_OUTPUT
-          echo "CloudFront alias target (use for Route 53 record): $CF_DOMAIN"
+
+      - name: Bootstrap platform tenant
+        env:
+          AWS_REGION: us-east-1
+          PORTH_ENVIRONMENT: prod
+        run: python3 scripts/bootstrap_platform_tenant.py
 
       - name: Sync assets to S3
         run: |
