@@ -43,6 +43,7 @@ jobs:
           [ -z "${{ secrets.ACM_CERTIFICATE_ARN }}" ]       && MISSING+=("ACM_CERTIFICATE_ARN")
           [ -z "${{ secrets.PLATFORM_AUTH0_DOMAIN }}" ]     && MISSING+=("PLATFORM_AUTH0_DOMAIN")
           [ -z "${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}" ]  && MISSING+=("PLATFORM_AUTH0_CLIENT_ID")
+          [ -z "${{ secrets.GH_PAT }}" ]                    && MISSING+=("GH_PAT")
           if [ ${#MISSING[@]} -gt 0 ]; then
             echo "\u274c Missing required secrets: ${MISSING[*]}"
             exit 1
@@ -104,7 +105,7 @@ jobs:
 
       - name: Install porth-common
         run: |
-          pip install "git+https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/dragoninex1le/Components.git"
+          pip install "git+https://${{ secrets.GH_PAT }}@github.com/dragoninex1le/Components.git"
 
       - name: Bootstrap platform tenant
         env:
