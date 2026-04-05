@@ -95,67 +95,11 @@ jobs:
           echo "bucket=$BUCKET" >> $GITHUB_OUTPUT
           echo "cf_id=$CF_ID" >> $GITHUB_OUTPUT
 
-      - name: Get Components stack outputs
-        id: components
-        run: |
-          USERS_TABLE=$(aws cloudformation describe-stacks \
-            --stack-name porth-components \
-            --region us-east-1 \
-            --query "Stacks[0].Outputs[?OutputKey=='UsersTableName'].OutputValue | [0]" \
-            --output text)
-          echo "Users Table: $USERS_TABLE"
-          echo "users_table=$USERS_TABLE" >> "$GITHUB_OUTPUT"
-
       - name: Bootstrap platform tenant
         env:
-          PLATFORM_AUTH0_DOMAIN: ${{ secrets.PLATFORM_AUTH0_DOMAIN }}
-          PLATFORM_AUTH0_CLIENT_ID: ${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}
-          USERS_TABLE: ${{ steps.components.outputs.users_table }}
-        run: |
-          python3 - <<'PYEOF'
-          import boto3
-          import os
-          from datetime import datetime, timezone
-
-          now = datetime.now(timezone.utc).isoformat()
-          table_name = os.environ['USERS_TABLE']
-          auth0_domain = os.environ['PLATFORM_AUTH0_DOMAIN']
-          auth0_client_id = os.environ['PLATFORM_AUTH0_CLIENT_ID']
-
-          dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
-          table = dynamodb.Table(table_name)
-
-          table.update_item(
-              Key={'PK': 'TENANT#platform', 'SK': 'METADATA'},
-              UpdateExpression=(
-                  'SET #slug = :slug, #name = :name, organization_id = :org_id, '
-                  'environment_type = :env_type, #status = :status, '
-                  'idp_config_override = :idp, updated_at = :updated_at, '
-                  'id = if_not_exists(id, :id), '
-                  'created_at = if_not_exists(created_at, :created_at)'
-              ),
-              ExpressionAttributeNames={
-                  '#slug': 'slug',
-                  '#name': 'name',
-                  '#status': 'status',
-              },
-              ExpressionAttributeValues={
-                  ':slug': 'platform',
-                  ':name': 'Platform Administration',
-                  ':org_id': 'platform',
-                  ':env_type': 'production',
-                  ':status': 'active',
-                  ':idp': {
-                      'domain': auth0_domain,
-                      'client_id': auth0_client_id,
-                  },
-                  ':id': 'platform',
-                  ':created_at': now,
-                  ':updated_at': now,
-              },
-          )
-          print(f"✅ Platform tenant bootstrapped in {table_name}")
-          PYEOF
+          AWS_REGION: us-east-1
+          PORTH_ENVIRONMENT: prod
+        run: python3 scripts/bootstrap_platform_tenant.py
 
       - name: Sync assets to S3
         run: |
