@@ -44,10 +44,10 @@ jobs:
           [ -z "${{ secrets.PLATFORM_AUTH0_DOMAIN }}" ]     && MISSING+=("PLATFORM_AUTH0_DOMAIN")
           [ -z "${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}" ]  && MISSING+=("PLATFORM_AUTH0_CLIENT_ID")
           if [ ${#MISSING[@]} -gt 0 ]; then
-            echo "❌ Missing required secrets: ${MISSING[*]}"
+            echo "\u274c Missing required secrets: ${MISSING[*]}"
             exit 1
           fi
-          echo "✅ All required secrets present"
+          echo "\u2705 All required secrets present"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -101,6 +101,10 @@ jobs:
             --output text)
           echo "bucket=$BUCKET" >> $GITHUB_OUTPUT
           echo "cf_id=$CF_ID" >> $GITHUB_OUTPUT
+
+      - name: Install porth-common
+        run: |
+          pip install "git+https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/dragoninex1le/Components.git"
 
       - name: Bootstrap platform tenant
         env:
