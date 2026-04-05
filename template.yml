@@ -21,20 +21,21 @@ Parameters:
   AcmCertificateArn:
     Type: String
     NoEcho: true
-    Description: >
-      ARN of the ACM certificate for the CloudFront distribution.
-      Must be in us-east-1 (CloudFront requirement). Must cover the value
-      supplied for CloudFrontAlias.
     AllowedPattern: 'arn:aws:acm:us-east-1:[0-9]{12}:certificate/[a-f0-9-]+'
     ConstraintDescription: Must be a valid ACM certificate ARN in us-east-1.
+    Description: >
+      ARN of the ACM certificate covering the CloudFront aliases.
+      Must be in us-east-1 regardless of the stack region.
 
   CloudFrontAlias:
     Type: String
     Default: '*.porth-sample.components-dev.estynsoftware.cloud'
-    Description: >
-      Alternate domain name (CNAME alias) for the CloudFront distribution.
-      Must be covered by the ACM certificate supplied in AcmCertificateArn.
-      Override per environment (e.g. *.porth-sample.components-staging.estynsoftware.cloud).
+    Description: Wildcard alternate domain name for tenant subdomains.
+
+  CloudFrontApexAlias:
+    Type: String
+    Default: 'porth-sample.components-dev.estynsoftware.cloud'
+    Description: Apex alternate domain name — used as the platform admin entry point.
 
 Resources:
 
@@ -81,17 +82,18 @@ Resources:
     Type: AWS::CloudFront::Distribution
     Properties:
       DistributionConfig:
-        Aliases:
-          - !Ref CloudFrontAlias
-        ViewerCertificate:
-          AcmCertificateArn: !Ref AcmCertificateArn
-          SslSupportMethod: sni-only
-          MinimumProtocolVersion: TLSv1.2_2021
         DefaultRootObject: index.html
         Enabled: true
         HttpVersion: http2
         IPV6Enabled: true
         Comment: !Sub Porth Admin UI - ${Environment}
+        Aliases:
+          - !Ref CloudFrontAlias
+          - !Ref CloudFrontApexAlias
+        ViewerCertificate:
+          AcmCertificateArn: !Ref AcmCertificateArn
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
         # SPA fallback: serve index.html for all 403/404 so React Router handles routing
         CustomErrorResponses:
           - ErrorCode: 403
@@ -129,13 +131,7 @@ Outputs:
       Name: !Sub ${AWS::StackName}-CloudFrontDistributionId
 
   CloudFrontUrl:
-    Description: Public URL of the Porth Admin UI (CloudFront default domain)
+    Description: Public URL of the Porth Admin UI
     Value: !Sub https://${CloudFrontDistribution.DomainName}
     Export:
       Name: !Sub ${AWS::StackName}-CloudFrontUrl
-
-  CloudFrontDomainName:
-    Description: CloudFront domain name — use as Route 53 alias target for the CloudFrontAlias record
-    Value: !GetAtt CloudFrontDistribution.DomainName
-    Export:
-      Name: !Sub ${AWS::StackName}-CloudFrontDomainName
