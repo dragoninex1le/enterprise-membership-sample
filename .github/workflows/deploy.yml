@@ -41,19 +41,20 @@ jobs:
         run: |
           MISSING=()
           [ -z "${{ secrets.ACM_CERTIFICATE_ARN }}" ]       && MISSING+=("ACM_CERTIFICATE_ARN")
+          [ -z "${{ secrets.GH_PAT }}" ]                    && MISSING+=("GH_PAT")
+          [ -z "${{ secrets.AWS_DEPLOY_ROLE_ARN }}" ]       && MISSING+=("AWS_DEPLOY_ROLE_ARN")
           [ -z "${{ secrets.PLATFORM_AUTH0_DOMAIN }}" ]     && MISSING+=("PLATFORM_AUTH0_DOMAIN")
           [ -z "${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}" ]  && MISSING+=("PLATFORM_AUTH0_CLIENT_ID")
-          [ -z "${{ secrets.GH_PAT }}" ]                    && MISSING+=("GH_PAT")
           if [ ${#MISSING[@]} -gt 0 ]; then
-            echo "\u274c Missing required secrets: ${MISSING[*]}"
+            echo "❌ Missing required secrets: ${MISSING[*]}"
             exit 1
           fi
-          echo "\u2705 All required secrets present"
+          echo "✅ All required secrets present"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Resolve porth-components stack outputs
@@ -65,10 +66,10 @@ jobs:
               --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
               --output text
           }
-          echo "PORTH_API_URL=$(get_output PorthApiUrl)"                              >> $GITHUB_ENV
-          echo "PORTH_PERMISSIONS_TABLE=$(get_output PermissionsTableName)"           >> $GITHUB_ENV
-          echo "PORTH_ROLES_TABLE=$(get_output RolesTableName)"                       >> $GITHUB_ENV
-          echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$(get_output ClaimMappingConfigsTableName)" >> $GITHUB_ENV
+          echo "PORTH_API_URL=$(get_output PorthApiUrl)"                                       >> $GITHUB_ENV
+          echo "PORTH_PERMISSIONS_TABLE=$(get_output PermissionsTableName)"                    >> $GITHUB_ENV
+          echo "PORTH_ROLES_TABLE=$(get_output RolesTableName)"                                >> $GITHUB_ENV
+          echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$(get_output ClaimMappingConfigsTableName)"  >> $GITHUB_ENV
 
       - name: Install frontend dependencies
         working-directory: frontend
@@ -83,6 +84,7 @@ jobs:
           VITE_AUTH0_CLIENT_ID: ${{ secrets.VITE_AUTH0_CLIENT_ID }}
           VITE_AUTH0_AUDIENCE: ${{ secrets.VITE_AUTH0_AUDIENCE }}
 
+      # ── Step 1: SAM deploy ────────────────────────────────────────────────
       - name: SAM deploy (infrastructure)
         run: |
           sam deploy \
@@ -90,7 +92,7 @@ jobs:
             --region ${{ env.AWS_REGION }} \
             --capabilities CAPABILITY_IAM \
             --parameter-overrides \
-              Environment=prod \
+              Environment=dev \
               PorthApiUrl=${{ env.PORTH_API_URL }} \
               AcmCertificateArn=${{ secrets.ACM_CERTIFICATE_ARN }} \
             --no-fail-on-empty-changeset
@@ -106,13 +108,93 @@ jobs:
             --stack-name ${{ env.SAM_STACK_NAME }} \
             --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" \
             --output text)
-          echo "bucket=$BUCKET" >> $GITHUB_OUTPUT
-          echo "cf_id=$CF_ID" >> $GITHUB_OUTPUT
+          CLEANUP_FN=$(aws cloudformation describe-stacks \
+            --stack-name porth-qa-tools \
+            --query "Stacks[0].Outputs[?OutputKey=='QaCleanupFunctionArn'].OutputValue" \
+            --output text)
+          echo "bucket=$BUCKET"       >> $GITHUB_OUTPUT
+          echo "cf_id=$CF_ID"         >> $GITHUB_OUTPUT
+          echo "cleanup_fn=$CLEANUP_FN" >> $GITHUB_OUTPUT
 
-      - name: Install porth-common
+      # ── Step 2: Cleanup (pre-test) ────────────────────────────────────────
+      - name: Cleanup (pre-test)
         run: |
-          pip install "git+https://${{ secrets.GH_PAT }}@github.com/dragoninex1le/Components.git"
+          python3 - <<'EOF'
+          import boto3, json, sys
 
+          TABLES = [
+              "porth-users-dev",
+              "porth-tenants-dev",
+              "porth-permissions-dev",
+              "porth-roles-dev",
+              "porth-claim-mapping-configs-dev",
+              "porth-org-units-dev",
+          ]
+          fn = "${{ steps.outputs.outputs.cleanup_fn }}"
+          client = boto3.client("lambda", region_name="us-east-1")
+          failed = False
+
+          print("Pre-test cleanup")
+          for table in TABLES:
+              payload = {"body": json.dumps({"table_name": table})}
+              resp = client.invoke(FunctionName=fn, Payload=json.dumps(payload))
+              result = json.loads(resp["Payload"].read())
+              body = json.loads(result.get("body", "{}"))
+              if result.get("statusCode", 200) == 200:
+                  print(f"  \u2705 {table}: deleted {body.get('deleted', '?')} items")
+              else:
+                  print(f"  \u274c {table}: {body.get('error', result)}", file=sys.stderr)
+                  failed = True
+
+          sys.exit(1 if failed else 0)
+          EOF
+
+      # ── Step 3: Install porth-common + run E2E tests ──────────────────────
+      - name: Install porth-common
+        run: pip install "git+https://${{ secrets.GH_PAT }}@github.com/dragoninex1le/Components.git"
+
+      - name: Run E2E tests
+        run: |
+          git clone --depth 1 \
+            "https://${{ secrets.GH_PAT }}@github.com/dragoninex1le/Components.git" \
+            /tmp/components
+          PORTH_API_URL="${{ env.PORTH_API_URL }}" \
+            bash /tmp/components/scripts/api-tests/run-all.sh
+
+      # ── Step 4: Cleanup (post-test) ───────────────────────────────────────
+      - name: Cleanup (post-test)
+        run: |
+          python3 - <<'EOF'
+          import boto3, json, sys
+
+          TABLES = [
+              "porth-users-dev",
+              "porth-tenants-dev",
+              "porth-permissions-dev",
+              "porth-roles-dev",
+              "porth-claim-mapping-configs-dev",
+              "porth-org-units-dev",
+          ]
+          fn = "${{ steps.outputs.outputs.cleanup_fn }}"
+          client = boto3.client("lambda", region_name="us-east-1")
+          failed = False
+
+          print("Post-test cleanup")
+          for table in TABLES:
+              payload = {"body": json.dumps({"table_name": table})}
+              resp = client.invoke(FunctionName=fn, Payload=json.dumps(payload))
+              result = json.loads(resp["Payload"].read())
+              body = json.loads(result.get("body", "{}"))
+              if result.get("statusCode", 200) == 200:
+                  print(f"  \u2705 {table}: deleted {body.get('deleted', '?')} items")
+              else:
+                  print(f"  \u274c {table}: {body.get('error', result)}", file=sys.stderr)
+                  failed = True
+
+          sys.exit(1 if failed else 0)
+          EOF
+
+      # ── Step 5: Bootstrap platform tenant ────────────────────────────────
       - name: Bootstrap platform tenant
         env:
           PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
@@ -122,7 +204,6 @@ jobs:
 
       - name: Sync assets to S3
         run: |
-          # Long-cache all hashed assets, no-cache index.html
           aws s3 sync frontend/dist s3://${{ steps.outputs.outputs.bucket }} \
             --delete \
             --exclude "index.html" \
