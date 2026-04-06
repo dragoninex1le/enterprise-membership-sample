@@ -176,6 +176,7 @@ jobs:
 
       # ── Step 4: Cleanup (post-test) ───────────────────────────────────────
       - name: Cleanup (post-test)
+        if: always()
         run: |
           python3 - <<'EOF'
           import boto3, json, sys
