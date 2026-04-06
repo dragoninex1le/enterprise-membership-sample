@@ -15,7 +15,19 @@ function getTenantIdFromSubdomain(): string | null {
   }
   // {tenant-id}.example.com → tenant-id
   const parts = hostname.split('.')
-  return parts.length >= 3 ? parts[0] : null
+  if (parts.length < 3) return null
+
+  const subdomain = parts[0]
+
+  // If the subdomain matches the platform apex (i.e. we're at the root admin
+  // URL rather than a customer tenant subdomain), use the platform tenant so
+  // the UI picks up platform-level IdP configuration.
+  const platformApex = import.meta.env.VITE_PLATFORM_APEX
+  if (platformApex && subdomain === platformApex) {
+    return 'platform'
+  }
+
+  return subdomain
 }
 
 export function useTenantConfig(): {
