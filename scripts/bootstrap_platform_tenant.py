@@ -1,4 +1,4 @@
-"""Bootstrap platform tenant permissions, role, and claim mapping config in DynamoDB.
+"""Bootstrap platform tenant permissions, role, and claim role mapping in DynamoDB.
 
 Idempotently creates the following for the reserved 'platform' tenant:
 
@@ -28,9 +28,10 @@ import os
 
 ENVIRONMENT = os.environ.get("PORTH_ENVIRONMENT", "prod")
 
-from porth_common.repositories.permission_repo import PermissionRepository
-from porth_common.repositories.role_repo import RoleRepository
-from porth_common.repositories.claim_mapping_config_repo import ClaimMappingConfigRepository
+from porth_common.providers.aws.repositories.permission_repo import PermissionRepository
+from porth_common.providers.aws.repositories.role_repo import RoleRepository
+from porth_common.providers.aws.repositories.claim_mapping_config_repo import ClaimMappingConfigRepository
+from porth_common.services.claim_mapping_codegen import MappingCodegen
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -130,7 +131,7 @@ def bootstrap_permissions(repo: PermissionRepository) -> list[str]:
     """Idempotently register platform admin permissions via PermissionRepository."""
     permission_keys: list[str] = []
     for perm in PLATFORM_PERMISSIONS:
-        result = repo.register(
+        repo.register(
             tenant_id=TENANT_ID,
             app_namespace=APP_NAMESPACE,
             key=perm["key"],
@@ -139,7 +140,6 @@ def bootstrap_permissions(repo: PermissionRepository) -> list[str]:
             description=perm.get("description"),
             sort_order=perm.get("sort_order", 0),
         )
-        action = "updated" if repo.get_by_key(TENANT_ID, APP_NAMESPACE, perm["key"]) else "created"
         print(f"    registered  {perm['key']}")
         permission_keys.append(perm["key"])
     return permission_keys
@@ -201,20 +201,18 @@ def bootstrap_claim_mapping_config(
         "default_roles": [],
     }
 
-    compiled_hash = hashlib.sha256(
-        json.dumps(mapping_source, sort_keys=True).encode()
-    ).hexdigest()
+    compiled_source = MappingCodegen.generate(mapping_source)
+    compiled_hash = hashlib.sha256(compiled_source.encode()).hexdigest()
 
-    latest = repo.get_latest(TENANT_ID, APP_NAMESPACE)
+    latest = repo.get_latest(TENANT_ID)
     if latest and latest.compiled_hash == compiled_hash:
         print(f"    exists   claim mapping config v{latest.version} (no change)")
         return
 
     config = repo.save(
         tenant_id=TENANT_ID,
-        app_namespace=APP_NAMESPACE,
         mapping_source=mapping_source,
-        compiled_ops=mapping_source["role_mappings"],
+        compiled_source=compiled_source,
         compiled_hash=compiled_hash,
     )
     print(f"    saved    claim mapping config v{config.version}")
