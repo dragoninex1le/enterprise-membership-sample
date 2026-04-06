@@ -1,4 +1,4 @@
-"""Bootstrap platform tenant permissions, role, and claim role mapping in DynamoDB.
+"""Bootstrap platform tenant permissions, role, and claim mapping config in DynamoDB.
 
 Idempotently creates the following for the reserved 'platform' tenant:
 
@@ -16,17 +16,21 @@ Idempotently creates the following for the reserved 'platform' tenant:
        platform-admin role via a versioned ClaimMappingConfig entry.
        A new version is only written when the compiled_hash changes.
 
+Table names are resolved via porth_common.config (PORTH_PERMISSIONS_TABLE,
+PORTH_ROLES_TABLE, PORTH_CLAIM_MAPPING_CONFIGS_TABLE env vars), which are
+set from the porth-components CloudFormation stack outputs in CI.
+
 Usage:
-    PORTH_ENVIRONMENT=prod AWS_REGION=us-east-1 python3 scripts/bootstrap_platform_tenant.py
+    PORTH_PERMISSIONS_TABLE=porth-permissions-dev \\
+    PORTH_ROLES_TABLE=porth-roles-dev \\
+    PORTH_CLAIM_MAPPING_CONFIGS_TABLE=porth-claim-mapping-configs-dev \\
+    python3 scripts/bootstrap_platform_tenant.py
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import os
-
-ENVIRONMENT = os.environ.get("PORTH_ENVIRONMENT", "prod")
 
 from porth_common.providers.aws.repositories.permission_repo import PermissionRepository
 from porth_common.providers.aws.repositories.role_repo import RoleRepository
@@ -223,13 +227,12 @@ def bootstrap_claim_mapping_config(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    perm_repo = PermissionRepository(table_name=f"porth-permissions-{ENVIRONMENT}")
-    role_repo = RoleRepository(table_name=f"porth-roles-{ENVIRONMENT}")
-    config_repo = ClaimMappingConfigRepository(
-        table_name=f"porth-claim-mapping-configs-{ENVIRONMENT}"
-    )
+    # Table names resolved from porth_common.config via env vars set by CI
+    perm_repo = PermissionRepository()
+    role_repo = RoleRepository()
+    config_repo = ClaimMappingConfigRepository()
 
-    print(f"Bootstrapping platform tenant  [environment={ENVIRONMENT}]")
+    print("Bootstrapping platform tenant")
 
     print("\n1. Permissions")
     permission_keys = bootstrap_permissions(perm_repo)

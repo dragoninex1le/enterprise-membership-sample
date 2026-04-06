@@ -56,13 +56,19 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Resolve Porth API URL from CloudFormation
+      - name: Resolve porth-components stack outputs
         run: |
-          PORTH_API_URL=$(aws cloudformation describe-stacks \
-            --stack-name porth-components \
-            --query "Stacks[0].Outputs[?OutputKey=='PorthApiUrl'].OutputValue" \
-            --output text)
-          echo "PORTH_API_URL=$PORTH_API_URL" >> $GITHUB_ENV
+          STACK=porth-components
+          get_output() {
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text
+          }
+          echo "PORTH_API_URL=$(get_output PorthApiUrl)"                              >> $GITHUB_ENV
+          echo "PORTH_PERMISSIONS_TABLE=$(get_output PermissionsTableName)"           >> $GITHUB_ENV
+          echo "PORTH_ROLES_TABLE=$(get_output RolesTableName)"                       >> $GITHUB_ENV
+          echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$(get_output ClaimMappingConfigsTableName)" >> $GITHUB_ENV
 
       - name: Install frontend dependencies
         working-directory: frontend
@@ -109,7 +115,9 @@ jobs:
 
       - name: Bootstrap platform tenant
         env:
-          PORTH_ENVIRONMENT: dev
+          PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
+          PORTH_ROLES_TABLE: ${{ env.PORTH_ROLES_TABLE }}
+          PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
         run: python3 scripts/bootstrap_platform_tenant.py
 
       - name: Sync assets to S3
