@@ -1,50 +1,43 @@
-"""Bootstrap platform tenant permissions, role, and claim mapping config in DynamoDB.
+"""Bootstrap platform tenant permissions, role, and claim mapping config.
 
 Idempotently creates the following for the reserved 'platform' tenant:
 
-  1. Permissions (porth-permissions-{env} table)
-     — One permission per atomic platform admin capability
+  1. Permissions       — via porth_common PermissionRepository
+  2. platform-admin    — via porth_common RoleRepository (system role)
+  3. Role–permissions  — via porth_common RoleRepository.set_role_permissions
+  4. Claim mapping     — via porth_common ClaimMappingConfigRepository
 
-  2. platform-admin role (porth-roles-{env} table)
-     — System role (undeletable), scoped to tenant_id='platform'
+Table names are resolved from env vars by porth_common.config:
+    PORTH_PERMISSIONS_TABLE
+    PORTH_ROLES_TABLE
+    PORTH_CLAIM_MAPPING_CONFIGS_TABLE
 
-  3. Role–permission links (porth-roles-{env} table)
-     — Associates all platform permissions to the platform-admin role
+These are set in CI from the porth-components CloudFormation stack outputs.
 
-  4. Claim mapping config v2 (porth-claim-mapping-configs-{env} table)
-     — Maps JWT claim https://porth.io/roles='platform_admin' to the
-       platform-admin role via a versioned ClaimMappingConfig entry.
-       A new version is only written when the compiled_hash changes.
-
-Table names are resolved via porth_common.config (PORTH_PERMISSIONS_TABLE,
-PORTH_ROLES_TABLE, PORTH_CLAIM_MAPPING_CONFIGS_TABLE env vars), which are
-set from the porth-components CloudFormation stack outputs in CI.
-
-Usage:
+Usage (local):
     PORTH_PERMISSIONS_TABLE=porth-permissions-dev \\
     PORTH_ROLES_TABLE=porth-roles-dev \\
     PORTH_CLAIM_MAPPING_CONFIGS_TABLE=porth-claim-mapping-configs-dev \\
-    python3 scripts/bootstrap_platform_tenant.py
+    AWS_REGION=us-east-1 python3 scripts/bootstrap_platform_tenant.py
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 
+from porth_common.providers.aws.repositories.claim_mapping_config_repo import (
+    ClaimMappingConfigRepository,
+)
 from porth_common.providers.aws.repositories.permission_repo import PermissionRepository
 from porth_common.providers.aws.repositories.role_repo import RoleRepository
-from porth_common.providers.aws.repositories.claim_mapping_config_repo import ClaimMappingConfigRepository
 from porth_common.services.claim_mapping_codegen import MappingCodegen
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Constants
 # ---------------------------------------------------------------------------
 
 TENANT_ID = "platform"
 APP_NAMESPACE = "porth-platform"
-CLAIM_KEY = "https://porth.io/roles"
-CLAIM_VALUE = "platform_admin"
 
 # ---------------------------------------------------------------------------
 # Platform admin permissions
@@ -57,6 +50,7 @@ PLATFORM_PERMISSIONS = [
         "display_name": "View Tenants",
         "description": "View tenant records and configuration",
         "category": "Tenants",
+        "icon_hint": None,
         "sort_order": 10,
     },
     {
@@ -64,6 +58,7 @@ PLATFORM_PERMISSIONS = [
         "display_name": "Create Tenants",
         "description": "Provision new tenants on the platform",
         "category": "Tenants",
+        "icon_hint": None,
         "sort_order": 20,
     },
     {
@@ -71,6 +66,7 @@ PLATFORM_PERMISSIONS = [
         "display_name": "Update Tenants",
         "description": "Modify tenant configuration and IDP settings",
         "category": "Tenants",
+        "icon_hint": None,
         "sort_order": 30,
     },
     {
@@ -78,6 +74,7 @@ PLATFORM_PERMISSIONS = [
         "display_name": "Delete Tenants",
         "description": "Remove tenants from the platform",
         "category": "Tenants",
+        "icon_hint": None,
         "sort_order": 40,
     },
     # Organisations
@@ -86,6 +83,7 @@ PLATFORM_PERMISSIONS = [
         "display_name": "View Organisations",
         "description": "View organisation records",
         "category": "Organisations",
+        "icon_hint": None,
         "sort_order": 10,
     },
     {
@@ -93,6 +91,7 @@ PLATFORM_PERMISSIONS = [
         "display_name": "Create Organisations",
         "description": "Create new organisations",
         "category": "Organisations",
+        "icon_hint": None,
         "sort_order": 20,
     },
     {
@@ -100,6 +99,7 @@ PLATFORM_PERMISSIONS = [
         "display_name": "Update Organisations",
         "description": "Modify organisation details",
         "category": "Organisations",
+        "icon_hint": None,
         "sort_order": 30,
     },
     {
@@ -107,6 +107,7 @@ PLATFORM_PERMISSIONS = [
         "display_name": "Delete Organisations",
         "description": "Remove organisations from the platform",
         "category": "Organisations",
+        "icon_hint": None,
         "sort_order": 40,
     },
     # Settings
@@ -115,6 +116,7 @@ PLATFORM_PERMISSIONS = [
         "display_name": "View Platform Settings",
         "description": "View platform-level configuration",
         "category": "Settings",
+        "icon_hint": None,
         "sort_order": 10,
     },
     {
@@ -122,17 +124,35 @@ PLATFORM_PERMISSIONS = [
         "display_name": "Edit Platform Settings",
         "description": "Modify platform-level configuration",
         "category": "Settings",
+        "icon_hint": None,
         "sort_order": 20,
     },
 ]
+
+# Claim mapping config — maps https://porth.io/roles JWT claim to roles.
+# schema_version must be '2.0' (enforced by MappingSource Pydantic model).
+MAPPING_SOURCE: dict = {
+    "schema_version": "2.0",
+    "fields": [
+        {
+            "name": "roles",
+            "source": "https://porth.io/roles",
+            "type": "collection",
+            "required": False,
+            "ops": [{"op": "resolve_roles"}],
+        },
+    ],
+    "default_roles": [],
+}
 
 
 # ---------------------------------------------------------------------------
 # Bootstrap steps
 # ---------------------------------------------------------------------------
 
+
 def bootstrap_permissions(repo: PermissionRepository) -> list[str]:
-    """Idempotently register platform admin permissions via PermissionRepository."""
+    """Idempotently register all platform admin permissions."""
     permission_keys: list[str] = []
     for perm in PLATFORM_PERMISSIONS:
         repo.register(
@@ -141,8 +161,9 @@ def bootstrap_permissions(repo: PermissionRepository) -> list[str]:
             key=perm["key"],
             display_name=perm["display_name"],
             category=perm["category"],
-            description=perm.get("description"),
-            sort_order=perm.get("sort_order", 0),
+            description=perm["description"],
+            icon_hint=perm["icon_hint"],
+            sort_order=perm["sort_order"],
         )
         print(f"    registered  {perm['key']}")
         permission_keys.append(perm["key"])
@@ -152,22 +173,22 @@ def bootstrap_permissions(repo: PermissionRepository) -> list[str]:
 def bootstrap_role(repo: RoleRepository) -> str:
     """Idempotently create the platform-admin system role.
 
-    Returns the role ID (existing or newly created).
+    Returns the role UUID.
     """
-    existing = [
-        r for r in repo.search_roles(TENANT_ID, is_system=True)
-        if r and r.name == "platform-admin"
-    ]
-    if existing:
-        role = existing[0]
-        print(f"    exists   platform-admin (id={role.id})")
-        return role.id
+    existing = repo.search_roles(
+        tenant_id=TENANT_ID, query="platform-admin", is_system=True
+    )
+    for role in existing:
+        if role.name == "platform-admin":
+            print(f"    exists   platform-admin (id={role.id})")
+            return role.id
 
     role = repo.create_role(
         tenant_id=TENANT_ID,
         name="platform-admin",
         description="System role for platform-level tenant administration",
         is_system=True,
+        source_key="platform_admin",
     )
     print(f"    created  platform-admin (id={role.id})")
     return role.id
@@ -177,35 +198,19 @@ def bootstrap_role_permissions(
     repo: RoleRepository, role_id: str, permission_keys: list[str]
 ) -> None:
     """Replace all permissions on the platform-admin role."""
-    repo.set_role_permissions(role_id, permission_keys, TENANT_ID)
+    repo.set_role_permissions(
+        role_id=role_id,
+        permission_keys=permission_keys,
+        tenant_id=TENANT_ID,
+    )
     print(f"    set {len(permission_keys)} permissions on platform-admin")
 
 
 def bootstrap_claim_mapping_config(
     repo: ClaimMappingConfigRepository, role_id: str
 ) -> None:
-    """Idempotently save a v2 ClaimMappingConfig for the platform claim-to-role mapping.
-
-    A new version is only written when the compiled_hash differs from the latest,
-    avoiding unnecessary version churn on repeated deploys.
-    """
-    mapping_source = {
-        "version": 2,
-        "fields": [],
-        "role_mappings": [
-            {
-                "claim_key": CLAIM_KEY,
-                "claim_value": CLAIM_VALUE,
-                "role_id": role_id,
-                "match_type": "exact",
-                "priority": 100,
-                "value_transform": "none",
-            }
-        ],
-        "default_roles": [],
-    }
-
-    compiled_source = MappingCodegen.generate(mapping_source)
+    """Idempotently create/update the claim mapping config."""
+    compiled_source = MappingCodegen.generate(MAPPING_SOURCE)
     compiled_hash = hashlib.sha256(compiled_source.encode()).hexdigest()
 
     latest = repo.get_latest(TENANT_ID)
@@ -215,7 +220,7 @@ def bootstrap_claim_mapping_config(
 
     config = repo.save(
         tenant_id=TENANT_ID,
-        mapping_source=mapping_source,
+        mapping_source=MAPPING_SOURCE,
         compiled_source=compiled_source,
         compiled_hash=compiled_hash,
     )
@@ -226,8 +231,8 @@ def bootstrap_claim_mapping_config(
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
-    # Table names resolved from porth_common.config via env vars set by CI
     perm_repo = PermissionRepository()
     role_repo = RoleRepository()
     config_repo = ClaimMappingConfigRepository()
