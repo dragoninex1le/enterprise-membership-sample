@@ -161,8 +161,18 @@ jobs:
           git clone --depth 1 \
             "https://${{ secrets.GH_PAT }}@github.com/dragoninex1le/Components.git" \
             /tmp/components
+          set +e
           PORTH_API_URL="${{ env.PORTH_API_URL }}" \
-            bash /tmp/components/scripts/api-tests/run-all.sh
+            bash /tmp/components/scripts/api-tests/run-all.sh 2>&1 | tee /tmp/e2e-output.txt
+          TEST_EXIT=${PIPESTATUS[0]}
+          set -e
+          echo ""
+          echo "======================================"
+          echo "=== FAILED TESTS (from above run) ==="
+          echo "======================================"
+          grep -a "FAIL" /tmp/e2e-output.txt || echo "  (no FAIL lines found)"
+          echo "======================================"
+          exit $TEST_EXIT
 
       # ── Step 4: Cleanup (post-test) ───────────────────────────────────────
       - name: Cleanup (post-test)
