@@ -109,7 +109,7 @@ jobs:
 
       - name: Bootstrap platform tenant
         env:
-          PORTH_ENVIRONMENT: prod
+          PORTH_ENVIRONMENT: dev
         run: python3 scripts/bootstrap_platform_tenant.py
 
       - name: Sync assets to S3
