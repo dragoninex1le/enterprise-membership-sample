@@ -35,7 +35,7 @@ function TenantBootstrap() {
         ...(config.audience ? { audience: config.audience } : {}),
       }}
     >
-      <App />
+      <App tenantConfig={config} />
     </Auth0Provider>
   )
 }

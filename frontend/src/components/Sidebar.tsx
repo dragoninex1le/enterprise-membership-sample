@@ -13,10 +13,12 @@ const sectionLabel = (label: string) => (
 )
 
 export default function Sidebar() {
-  const isAdmin = useHasRole('admin')
-  const canSeeAR = useHasRole('ar_clerk', 'controller', 'admin')
-  const canSeeAP = useHasRole('ap_clerk', 'controller', 'admin')
-  const canSeeApprovals = useHasRole('controller', 'admin')
+  // 'platform-admin' is the Porth role for Estyn operators (platform administrators).
+  // Tenant-level roles (ar_clerk, etc.) are configured per-tenant in claim role mappings.
+  const isPlatformAdmin = useHasRole('platform-admin')
+  const canSeeAR = useHasRole('ar_clerk', 'controller', 'platform-admin')
+  const canSeeAP = useHasRole('ap_clerk', 'controller', 'platform-admin')
+  const canSeeApprovals = useHasRole('controller', 'platform-admin')
 
   return (
     <nav className="w-56 bg-white border-r border-gray-200 flex flex-col py-4 shrink-0">
@@ -46,7 +48,7 @@ export default function Sidebar() {
           </NavLink>
         )}
 
-        {isAdmin && (
+        {isPlatformAdmin && (
           <>
             {sectionLabel('Platform Admin')}
             <NavLink to="/admin/platform/organizations" className={linkClass}>
