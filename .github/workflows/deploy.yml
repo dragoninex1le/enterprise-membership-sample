@@ -84,9 +84,6 @@ jobs:
         env:
           VITE_API_BASE_URL: ${{ env.PORTH_API_URL }}
           VITE_PLATFORM_APEX: porth-sample
-          VITE_AUTH0_DOMAIN: ${{ secrets.VITE_AUTH0_DOMAIN }}
-          VITE_AUTH0_CLIENT_ID: ${{ secrets.VITE_AUTH0_CLIENT_ID }}
-          VITE_AUTH0_AUDIENCE: ${{ secrets.VITE_AUTH0_AUDIENCE }}
 
       # ── Step 1: SAM deploy ────────────────────────────────────────────
       - name: SAM deploy (infrastructure)
@@ -203,6 +200,40 @@ jobs:
           PORTH_ROLES_TABLE: ${{ env.PORTH_ROLES_TABLE }}
           PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
         run: python3 scripts/bootstrap_platform_tenant.py
+
+      - name: Create platform org and tenant
+        run: |
+          RESPONSE_FILE="/tmp/platform-org.json"
+          PAYLOAD=$(cat <<EOF
+          {
+            "name": "Platform",
+            "slug": "platform",
+            "tenant": {
+              "tenant_id": "platform",
+              "display_name": "Platform",
+              "environment_type": "production",
+              "idp_config_override": {
+                "domain": "${{ secrets.PLATFORM_AUTH0_DOMAIN }}",
+                "client_id": "${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}"
+              }
+            }
+          }
+          EOF
+          )
+          STATUS=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
+            -X POST "${{ env.PORTH_API_URL }}/organizations" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+          echo "POST /organizations/platform → HTTP $STATUS"
+          if [[ "$STATUS" == "200" || "$STATUS" == "201" ]]; then
+            echo "Platform org and tenant created"
+          elif [[ "$STATUS" == "409" ]]; then
+            echo "Platform org/tenant already exists — skipping"
+          else
+            echo "Unexpected status $STATUS:"
+            cat "$RESPONSE_FILE"
+            exit 1
+          fi
 
       - name: Sync assets to S3
         run: |
