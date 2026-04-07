@@ -220,7 +220,7 @@ jobs:
           }
           EOF
           )
-          STATUS=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
+          STATUS=$(curl -s -L -o "$RESPONSE_FILE" -w "%{http_code}" \
             -X POST "${{ env.PORTH_API_URL }}/organizations" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD")
