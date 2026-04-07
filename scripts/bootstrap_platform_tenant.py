@@ -1,47 +1,43 @@
-"""Bootstrap platform tenant permissions, role, and claim role mapping in DynamoDB.
+"""Bootstrap platform tenant permissions, role, and claim mapping config.
 
 Idempotently creates the following for the reserved 'platform' tenant:
 
-  1. Permissions (porth-permissions table)
-     — One permission per atomic platform admin capability
+  1. Permissions       — via porth_common PermissionRepository
+  2. platform-admin    — via porth_common RoleRepository (system role)
+  3. Role–permissions  — via porth_common RoleRepository.set_role_permissions
+  4. Claim mapping     — via porth_common ClaimMappingConfigRepository
 
-  2. platform-admin role (porth-roles table)
-     — System role (undeletable), scoped to tenant_id='platform'
+Table names are resolved from env vars by porth_common.config:
+    PORTH_PERMISSIONS_TABLE
+    PORTH_ROLES_TABLE
+    PORTH_CLAIM_MAPPING_CONFIGS_TABLE
 
-  3. Role–permission links (porth-roles table)
-     — Associates all platform permissions to the platform-admin role
+These are set in CI from the porth-components CloudFormation stack outputs.
 
-  4. Claim role mapping (porth-claim-role-mappings table)
-     — Maps JWT claim https://porth.io/roles='platform_admin' to the platform-admin role
-
-Usage:
-    PORTH_ENVIRONMENT=prod AWS_REGION=us-east-1 python3 scripts/bootstrap_platform_tenant.py
+Usage (local):
+    PORTH_PERMISSIONS_TABLE=porth-permissions-dev \\
+    PORTH_ROLES_TABLE=porth-roles-dev \\
+    PORTH_CLAIM_MAPPING_CONFIGS_TABLE=porth-claim-mapping-configs-dev \\
+    AWS_REGION=us-east-1 python3 scripts/bootstrap_platform_tenant.py
 """
 
 from __future__ import annotations
 
-import os
-import uuid
-from datetime import datetime, timezone
+import hashlib
 
-import boto3
-from boto3.dynamodb.conditions import Key
+from porth_common.providers.aws.repositories.claim_mapping_config_repo import (
+    ClaimMappingConfigRepository,
+)
+from porth_common.providers.aws.repositories.permission_repo import PermissionRepository
+from porth_common.providers.aws.repositories.role_repo import RoleRepository
+from porth_common.services.claim_mapping_codegen import MappingCodegen
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Constants
 # ---------------------------------------------------------------------------
-
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-ENVIRONMENT = os.environ.get("PORTH_ENVIRONMENT", "prod")
 
 TENANT_ID = "platform"
 APP_NAMESPACE = "porth-platform"
-CLAIM_KEY = "https://porth.io/roles"
-CLAIM_VALUE = "platform_admin"
-
-PERMISSIONS_TABLE = f"porth-permissions-{ENVIRONMENT}"
-ROLES_TABLE = f"porth-roles-{ENVIRONMENT}"
-CLAIM_ROLE_MAPPINGS_TABLE = f"porth-claim-role-mappings-{ENVIRONMENT}"
 
 # ---------------------------------------------------------------------------
 # Platform admin permissions
@@ -54,6 +50,7 @@ PLATFORM_PERMISSIONS = [
         "display_name": "View Tenants",
         "description": "View tenant records and configuration",
         "category": "Tenants",
+        "icon_hint": None,
         "sort_order": 10,
     },
     {
@@ -61,6 +58,7 @@ PLATFORM_PERMISSIONS = [
         "display_name": "Create Tenants",
         "description": "Provision new tenants on the platform",
         "category": "Tenants",
+        "icon_hint": None,
         "sort_order": 20,
     },
     {
@@ -68,6 +66,7 @@ PLATFORM_PERMISSIONS = [
         "display_name": "Update Tenants",
         "description": "Modify tenant configuration and IDP settings",
         "category": "Tenants",
+        "icon_hint": None,
         "sort_order": 30,
     },
     {
@@ -75,6 +74,7 @@ PLATFORM_PERMISSIONS = [
         "display_name": "Delete Tenants",
         "description": "Remove tenants from the platform",
         "category": "Tenants",
+        "icon_hint": None,
         "sort_order": 40,
     },
     # Organisations
@@ -83,6 +83,7 @@ PLATFORM_PERMISSIONS = [
         "display_name": "View Organisations",
         "description": "View organisation records",
         "category": "Organisations",
+        "icon_hint": None,
         "sort_order": 10,
     },
     {
@@ -90,6 +91,7 @@ PLATFORM_PERMISSIONS = [
         "display_name": "Create Organisations",
         "description": "Create new organisations",
         "category": "Organisations",
+        "icon_hint": None,
         "sort_order": 20,
     },
     {
@@ -97,6 +99,7 @@ PLATFORM_PERMISSIONS = [
         "display_name": "Update Organisations",
         "description": "Modify organisation details",
         "category": "Organisations",
+        "icon_hint": None,
         "sort_order": 30,
     },
     {
@@ -104,6 +107,7 @@ PLATFORM_PERMISSIONS = [
         "display_name": "Delete Organisations",
         "description": "Remove organisations from the platform",
         "category": "Organisations",
+        "icon_hint": None,
         "sort_order": 40,
     },
     # Settings
@@ -112,6 +116,7 @@ PLATFORM_PERMISSIONS = [
         "display_name": "View Platform Settings",
         "description": "View platform-level configuration",
         "category": "Settings",
+        "icon_hint": None,
         "sort_order": 10,
     },
     {
@@ -119,205 +124,138 @@ PLATFORM_PERMISSIONS = [
         "display_name": "Edit Platform Settings",
         "description": "Modify platform-level configuration",
         "category": "Settings",
+        "icon_hint": None,
         "sort_order": 20,
     },
 ]
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def generate_id() -> str:
-    return str(uuid.uuid4())
+# Claim mapping config — maps https://porth.io/roles JWT claim to roles.
+# schema_version must be '2.0' (enforced by MappingSource Pydantic model).
+MAPPING_SOURCE: dict = {
+    "schema_version": "2.0",
+    "fields": [
+        {
+            "name": "roles",
+            "source": "https://porth.io/roles",
+            "type": "collection",
+            "required": False,
+            "ops": [{"op": "resolve_roles"}],
+        },
+    ],
+    "default_roles": [],
+}
 
 
 # ---------------------------------------------------------------------------
 # Bootstrap steps
 # ---------------------------------------------------------------------------
 
-def bootstrap_permissions(table) -> list[str]:
-    """Idempotently register platform admin permissions.
 
-    Returns the list of permission keys written.
-    """
-    now = utc_now()
+def bootstrap_permissions(repo: PermissionRepository) -> list[str]:
+    """Idempotently register all platform admin permissions."""
     permission_keys: list[str] = []
-
     for perm in PLATFORM_PERMISSIONS:
-        pk = f"TENANT#{TENANT_ID}#NS#{APP_NAMESPACE}"
-        sk = f"PERM#{perm['key']}"
-
-        response = table.get_item(Key={"pk": pk, "sk": sk})
-
-        if "Item" in response:
-            table.update_item(
-                Key={"pk": pk, "sk": sk},
-                UpdateExpression="SET display_name = :dn, sort_order = :so, updated_at = :ua",
-                ExpressionAttributeValues={
-                    ":dn": perm["display_name"],
-                    ":so": perm["sort_order"],
-                    ":ua": now,
-                },
-            )
-            print(f"    updated  {perm['key']}")
-        else:
-            table.put_item(
-                Item={
-                    "pk": pk,
-                    "sk": sk,
-                    "gsi1pk": f"TENANT#{TENANT_ID}",
-                    "gsi1sk": f"CAT#{perm['category']}#PERM#{perm['key']}",
-                    "id": generate_id(),
-                    "key": perm["key"],
-                    "display_name": perm["display_name"],
-                    "description": perm["description"],
-                    "app_namespace": APP_NAMESPACE,
-                    "tenant_id": TENANT_ID,
-                    "category": perm["category"],
-                    "sort_order": perm["sort_order"],
-                    "created_at": now,
-                    "updated_at": now,
-                }
-            )
-            print(f"    created  {perm['key']}")
-
+        repo.register(
+            tenant_id=TENANT_ID,
+            app_namespace=APP_NAMESPACE,
+            key=perm["key"],
+            display_name=perm["display_name"],
+            category=perm["category"],
+            description=perm["description"],
+            icon_hint=perm["icon_hint"],
+            sort_order=perm["sort_order"],
+        )
+        print(f"    registered  {perm['key']}")
         permission_keys.append(perm["key"])
-
     return permission_keys
 
 
-def bootstrap_role(table) -> str:
+def bootstrap_role(repo: RoleRepository) -> str:
     """Idempotently create the platform-admin system role.
 
-    Returns the role UUID (existing or newly created).
+    Returns the role UUID.
     """
-    now = utc_now()
-    pk = f"TENANT#{TENANT_ID}"
-
-    response = table.query(KeyConditionExpression=Key("pk").eq(pk))
-    for item in response.get("Items", []):
-        if item.get("name") == "platform-admin" and item.get("is_system"):
-            print(f"    exists   platform-admin (id={item['id']})")
-            return item["id"]
-
-    role_id = generate_id()
-    table.put_item(
-        Item={
-            "pk": pk,
-            "sk": f"ROLE#{role_id}",
-            "id": role_id,
-            "tenant_id": TENANT_ID,
-            "name": "platform-admin",
-            "description": "System role for platform-level tenant administration",
-            "is_system": True,
-            "created_at": now,
-            "updated_at": now,
-        }
+    existing = repo.search_roles(
+        tenant_id=TENANT_ID, query="platform-admin", is_system=True
     )
-    print(f"    created  platform-admin (id={role_id})")
-    return role_id
+    for role in existing:
+        if role.name == "platform-admin":
+            print(f"    exists   platform-admin (id={role.id})")
+            return role.id
+
+    role = repo.create_role(
+        tenant_id=TENANT_ID,
+        name="platform-admin",
+        description="System role for platform-level tenant administration",
+        is_system=True,
+        source_key="platform_admin",
+    )
+    print(f"    created  platform-admin (id={role.id})")
+    return role.id
 
 
-def bootstrap_role_permissions(table, role_id: str, permission_keys: list[str]) -> None:
+def bootstrap_role_permissions(
+    repo: RoleRepository, role_id: str, permission_keys: list[str]
+) -> None:
     """Replace all permissions on the platform-admin role."""
-    now = utc_now()
-    pk = f"ROLE#{role_id}"
-
-    # Remove stale permissions
-    existing = table.query(KeyConditionExpression=Key("pk").eq(pk))
-    for item in existing.get("Items", []):
-        table.delete_item(Key={"pk": pk, "sk": item["sk"]})
-
-    # Write current permission set
-    for perm_key in permission_keys:
-        table.put_item(
-            Item={
-                "pk": pk,
-                "sk": f"PERM#{perm_key}",
-                "role_id": role_id,
-                "permission_key": perm_key,
-                "tenant_id": TENANT_ID,
-                "assigned_at": now,
-            }
-        )
-
+    repo.set_role_permissions(
+        role_id=role_id,
+        permission_keys=permission_keys,
+        tenant_id=TENANT_ID,
+    )
     print(f"    set {len(permission_keys)} permissions on platform-admin")
 
 
-def bootstrap_claim_mapping(table, role_id: str) -> None:
-    """Idempotently create the claim role mapping for platform_admin."""
-    now = utc_now()
-    pk = f"TENANT#{TENANT_ID}#NS#{APP_NAMESPACE}"
+def bootstrap_claim_mapping_config(
+    repo: ClaimMappingConfigRepository, role_id: str
+) -> None:
+    """Idempotently create/update the claim mapping config."""
+    compiled_source = MappingCodegen.generate(MAPPING_SOURCE)
+    compiled_hash = hashlib.sha256(compiled_source.encode()).hexdigest()
 
-    existing = table.query(KeyConditionExpression=Key("pk").eq(pk))
-    for item in existing.get("Items", []):
-        if (
-            item.get("claim_key") == CLAIM_KEY
-            and item.get("claim_value") == CLAIM_VALUE
-            and item.get("role_id") == role_id
-        ):
-            print(f"    exists   {CLAIM_KEY} = {CLAIM_VALUE} -> platform-admin")
-            return
+    latest = repo.get_latest(TENANT_ID)
+    if latest and latest.compiled_hash == compiled_hash:
+        print(f"    exists   claim mapping config v{latest.version} (no change)")
+        return
 
-    mapping_id = generate_id()
-    table.put_item(
-        Item={
-            "pk": pk,
-            "sk": f"MAPPING#{mapping_id}",
-            "gsi1pk": f"TENANT#{TENANT_ID}",
-            "gsi1sk": f"MAPPING#{mapping_id}",
-            "id": mapping_id,
-            "tenant_id": TENANT_ID,
-            "app_namespace": APP_NAMESPACE,
-            "claim_key": CLAIM_KEY,
-            "claim_value": CLAIM_VALUE,
-            "role_id": role_id,
-            "match_type": "exact",
-            "value_transform": "none",
-            "priority": 100,
-            "is_active": True,
-            "created_at": now,
-            "updated_at": now,
-        }
+    config = repo.save(
+        tenant_id=TENANT_ID,
+        mapping_source=MAPPING_SOURCE,
+        compiled_source=compiled_source,
+        compiled_hash=compiled_hash,
     )
-    print(f"    created  {CLAIM_KEY} = {CLAIM_VALUE} -> platform-admin")
+    print(f"    saved    claim mapping config v{config.version}")
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
-    dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
+    perm_repo = PermissionRepository()
+    role_repo = RoleRepository()
+    config_repo = ClaimMappingConfigRepository()
 
-    permissions_table = dynamodb.Table(PERMISSIONS_TABLE)
-    roles_table = dynamodb.Table(ROLES_TABLE)
-    claim_mappings_table = dynamodb.Table(CLAIM_ROLE_MAPPINGS_TABLE)
-
-    print(f"Bootstrapping platform tenant  [environment={ENVIRONMENT}]")
+    print("Bootstrapping platform tenant")
 
     print("\n1. Permissions")
-    permission_keys = bootstrap_permissions(permissions_table)
-    print(f"   ✅ {len(permission_keys)} permissions ready")
+    permission_keys = bootstrap_permissions(perm_repo)
+    print(f"   \u2705 {len(permission_keys)} permissions ready")
 
     print("\n2. platform-admin role")
-    role_id = bootstrap_role(roles_table)
-    print(f"   ✅ role_id={role_id}")
+    role_id = bootstrap_role(role_repo)
+    print(f"   \u2705 role_id={role_id}")
 
-    print("\n3. Role–permission links")
-    bootstrap_role_permissions(roles_table, role_id, permission_keys)
-    print("   ✅ permissions linked")
+    print("\n3. Role\u2013permission links")
+    bootstrap_role_permissions(role_repo, role_id, permission_keys)
+    print("   \u2705 permissions linked")
 
-    print("\n4. Claim role mapping")
-    bootstrap_claim_mapping(claim_mappings_table, role_id)
-    print("   ✅ claim mapping ready")
+    print("\n4. Claim mapping config")
+    bootstrap_claim_mapping_config(config_repo, role_id)
+    print("   \u2705 claim mapping config ready")
 
-    print("\n✅ Platform tenant bootstrap complete")
+    print("\n\u2705 Platform tenant bootstrap complete")
 
 
 if __name__ == "__main__":
