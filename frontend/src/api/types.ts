@@ -13,20 +13,25 @@ export interface Organization {
 export interface CreateOrganizationRequest { name: string; slug: string; idp_config?: IdpConfig }
 export interface UpdateOrganizationRequest { name?: string; idp_config?: IdpConfig }
 
-// Tenants
+// Tenants — field names match the Porth API Tenant model (PORTH-413)
 export interface Tenant {
-  id: string; organization_id: string; name: string
-  environment_type: 'dev' | 'staging' | 'prod'; status: 'active' | 'suspended'
-  idp_config_override?: IdpConfig; feature_flags?: Record<string, boolean>
-  created_at: string; updated_at: string
+  tenant_id: string
+  org_id: string
+  org_name?: string
+  display_name: string
+  environment_type: 'production' | 'staging' | 'development' | 'sandbox'
+  status: 'active' | 'suspended' | 'decommissioning' | 'deleted'
+  idp_config_override?: IdpConfig
+  created_at: string
+  updated_at: string
 }
 export interface CreateTenantRequest {
-  organization_id: string; name: string; environment_type: 'dev' | 'staging' | 'prod'
-  idp_config_override?: IdpConfig; feature_flags?: Record<string, boolean>
+  org_id: string; display_name: string; environment_type: 'production' | 'staging' | 'development' | 'sandbox'
+  idp_config_override?: IdpConfig
 }
 export interface UpdateTenantRequest {
-  name?: string; status?: 'active' | 'suspended'
-  idp_config_override?: IdpConfig; feature_flags?: Record<string, boolean>
+  display_name?: string
+  idp_config_override?: IdpConfig
 }
 
 // Users

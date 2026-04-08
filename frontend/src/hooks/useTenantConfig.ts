@@ -80,7 +80,8 @@ export function useTenantConfig(): {
 
         setConfig({
           tenantId,
-          organizationId: tenant.organization_id,
+          // Porth Tenant model uses org_id (not organization_id)
+          organizationId: tenant.org_id,
           domain: idp.domain,
           clientId: idp.client_id,
           audience: idp.audience,
