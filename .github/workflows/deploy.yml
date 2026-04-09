@@ -44,11 +44,12 @@ jobs:
       - name: Validate required secrets
         run: |
           MISSING=()
-          [ -z "${{ secrets.ACM_CERTIFICATE_ARN }}" ]       && MISSING+=("ACM_CERTIFICATE_ARN")
+          [ -z "${{ secrets.ACM_CERTIFICATE_ARN }}" ]        && MISSING+=("ACM_CERTIFICATE_ARN")
           [ -z "${{ secrets.GH_PAT }}" ]                    && MISSING+=("GH_PAT")
           [ -z "${{ secrets.AWS_ROLE_ARN }}" ]              && MISSING+=("AWS_ROLE_ARN")
           [ -z "${{ secrets.PLATFORM_AUTH0_DOMAIN }}" ]     && MISSING+=("PLATFORM_AUTH0_DOMAIN")
           [ -z "${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}" ]  && MISSING+=("PLATFORM_AUTH0_CLIENT_ID")
+          [ -z "${{ secrets.PORTH_AUTH_TEST_TOKEN }}" ]     && MISSING+=("PORTH_AUTH_TEST_TOKEN")
           if [ ${#MISSING[@]} -gt 0 ]; then
             echo "❌ Missing required secrets: ${MISSING[*]}"
             exit 1
@@ -209,12 +210,9 @@ jobs:
 
       - name: Create platform org and tenant
         run: |
-          # Fetch the CI test token so we can authenticate against the protected API
-          TEST_TOKEN=$(aws ssm get-parameter \
-            --name "/porth/${{ env.ENVIRONMENT }}/auth-test-token" \
-            --with-decryption \
-            --query "Parameter.Value" \
-            --output text 2>/dev/null || echo "")
+          # CI test token stored as GitHub Secret — same value passed to the
+          # Lambda as AuthTestToken via the Components SAM deploy.
+          TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
 
           RESPONSE_FILE="/tmp/platform-org.json"
           PAYLOAD=$(cat <<EOF
