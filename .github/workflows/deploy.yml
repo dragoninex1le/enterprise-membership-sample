@@ -119,6 +119,7 @@ jobs:
 
       # ── Step 2: Cleanup (pre-test) ───────────────────────────────────────
       - name: Cleanup (pre-test)
+        if: github.ref == 'refs/heads/main'
         run: |
           python3 - <<'EOF'
           import boto3, json, sys
@@ -152,13 +153,14 @@ jobs:
 
       # ── Step 3: Run E2E tests ──────────────────────────────────────────────
       - name: Run E2E tests
+        if: github.ref == 'refs/heads/main'
         run: |
           PORTH_API_URL="${{ env.PORTH_API_URL }}" \
             bash scripts/api-tests/run-all.sh
 
       # ── Step 4: Cleanup (post-test) ───────────────────────────────────────
       - name: Cleanup (post-test)
-        if: always()
+        if: always() && github.ref == 'refs/heads/main'
         run: |
           python3 - <<'EOF'
           import boto3, json, sys
@@ -192,9 +194,11 @@ jobs:
 
       # ── Step 5: Bootstrap platform tenant ────────────────────────────────
       - name: Install porth-common
+        if: github.ref == 'refs/heads/main'
         run: pip install "git+https://${{ secrets.GH_PAT }}@github.com/dragoninex1le/Components.git"
 
       - name: Bootstrap platform tenant
+        if: github.ref == 'refs/heads/main'
         env:
           PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
           PORTH_ROLES_TABLE: ${{ env.PORTH_ROLES_TABLE }}
@@ -202,6 +206,7 @@ jobs:
         run: python3 scripts/bootstrap_platform_tenant.py
 
       - name: Create platform org and tenant
+        if: github.ref == 'refs/heads/main'
         run: |
           RESPONSE_FILE="/tmp/platform-org.json"
           PAYLOAD=$(cat <<EOF
