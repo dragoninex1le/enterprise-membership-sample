@@ -1,24 +1,11 @@
-import { useEffect, useState } from 'react'
 import { useAuth0 } from '@auth0/auth0-react'
 import { usePorthContext } from '../context/PorthContext'
 
-const AUTO_LOGOUT_SECONDS = 5
 const ROLES_CLAIM = 'https://porth.io/roles'
 
 export default function UnauthorizedPage() {
   const { isAuthenticated, logout, user: auth0User } = useAuth0()
   const { currentUser, userError, tenantConfig } = usePorthContext()
-  const [secondsLeft, setSecondsLeft] = useState(AUTO_LOGOUT_SECONDS)
-
-  useEffect(() => {
-    if (!isAuthenticated) return
-    if (secondsLeft <= 0) {
-      logout({ logoutParams: { returnTo: window.location.origin } })
-      return
-    }
-    const timer = setTimeout(() => setSecondsLeft(s => s - 1), 1000)
-    return () => clearTimeout(timer)
-  }, [isAuthenticated, secondsLeft, logout])
 
   // Pull the roles claim out of the Auth0 JWT payload for display
   const jwtRolesClaim: string[] = (auth0User as Record<string, unknown>)?.[ROLES_CLAIM] as string[] ?? []
@@ -99,9 +86,6 @@ export default function UnauthorizedPage() {
             >
               Sign out
             </button>
-            <p className="text-xs text-gray-400 mt-3">
-              Signing out automatically in {secondsLeft}s…
-            </p>
           </div>
         )}
       </div>
