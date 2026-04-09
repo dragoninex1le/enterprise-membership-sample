@@ -278,13 +278,7 @@ jobs:
           # Find platform-admin role ID
           ROLES_JSON=$(curl -sf -H "Authorization: Bearer $TEST_TOKEN" \
             "$API/roles/?tenant_id=platform")
-          ROLE_ID=$(echo "$ROLES_JSON" | python3 -c "
-import sys, json
-roles = json.load(sys.stdin)
-r = next((r for r in roles if r['name'] == 'platform-admin'), None)
-if not r: sys.exit(1)
-print(r['id'])
-")
+          ROLE_ID=$(echo "$ROLES_JSON" | python3 -c "import sys,json; roles=json.load(sys.stdin); r=next((x for x in roles if x['name']=='platform-admin'),None); print(r['id']) if r else sys.exit(1)")
 
           echo "  platform-admin role_id=$ROLE_ID"
 
