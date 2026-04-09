@@ -11,6 +11,7 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
+  ENVIRONMENT: dev
   SAM_STACK_NAME: enterprise-membership-sample
   NODE_VERSION: '20'
 
@@ -193,12 +194,13 @@ jobs:
           EOF
 
       # ── Step 5: Bootstrap platform tenant ────────────────────────────────
+      # Runs on every branch so every deployed environment has the platform
+      # tenant seeded.  Uses the CI test-token to authenticate against the
+      # Lambda-authorizer-protected API.
       - name: Install porth-common
-        if: github.ref == 'refs/heads/main'
         run: pip install "git+https://${{ secrets.GH_PAT }}@github.com/dragoninex1le/Components.git"
 
       - name: Bootstrap platform tenant
-        if: github.ref == 'refs/heads/main'
         env:
           PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
           PORTH_ROLES_TABLE: ${{ env.PORTH_ROLES_TABLE }}
@@ -206,8 +208,14 @@ jobs:
         run: python3 scripts/bootstrap_platform_tenant.py
 
       - name: Create platform org and tenant
-        if: github.ref == 'refs/heads/main'
         run: |
+          # Fetch the CI test token so we can authenticate against the protected API
+          TEST_TOKEN=$(aws ssm get-parameter \
+            --name "/porth/${{ env.ENVIRONMENT }}/auth-test-token" \
+            --with-decryption \
+            --query "Parameter.Value" \
+            --output text 2>/dev/null || echo "")
+
           RESPONSE_FILE="/tmp/platform-org.json"
           PAYLOAD=$(cat <<EOF
           {
@@ -228,8 +236,9 @@ jobs:
           STATUS=$(curl -s -L -o "$RESPONSE_FILE" -w "%{http_code}" \
             -X POST "${{ env.PORTH_API_URL }}/organizations" \
             -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $TEST_TOKEN" \
             -d "$PAYLOAD")
-          echo "POST /organizations/platform → HTTP $STATUS"
+          echo "POST /organizations → HTTP $STATUS"
           if [[ "$STATUS" == "200" || "$STATUS" == "201" ]]; then
             echo "Platform org and tenant created"
           elif [[ "$STATUS" == "409" ]]; then
