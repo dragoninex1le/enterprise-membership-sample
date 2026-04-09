@@ -247,6 +247,58 @@ jobs:
             exit 1
           fi
 
+      - name: Assign platform-admin to operator
+        # Idempotently grants platform-admin to the operator's Porth user so
+        # they can log in to the Admin UI.  Requires the PORTH_OPERATOR_EMAIL
+        # secret to be set; skips gracefully if absent.
+        run: |
+          OPERATOR_EMAIL="${{ secrets.PORTH_OPERATOR_EMAIL }}"
+          if [ -z "$OPERATOR_EMAIL" ]; then
+            echo "⚠️  PORTH_OPERATOR_EMAIL not set — skipping operator role assignment"
+            exit 0
+          fi
+
+          TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
+          API="${{ env.PORTH_API_URL }}"
+
+          # URL-encode the email (handles + and @ characters)
+          ENCODED=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$OPERATOR_EMAIL")
+
+          # Look up the operator's Porth user by email + tenant
+          USER_JSON=$(curl -sf -H "Authorization: Bearer $TEST_TOKEN" \
+            "$API/users/email/$ENCODED/tenant/platform" || true)
+          USER_ID=$(echo "$USER_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || true)
+
+          if [ -z "$USER_ID" ]; then
+            echo "⚠️  Operator user not found in Porth (have they logged in yet?) — skipping"
+            exit 0
+          fi
+          echo "  operator user_id=$USER_ID"
+
+          # Find platform-admin role ID
+          ROLES_JSON=$(curl -sf -H "Authorization: Bearer $TEST_TOKEN" \
+            "$API/roles/?tenant_id=platform")
+          ROLE_ID=$(echo "$ROLES_JSON" | python3 -c "
+import sys, json
+roles = json.load(sys.stdin)
+r = next((r for r in roles if r['name'] == 'platform-admin'), None)
+if not r: sys.exit(1)
+print(r['id'])
+")
+
+          echo "  platform-admin role_id=$ROLE_ID"
+
+          # Assign role (idempotent — Porth returns 200 if already assigned)
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST -H "Authorization: Bearer $TEST_TOKEN" \
+            "$API/roles/users/$USER_ID/tenant/platform/roles/$ROLE_ID")
+          echo "  POST /roles/users/.../roles/... → HTTP $STATUS"
+          if [[ "$STATUS" == "200" || "$STATUS" == "201" ]]; then
+            echo "✅ platform-admin assigned to $OPERATOR_EMAIL"
+          else
+            echo "⚠️  Unexpected status $STATUS — role may already be assigned, continuing"
+          fi
+
       - name: Sync assets to S3
         run: |
           aws s3 sync frontend/dist s3://${{ steps.outputs.outputs.bucket }} \
