@@ -225,7 +225,8 @@ jobs:
               "environment_type": "production",
               "idp_config_override": {
                 "domain": "${{ secrets.PLATFORM_AUTH0_DOMAIN }}",
-                "client_id": "${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}"
+                "client_id": "${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}",
+                "audience": "${{ secrets.PLATFORM_AUTH0_AUDIENCE }}"
               }
             }
           }
@@ -244,6 +245,24 @@ jobs:
           else
             echo "Unexpected status $STATUS:"
             cat "$RESPONSE_FILE"
+            exit 1
+          fi
+
+      - name: Patch platform tenant Auth0 audience
+        run: |
+          TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
+          AUDIENCE="${{ secrets.PLATFORM_AUTH0_AUDIENCE }}"
+          RESPONSE_FILE="/tmp/patch-tenant.json"
+          PAYLOAD="{\"idp_config_override\": {\"domain\": \"${{ secrets.PLATFORM_AUTH0_DOMAIN }}\", \"client_id\": \"${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}\", \"audience\": \"$AUDIENCE\"}}"
+          STATUS=$(curl -s -L -o "$RESPONSE_FILE" -w "%{http_code}" \
+            -X PATCH "${{ env.PORTH_API_URL }}/tenants/platform" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $TEST_TOKEN" \
+            -d "$PAYLOAD")
+          echo "PATCH /tenants/platform → HTTP $STATUS"
+          cat "$RESPONSE_FILE"
+          if [[ "$STATUS" != "200" ]]; then
+            echo "Failed to patch tenant audience"
             exit 1
           fi
 
