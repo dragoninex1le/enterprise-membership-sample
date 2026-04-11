@@ -1,5 +1,5 @@
 import { apiClient } from './client'
-import type { User, UpsertUserRequest, ProvisionRequest, ProvisionResponse } from './types'
+import type { User, UpsertUserRequest, ProvisionRequest, ProvisionResponse, UserMeResponse } from './types'
 
 export const usersApi = {
   listByTenant: (orgId: string, tenantId: string) =>
@@ -11,6 +11,13 @@ export const usersApi = {
   /** Full JIT provisioning — syncs JWT claim-resolved roles to DynamoDB. */
   provision: (body: ProvisionRequest) =>
     apiClient.post<ProvisionResponse>('/users/provision', body).then(r => r.data),
+  /**
+   * PORTH-413: Single call that provisions (or updates) the user and returns
+   * their full Porth context — user record, resolved roles, and effective
+   * permission keys — replacing the previous provision + getUserRoles two-step.
+   */
+  me: (body: ProvisionRequest) =>
+    apiClient.post<UserMeResponse>('/users/me', body).then(r => r.data),
   update: (id: string, body: Partial<UpsertUserRequest>) => apiClient.patch<User>(`/users/${id}`, body).then(r => r.data),
   suspend: (id: string) => apiClient.post<User>(`/users/${id}/suspend`).then(r => r.data),
   reactivate: (id: string) => apiClient.post<User>(`/users/${id}/reactivate`).then(r => r.data),

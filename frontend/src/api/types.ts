@@ -85,6 +85,18 @@ export interface Role {
 export interface CreateRoleRequest { tenant_id: string; name: string; description?: string }
 export interface UpdateRoleRequest { name?: string; description?: string }
 
+/**
+ * PORTH-413: Single-call endpoint — provisions the user and returns the full
+ * user context (user record + resolved roles + effective permissions) in one
+ * round-trip.  Replaces the previous provision + getUserRoles two-step.
+ */
+export interface UserMeResponse {
+  user: User
+  is_new: boolean
+  roles: Role[]
+  permissions: string[]
+}
+
 // Claim Role Mappings
 export interface ClaimRoleMapping {
   id: string; tenant_id: string; app_namespace: string
