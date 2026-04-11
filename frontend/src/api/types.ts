@@ -62,6 +62,24 @@ export interface ProvisionRequest {
   avatar_url?: string
 }
 
+/**
+ * PORTH-413: Slim request body for POST /users/me.
+ *
+ * The server derives external_id, tenant_id, and organization_id from the JWT
+ * authorizer context — they must NOT be included in the request body.  Only
+ * profile fields that the SPA legitimately provides are accepted here.
+ */
+export interface UserMeRequest {
+  email: string
+  /** Full decoded JWT claims — used by the claim-resolver to sync Porth roles. */
+  jwt_claims: Record<string, unknown>
+  app_namespace?: string
+  first_name?: string
+  last_name?: string
+  display_name?: string
+  avatar_url?: string
+}
+
 export interface ProvisionResponse {
   user: User
   is_new: boolean

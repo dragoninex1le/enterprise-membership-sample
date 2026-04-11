@@ -1,5 +1,5 @@
 import { apiClient } from './client'
-import type { User, UpsertUserRequest, ProvisionRequest, ProvisionResponse, UserMeResponse } from './types'
+import type { User, UpsertUserRequest, ProvisionRequest, ProvisionResponse, UserMeRequest, UserMeResponse } from './types'
 
 export const usersApi = {
   listByTenant: (orgId: string, tenantId: string) =>
@@ -16,7 +16,7 @@ export const usersApi = {
    * their full Porth context — user record, resolved roles, and effective
    * permission keys — replacing the previous provision + getUserRoles two-step.
    */
-  me: (body: ProvisionRequest) =>
+  me: (body: UserMeRequest) =>
     apiClient.post<UserMeResponse>('/users/me', body).then(r => r.data),
   update: (id: string, body: Partial<UpsertUserRequest>) => apiClient.patch<User>(`/users/${id}`, body).then(r => r.data),
   suspend: (id: string) => apiClient.post<User>(`/users/${id}/suspend`).then(r => r.data),

@@ -51,8 +51,6 @@ export function useCurrentUser(tenantConfig: TenantIdpConfig | null): {
       return
     }
 
-    const { tenantId, organizationId } = tenantConfig
-
     // Validate required IdP fields before hitting the API — sub and email are
     // non-optional on the Porth side; a missing value would produce an invalid
     // upsert payload and a confusing 4xx error rather than a clear UI message.
@@ -76,12 +74,11 @@ export function useCurrentUser(tenantConfig: TenantIdpConfig | null): {
     // never affected.
     usersApi
       .me({
-        external_id: auth0User.sub,
         email: auth0User.email,
-        organization_id: organizationId,
-        tenant_id: tenantId,
         // Pass the full decoded Auth0 user object as jwt_claims.  Custom
         // namespaced claims (e.g. https://porth.io/roles) are included here.
+        // external_id, tenant_id, organization_id are derived from the JWT
+        // by the server — they must NOT be sent in the request body.
         jwt_claims: auth0User as Record<string, unknown>,
         first_name: auth0User.given_name,
         last_name: auth0User.family_name,
