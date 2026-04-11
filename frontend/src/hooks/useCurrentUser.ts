@@ -30,13 +30,23 @@ export function useCurrentUser(tenantConfig: TenantIdpConfig | null): {
   loading: boolean
   error: string | null
 } {
-  const { user: auth0User, isAuthenticated } = useAuth0()
+  const { user: auth0User, isAuthenticated, isLoading: auth0Loading } = useAuth0()
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    // While Auth0 is still resolving the session, keep our loading flag true
+    // so ProtectedRoute never sees userLoading=false with currentUser=null.
+    // Without this guard the initial effect fire (isAuthenticated=false) would
+    // set loading=false immediately, and by the time Auth0 flips isAuthenticated
+    // the ProtectedRoute would evaluate useHasRole against a null currentUser
+    // and redirect to /unauthorized before provisioning completes.
+    if (auth0Loading) return
+
     if (!isAuthenticated || !auth0User || !tenantConfig) {
+      // Auth0 has finished and the user is definitely not authenticated
+      // (or required config is absent) — nothing left to do.
       setLoading(false)
       return
     }
@@ -66,7 +76,7 @@ export function useCurrentUser(tenantConfig: TenantIdpConfig | null): {
       .then(({ user: porthUser, roles }) => setCurrentUser({ porthUser, roles }))
       .catch(err => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false))
-  }, [isAuthenticated, auth0User, tenantConfig])
+  }, [auth0Loading, isAuthenticated, auth0User, tenantConfig])
 
   return { currentUser, loading, error }
 }
