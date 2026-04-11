@@ -16,9 +16,12 @@ export default function Sidebar() {
   // 'platform-admin' is the Porth role for Estyn operators (platform administrators).
   // Tenant-level roles (ar_clerk, etc.) are configured per-tenant in claim role mappings.
   const isPlatformAdmin = useHasRole('platform-admin')
-  const canSeeAR = useHasRole('ar_clerk', 'controller', 'platform-admin')
-  const canSeeAP = useHasRole('ap_clerk', 'controller', 'platform-admin')
-  const canSeeApprovals = useHasRole('controller', 'platform-admin')
+
+  // Tenant-level app roles — these do not include platform-admin because
+  // platform admins have no business in the tenant application pages.
+  const canSeeAR = useHasRole('ar_clerk', 'controller')
+  const canSeeAP = useHasRole('ap_clerk', 'controller')
+  const canSeeApprovals = useHasRole('controller')
 
   return (
     <nav className="w-56 bg-white border-r border-gray-200 flex flex-col py-4 shrink-0">
@@ -28,49 +31,36 @@ export default function Sidebar() {
       </div>
       <div className="flex-1 px-2 space-y-1">
 
-        {sectionLabel('Main')}
-        <NavLink to="/dashboard" className={linkClass}>
-          <span>📊</span>Dashboard
-        </NavLink>
-        {canSeeAR && (
-          <NavLink to="/ar" className={linkClass}>
-            <span>📥</span>Accounts Receivable
-          </NavLink>
-        )}
-        {canSeeAP && (
-          <NavLink to="/ap" className={linkClass}>
-            <span>📤</span>Accounts Payable
-          </NavLink>
-        )}
-        {canSeeApprovals && (
-          <NavLink to="/approvals" className={linkClass}>
-            <span>✅</span>Approvals
-          </NavLink>
-        )}
-
-        {isPlatformAdmin && (
+        {isPlatformAdmin ? (
+          // Platform admins only manage organisations and tenants — no app sections.
           <>
             {sectionLabel('Platform Admin')}
             <NavLink to="/admin/platform/organizations" className={linkClass}>
               <span>🏢</span>Organizations
             </NavLink>
-
-            {sectionLabel('Tenant Admin')}
-            <NavLink to="/admin/tenant/users" className={linkClass}>
-              <span>👤</span>Users
+          </>
+        ) : (
+          // Tenant users see app-level pages based on their assigned roles.
+          <>
+            {sectionLabel('Main')}
+            <NavLink to="/dashboard" className={linkClass}>
+              <span>📊</span>Dashboard
             </NavLink>
-            <NavLink to="/admin/tenant/roles" className={linkClass}>
-              <span>🔑</span>Roles
-            </NavLink>
-            <NavLink to="/admin/tenant/permissions" className={linkClass}>
-              <span>🛡️</span>Permissions
-            </NavLink>
-            <NavLink to="/admin/tenant/claim-config" className={linkClass}>
-              <span>⚙️</span>Claim Config
-            </NavLink>
-            <NavLink to="/admin/tenant/claim-mappings" className={linkClass}>
-              <span>🔀</span>Claim Mappings
-            </NavLink>
+            {canSeeAR && (
+              <NavLink to="/ar" className={linkClass}>
+                <span>📥</span>Accounts Receivable
+              </NavLink>
+            )}
+            {canSeeAP && (
+              <NavLink to="/ap" className={linkClass}>
+                <span>📤</span>Accounts Payable
+              </NavLink>
+            )}
+            {canSeeApprovals && (
+              <NavLink to="/approvals" className={linkClass}>
+                <span>✅</span>Approvals
+              </NavLink>
+            )}
           </>
         )}
       </div>

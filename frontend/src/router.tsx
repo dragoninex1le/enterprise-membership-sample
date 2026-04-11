@@ -1,6 +1,16 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom'
 import Layout from './components/Layout'
 import ProtectedRoute from './components/ProtectedRoute'
+import { useHasRole } from './hooks/useRoles'
+
+/** Redirects the root path based on the caller's role. Platform admins land on
+ *  the organisations page; everyone else goes to the dashboard. */
+function RootRedirect() {
+  const isPlatformAdmin = useHasRole('platform-admin')
+  return isPlatformAdmin
+    ? <Navigate to="/admin/platform/organizations" replace />
+    : <Navigate to="/dashboard" replace />
+}
 import DashboardPage from './pages/DashboardPage'
 import ARPage from './pages/ARPage'
 import APPage from './pages/APPage'
@@ -25,7 +35,7 @@ export const router = createBrowserRouter([
     path: '/',
     element: <Layout />,
     children: [
-      { index: true, element: <Navigate to="/dashboard" replace /> },
+      { index: true, element: <RootRedirect /> },
 
       // ── Functional areas ──────────────────────────────────────────────────
       // These routes use tenant-configured role names from claim role mappings.
