@@ -170,17 +170,34 @@ def bootstrap_permissions(repo: PermissionRepository) -> list[str]:
     return permission_keys
 
 
+PLATFORM_ADMIN_SOURCE_KEY = "platform-admin"
+
+
 def bootstrap_role(repo: RoleRepository) -> str:
-    """Idempotently create the platform-admin system role.
+    """Idempotently create (or repair) the platform-admin system role.
 
     Returns the role UUID.
+
+    Also patches source_key if the existing role has the wrong value —
+    the source_key must match what the Auth0 Action injects in the
+    https://porth.io/roles JWT claim so claim_resolver can map it to
+    the correct role ID.
     """
     existing = repo.search_roles(
         tenant_id=TENANT_ID, query="platform-admin", is_system=True
     )
     for role in existing:
         if role.name == "platform-admin":
-            print(f"    exists   platform-admin (id={role.id})")
+            current_sk = getattr(role, "source_key", None)
+            if current_sk != PLATFORM_ADMIN_SOURCE_KEY:
+                repo.update_role_source_key(
+                    TENANT_ID, role.id, PLATFORM_ADMIN_SOURCE_KEY
+                )
+                print(
+                    f"    patched  platform-admin source_key: {current_sk!r} → {PLATFORM_ADMIN_SOURCE_KEY!r}"
+                )
+            else:
+                print(f"    exists   platform-admin (id={role.id})")
             return role.id
 
     role = repo.create_role(
@@ -188,7 +205,7 @@ def bootstrap_role(repo: RoleRepository) -> str:
         name="platform-admin",
         description="System role for platform-level tenant administration",
         is_system=True,
-        source_key="platform_admin",
+        source_key=PLATFORM_ADMIN_SOURCE_KEY,
     )
     print(f"    created  platform-admin (id={role.id})")
     return role.id

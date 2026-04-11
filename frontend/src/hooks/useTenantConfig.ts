@@ -1,10 +1,16 @@
 import { useState, useEffect } from 'react'
 
+// Default claim namespace used by the Porth platform Auth0 Action.
+// Can be overridden per-tenant via idp_config_override.custom_claims.roles_namespace.
+const DEFAULT_ROLES_NAMESPACE = 'https://porth.io/roles'
+
 export interface TenantIdpConfig {
   tenantId: string
+  organizationId: string
   domain: string
   clientId: string
   audience?: string
+  rolesNamespace: string
 }
 
 function getTenantIdFromSubdomain(): string | null {
@@ -65,7 +71,22 @@ export function useTenantConfig(): {
         if (!idp?.domain || !idp?.client_id) {
           throw new Error(`Tenant ${tenantId} has no IdP configuration`)
         }
-        setConfig({ tenantId, domain: idp.domain, clientId: idp.client_id, audience: idp.audience })
+
+        // Read the roles claim namespace from the tenant's IdP config if
+        // the operator has configured it; fall back to the platform default.
+        // The Auth0 Action (or equivalent IdP hook) must use the same namespace.
+        const rolesNamespace =
+          idp.custom_claims?.roles_namespace ?? DEFAULT_ROLES_NAMESPACE
+
+        setConfig({
+          tenantId,
+          // Porth Tenant model uses org_id (not organization_id)
+          organizationId: tenant.org_id,
+          domain: idp.domain,
+          clientId: idp.client_id,
+          audience: idp.audience,
+          rolesNamespace,
+        })
       })
       .catch(err => setError(err.message))
       .finally(() => setLoading(false))

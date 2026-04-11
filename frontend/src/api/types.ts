@@ -13,20 +13,25 @@ export interface Organization {
 export interface CreateOrganizationRequest { name: string; slug: string; idp_config?: IdpConfig }
 export interface UpdateOrganizationRequest { name?: string; idp_config?: IdpConfig }
 
-// Tenants
+// Tenants — field names match the Porth API Tenant model (PORTH-413)
 export interface Tenant {
-  id: string; organization_id: string; name: string
-  environment_type: 'dev' | 'staging' | 'prod'; status: 'active' | 'suspended'
-  idp_config_override?: IdpConfig; feature_flags?: Record<string, boolean>
-  created_at: string; updated_at: string
+  tenant_id: string
+  org_id: string
+  org_name?: string
+  display_name: string
+  environment_type: 'production' | 'staging' | 'development' | 'sandbox'
+  status: 'active' | 'suspended' | 'decommissioning' | 'deleted'
+  idp_config_override?: IdpConfig
+  created_at: string
+  updated_at: string
 }
 export interface CreateTenantRequest {
-  organization_id: string; name: string; environment_type: 'dev' | 'staging' | 'prod'
-  idp_config_override?: IdpConfig; feature_flags?: Record<string, boolean>
+  org_id: string; display_name: string; environment_type: 'production' | 'staging' | 'development' | 'sandbox'
+  idp_config_override?: IdpConfig
 }
 export interface UpdateTenantRequest {
-  name?: string; status?: 'active' | 'suspended'
-  idp_config_override?: IdpConfig; feature_flags?: Record<string, boolean>
+  display_name?: string
+  idp_config_override?: IdpConfig
 }
 
 // Users
@@ -40,6 +45,47 @@ export interface User {
 export interface UpsertUserRequest {
   external_id: string; email: string; organization_id: string; tenant_id: string
   first_name?: string; last_name?: string; display_name?: string; avatar_url?: string
+}
+
+/** Full provisioning request — syncs JWT claim-resolved roles to DynamoDB. */
+export interface ProvisionRequest {
+  external_id: string
+  organization_id: string
+  tenant_id: string
+  email: string
+  /** Full decoded JWT claims — used by the claim-resolver to sync Porth roles. */
+  jwt_claims: Record<string, unknown>
+  app_namespace?: string
+  first_name?: string
+  last_name?: string
+  display_name?: string
+  avatar_url?: string
+}
+
+/**
+ * PORTH-413: Slim request body for POST /users/me.
+ *
+ * The server derives external_id, tenant_id, and organization_id from the JWT
+ * authorizer context — they must NOT be included in the request body.  Only
+ * profile fields that the SPA legitimately provides are accepted here.
+ */
+export interface UserMeRequest {
+  email: string
+  /** Full decoded JWT claims — used by the claim-resolver to sync Porth roles. */
+  jwt_claims: Record<string, unknown>
+  app_namespace?: string
+  first_name?: string
+  last_name?: string
+  display_name?: string
+  avatar_url?: string
+}
+
+export interface ProvisionResponse {
+  user: User
+  is_new: boolean
+  /** Porth role IDs that were synced from JWT claims. */
+  roles_synced: string[]
+  org_unit_resolved: boolean
 }
 
 // Permissions
@@ -56,6 +102,18 @@ export interface Role {
 }
 export interface CreateRoleRequest { tenant_id: string; name: string; description?: string }
 export interface UpdateRoleRequest { name?: string; description?: string }
+
+/**
+ * PORTH-413: Single-call endpoint — provisions the user and returns the full
+ * user context (user record + resolved roles + effective permissions) in one
+ * round-trip.  Replaces the previous provision + getUserRoles two-step.
+ */
+export interface UserMeResponse {
+  user: User
+  is_new: boolean
+  roles: Role[]
+  permissions: string[]
+}
 
 // Claim Role Mappings
 export interface ClaimRoleMapping {
