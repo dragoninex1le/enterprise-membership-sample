@@ -41,21 +41,29 @@ export function useCurrentUser(tenantConfig: TenantIdpConfig | null): {
 
     const { tenantId, organizationId } = tenantConfig
 
-    // Provision (upsert) the user in Porth, then fetch their assigned roles.
-    // The upsert creates the user record on first login and keeps profile
-    // fields (email, name, avatar) in sync with the IdP on subsequent logins.
+    // Provision the user in Porth (full JIT provisioning), then fetch their
+    // assigned Porth roles.  Using /users/provision (not /users/upsert) so
+    // that JWT claim-resolved roles (e.g. platform-admin) are synced to
+    // DynamoDB on every login.  The full Auth0 user object is passed as
+    // jwt_claims so the Porth claim-resolver can map IdP claims to Porth
+    // roles — only roles in the *current tenant's* ClaimMappingConfig are
+    // synced, so tenant-specific application roles for other tenants are
+    // never affected.
     usersApi
-      .upsert({
+      .provision({
         external_id: auth0User.sub!,
         email: auth0User.email!,
         organization_id: organizationId,
         tenant_id: tenantId,
+        // Pass the full decoded Auth0 user object as jwt_claims.  Custom
+        // namespaced claims (e.g. https://porth.io/roles) are included here.
+        jwt_claims: auth0User as Record<string, unknown>,
         first_name: auth0User.given_name,
         last_name: auth0User.family_name,
         display_name: auth0User.name,
         avatar_url: auth0User.picture,
       })
-      .then(porthUser =>
+      .then(({ user: porthUser }) =>
         rolesApi
           .getUserRoles(porthUser.id, tenantId)
           .then(roles => setCurrentUser({ porthUser, roles }))

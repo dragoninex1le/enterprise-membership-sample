@@ -1,5 +1,5 @@
 import { apiClient } from './client'
-import type { User, UpsertUserRequest } from './types'
+import type { User, UpsertUserRequest, ProvisionRequest, ProvisionResponse } from './types'
 
 export const usersApi = {
   listByTenant: (orgId: string, tenantId: string) =>
@@ -8,6 +8,9 @@ export const usersApi = {
   getByEmail: (email: string, tenantId: string) =>
     apiClient.get<User>(`/users/email/${encodeURIComponent(email)}/tenant/${tenantId}`).then(r => r.data),
   upsert: (body: UpsertUserRequest) => apiClient.post<User>('/users/upsert', body).then(r => r.data),
+  /** Full JIT provisioning — syncs JWT claim-resolved roles to DynamoDB. */
+  provision: (body: ProvisionRequest) =>
+    apiClient.post<ProvisionResponse>('/users/provision', body).then(r => r.data),
   update: (id: string, body: Partial<UpsertUserRequest>) => apiClient.patch<User>(`/users/${id}`, body).then(r => r.data),
   suspend: (id: string) => apiClient.post<User>(`/users/${id}/suspend`).then(r => r.data),
   reactivate: (id: string) => apiClient.post<User>(`/users/${id}/reactivate`).then(r => r.data),

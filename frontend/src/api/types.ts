@@ -47,6 +47,29 @@ export interface UpsertUserRequest {
   first_name?: string; last_name?: string; display_name?: string; avatar_url?: string
 }
 
+/** Full provisioning request — syncs JWT claim-resolved roles to DynamoDB. */
+export interface ProvisionRequest {
+  external_id: string
+  organization_id: string
+  tenant_id: string
+  email: string
+  /** Full decoded JWT claims — used by the claim-resolver to sync Porth roles. */
+  jwt_claims: Record<string, unknown>
+  app_namespace?: string
+  first_name?: string
+  last_name?: string
+  display_name?: string
+  avatar_url?: string
+}
+
+export interface ProvisionResponse {
+  user: User
+  is_new: boolean
+  /** Porth role IDs that were synced from JWT claims. */
+  roles_synced: string[]
+  org_unit_resolved: boolean
+}
+
 // Permissions
 export interface Permission {
   id: string; key: string; display_name: string; description?: string
