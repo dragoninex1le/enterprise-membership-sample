@@ -2,11 +2,12 @@ import { createBrowserRouter, Navigate } from 'react-router-dom'
 import Layout from './components/Layout'
 import ProtectedRoute from './components/ProtectedRoute'
 import { useHasRole } from './hooks/useRoles'
+import { PLATFORM_ADMIN } from './constants'
 
 /** Redirects the root path based on the caller's role. Platform admins land on
  *  the organisations page; everyone else goes to the dashboard. */
 function RootRedirect() {
-  const isPlatformAdmin = useHasRole('platform-admin')
+  const isPlatformAdmin = useHasRole(PLATFORM_ADMIN)
   return isPlatformAdmin
     ? <Navigate to="/admin/platform/organizations" replace />
     : <Navigate to="/dashboard" replace />
@@ -24,11 +25,6 @@ import PermissionsPage from './pages/PermissionsPage'
 import ClaimMappingConfigPage from './pages/ClaimMappingConfigPage'
 import ClaimRoleMappingPage from './pages/ClaimRoleMappingPage'
 
-// Role name constants — these must match what the Porth bootstrap creates and
-// what the IdP Action injects into the JWT via the claim mapping.
-// Tenant-level roles (viewer, ar_clerk, etc.) are sample-app roles configured
-// in claim role mappings — they are NOT hardcoded platform roles.
-const PLATFORM_ADMIN = 'platform-admin'
 
 export const router = createBrowserRouter([
   {

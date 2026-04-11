@@ -53,6 +53,21 @@ export function useCurrentUser(tenantConfig: TenantIdpConfig | null): {
 
     const { tenantId, organizationId } = tenantConfig
 
+    // Validate required IdP fields before hitting the API — sub and email are
+    // non-optional on the Porth side; a missing value would produce an invalid
+    // upsert payload and a confusing 4xx error rather than a clear UI message.
+    if (!auth0User.sub || !auth0User.email) {
+      setError('Auth0 user profile is missing required fields (sub or email). Cannot provision user.')
+      setLoading(false)
+      return
+    }
+
+    // Signal that provisioning is in-flight so ProtectedRoute continues to
+    // show the loading state rather than evaluating roles against a null user.
+    setLoading(true)
+    setError(null)
+    setCurrentUser(null)
+
     // Single call: provision (upsert profile + sync JWT claim-resolved roles)
     // and return the full user context atomically.  The full Auth0 user object
     // is passed as jwt_claims so the Porth claim-resolver can map IdP claims
@@ -61,8 +76,8 @@ export function useCurrentUser(tenantConfig: TenantIdpConfig | null): {
     // never affected.
     usersApi
       .me({
-        external_id: auth0User.sub!,
-        email: auth0User.email!,
+        external_id: auth0User.sub,
+        email: auth0User.email,
         organization_id: organizationId,
         tenant_id: tenantId,
         // Pass the full decoded Auth0 user object as jwt_claims.  Custom

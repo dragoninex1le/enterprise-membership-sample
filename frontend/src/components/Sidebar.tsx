@@ -1,5 +1,6 @@
 import { NavLink } from 'react-router-dom'
 import { useHasRole } from '../hooks/useRoles'
+import { PLATFORM_ADMIN } from '../constants'
 
 const linkClass = ({ isActive }: { isActive: boolean }) =>
   `flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors ${
@@ -13,9 +14,7 @@ const sectionLabel = (label: string) => (
 )
 
 export default function Sidebar() {
-  // 'platform-admin' is the Porth role for Estyn operators (platform administrators).
-  // Tenant-level roles (ar_clerk, etc.) are configured per-tenant in claim role mappings.
-  const isPlatformAdmin = useHasRole('platform-admin')
+  const isPlatformAdmin = useHasRole(PLATFORM_ADMIN)
 
   // Tenant-level app roles — these do not include platform-admin because
   // platform admins have no business in the tenant application pages.
