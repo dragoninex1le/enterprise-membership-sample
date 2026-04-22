@@ -1,0 +1,111 @@
+name: Bootstrap Platform Tenant
+
+# Run this manually after any porth-components deployment that recreates or
+# resets the DynamoDB tables.  Idempotent — safe to run multiple times.
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  bootstrap:
+    name: Seed platform org, tenant, roles and permissions
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve porth-components stack outputs
+        run: |
+          STACK=porth-components
+          get_output() {
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text
+          }
+          echo "PORTH_API_URL=$(get_output PorthApiUrl)"                                       >> $GITHUB_ENV
+          echo "PORTH_PERMISSIONS_TABLE=$(get_output PermissionsTableName)"                    >> $GITHUB_ENV
+          echo "PORTH_ROLES_TABLE=$(get_output RolesTableName)"                                >> $GITHUB_ENV
+          echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$(get_output ClaimMappingConfigsTableName)"  >> $GITHUB_ENV
+
+      - name: Install porth-common
+        run: pip install "git+https://${{ secrets.GH_PAT }}@github.com/dragoninex1le/Components.git"
+
+      - name: Bootstrap platform tenant (permissions, roles, claim mapping)
+        env:
+          PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
+          PORTH_ROLES_TABLE: ${{ env.PORTH_ROLES_TABLE }}
+          PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
+        run: python3 scripts/bootstrap_platform_tenant.py
+
+      - name: Create platform org and tenant
+        run: |
+          TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
+          RESPONSE_FILE="/tmp/platform-org.json"
+          PAYLOAD=$(cat <<EOF
+          {
+            "name": "Platform",
+            "slug": "platform",
+            "tenant": {
+              "tenant_id": "platform",
+              "display_name": "Platform",
+              "environment_type": "production",
+              "idp_config_override": {
+                "domain": "${{ secrets.PLATFORM_AUTH0_DOMAIN }}",
+                "client_id": "${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}",
+                "audience": "${{ secrets.PLATFORM_AUTH0_AUDIENCE }}"
+              }
+            }
+          }
+          EOF
+          )
+          STATUS=$(curl -s -L -o "$RESPONSE_FILE" -w "%{http_code}" \
+            -X POST "${{ env.PORTH_API_URL }}/organizations" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $TEST_TOKEN" \
+            -d "$PAYLOAD")
+          echo "POST /organizations → HTTP $STATUS"
+          if [[ "$STATUS" == "200" || "$STATUS" == "201" ]]; then
+            echo "✅ Platform org and tenant created"
+          elif [[ "$STATUS" == "409" ]]; then
+            echo "✅ Platform org/tenant already exists — skipping"
+          else
+            echo "❌ Unexpected status $STATUS:"
+            cat "$RESPONSE_FILE"
+            exit 1
+          fi
+
+      - name: Patch platform tenant IdP config
+        run: |
+          TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
+          RESPONSE_FILE="/tmp/patch-tenant.json"
+          PAYLOAD="{\"idp_config_override\": {\"domain\": \"${{ secrets.PLATFORM_AUTH0_DOMAIN }}\", \"client_id\": \"${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}\", \"audience\": \"${{ secrets.PLATFORM_AUTH0_AUDIENCE }}\"}}"
+          STATUS=$(curl -s -L -o "$RESPONSE_FILE" -w "%{http_code}" \
+            -X PATCH "${{ env.PORTH_API_URL }}/tenants/platform" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $TEST_TOKEN" \
+            -d "$PAYLOAD")
+          echo "PATCH /tenants/platform → HTTP $STATUS"
+          if [[ "$STATUS" != "200" ]]; then
+            echo "❌ Failed to patch tenant IdP config"
+            cat "$RESPONSE_FILE"
+            exit 1
+          fi
+          echo "✅ Platform tenant IdP config updated"
