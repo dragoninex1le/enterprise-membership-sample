@@ -21,10 +21,10 @@ echo '{}' > "$USER_FILE"
 
 echo "Testing: POST /users/upsert (create test user)"
 UPSERT_PAYLOAD=$(cat <<EOF
-{"email": "$EMAIL", "display_name": "$DISPLAY_NAME"}
+{"external_id": "$EXTERNAL_ID", "organization_id": "$ORG_ID", "tenant_id": "$TENANT_ID", "email": "$EMAIL", "display_name": "$DISPLAY_NAME"}
 EOF
 )
-STATUS=$(api_request "POST" "/users/upsert?external_id=$EXTERNAL_ID&org_id=$ORG_ID&tenant_id=$TENANT_ID" "$RESPONSE_FILE" "$UPSERT_PAYLOAD" | tail -1)
+STATUS=$(api_request "POST" "/users/upsert" "$RESPONSE_FILE" "$UPSERT_PAYLOAD" | tail -1)
 
 if [[ "$STATUS" == "200" || "$STATUS" == "201" ]]; then
     USER_ID=$(python3 -c "import json; data = json.load(open('$RESPONSE_FILE')); print(data.get('id', data.get('user_id', '')))" 2>/dev/null || echo "")
