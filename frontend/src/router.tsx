@@ -1,6 +1,17 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom'
 import Layout from './components/Layout'
 import ProtectedRoute from './components/ProtectedRoute'
+import { useHasRole } from './hooks/useRoles'
+import { PLATFORM_ADMIN } from './constants'
+
+/** Redirects the root path based on the caller's role. Platform admins land on
+ *  the organisations page; everyone else goes to the dashboard. */
+function RootRedirect() {
+  const isPlatformAdmin = useHasRole(PLATFORM_ADMIN)
+  return isPlatformAdmin
+    ? <Navigate to="/admin/platform/organizations" replace />
+    : <Navigate to="/dashboard" replace />
+}
 import DashboardPage from './pages/DashboardPage'
 import ARPage from './pages/ARPage'
 import APPage from './pages/APPage'
@@ -14,43 +25,46 @@ import PermissionsPage from './pages/PermissionsPage'
 import ClaimMappingConfigPage from './pages/ClaimMappingConfigPage'
 import ClaimRoleMappingPage from './pages/ClaimRoleMappingPage'
 
+
 export const router = createBrowserRouter([
   {
     path: '/',
     element: <Layout />,
     children: [
-      { index: true, element: <Navigate to="/dashboard" replace /> },
+      { index: true, element: <RootRedirect /> },
 
       // ── Functional areas ──────────────────────────────────────────────────
+      // These routes use tenant-configured role names from claim role mappings.
+      // platform-admin is included so Estyn operators can access the sample app.
       {
-        element: <ProtectedRoute roles={['viewer', 'ar_clerk', 'ap_clerk', 'controller', 'admin']} />,
+        element: <ProtectedRoute roles={['viewer', 'ar_clerk', 'ap_clerk', 'controller', PLATFORM_ADMIN]} />,
         children: [
           { path: 'dashboard', element: <DashboardPage /> },
         ],
       },
       {
-        element: <ProtectedRoute roles={['ar_clerk', 'controller', 'admin']} />,
+        element: <ProtectedRoute roles={['ar_clerk', 'controller', PLATFORM_ADMIN]} />,
         children: [
           { path: 'ar', element: <ARPage /> },
         ],
       },
       {
-        element: <ProtectedRoute roles={['ap_clerk', 'controller', 'admin']} />,
+        element: <ProtectedRoute roles={['ap_clerk', 'controller', PLATFORM_ADMIN]} />,
         children: [
           { path: 'ap', element: <APPage /> },
         ],
       },
       {
-        element: <ProtectedRoute roles={['controller', 'admin']} />,
+        element: <ProtectedRoute roles={['controller', PLATFORM_ADMIN]} />,
         children: [
           { path: 'approvals', element: <ApprovalsPage /> },
         ],
       },
 
-      // ── Platform admin (Estyn employees — org/tenant onboarding) ──────────
+      // ── Platform admin (Estyn operators — org/tenant onboarding) ──────────
       {
         path: 'admin/platform',
-        element: <ProtectedRoute roles={['admin']} />,
+        element: <ProtectedRoute roles={[PLATFORM_ADMIN]} />,
         children: [
           { index: true, element: <Navigate to="organizations" replace /> },
           { path: 'organizations', element: <OrganizationsPage /> },
@@ -61,7 +75,7 @@ export const router = createBrowserRouter([
       // ── Tenant admin (local admin — users, roles, permissions) ────────────
       {
         path: 'admin/tenant',
-        element: <ProtectedRoute roles={['admin']} />,
+        element: <ProtectedRoute roles={[PLATFORM_ADMIN]} />,
         children: [
           { index: true, element: <Navigate to="users" replace /> },
           { path: 'users', element: <UsersPage /> },

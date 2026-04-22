@@ -1,19 +1,21 @@
-import { useAuth0 } from '@auth0/auth0-react'
+import { usePorthContext } from '../context/PorthContext'
 
-// Auth0 custom claim namespace — roles are embedded here in the JWT
-const ROLES_CLAIM = 'https://porth.io/roles'
-
-export type AppRole = 'viewer' | 'ar_clerk' | 'ap_clerk' | 'controller' | 'admin'
-
-export function useRoles(): AppRole[] {
-  const { user } = useAuth0()
-  if (!user) return []
-  const raw = user[ROLES_CLAIM]
-  if (!Array.isArray(raw)) return []
-  return raw as AppRole[]
+/**
+ * Returns the Porth role names held by the current user, sourced from the
+ * Porth API via useCurrentUser. Role names are tenant-configured strings —
+ * they are NOT a hardcoded enum in the frontend.
+ *
+ * For Estyn platform operators the role is 'platform-admin'.
+ * For tenant-level users, roles are whatever the tenant has configured
+ * in their claim role mappings (e.g. 'viewer', 'ar_clerk', 'ap_clerk',
+ * 'controller').
+ */
+export function useRoles(): string[] {
+  const { currentUser } = usePorthContext()
+  return currentUser?.roles.map(r => r.name) ?? []
 }
 
-export function useHasRole(...roles: AppRole[]): boolean {
+export function useHasRole(...roles: string[]): boolean {
   const userRoles = useRoles()
   return roles.some(r => userRoles.includes(r))
 }

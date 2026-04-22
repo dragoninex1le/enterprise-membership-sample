@@ -2,7 +2,7 @@ name: Deploy Admin UI
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
   workflow_dispatch:
 
 permissions:
@@ -11,6 +11,7 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
+  ENVIRONMENT: dev
   SAM_STACK_NAME: enterprise-membership-sample
   NODE_VERSION: '20'
 
@@ -43,11 +44,12 @@ jobs:
       - name: Validate required secrets
         run: |
           MISSING=()
-          [ -z "${{ secrets.ACM_CERTIFICATE_ARN }}" ]       && MISSING+=("ACM_CERTIFICATE_ARN")
+          [ -z "${{ secrets.ACM_CERTIFICATE_ARN }}" ]        && MISSING+=("ACM_CERTIFICATE_ARN")
           [ -z "${{ secrets.GH_PAT }}" ]                    && MISSING+=("GH_PAT")
           [ -z "${{ secrets.AWS_ROLE_ARN }}" ]              && MISSING+=("AWS_ROLE_ARN")
           [ -z "${{ secrets.PLATFORM_AUTH0_DOMAIN }}" ]     && MISSING+=("PLATFORM_AUTH0_DOMAIN")
           [ -z "${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}" ]  && MISSING+=("PLATFORM_AUTH0_CLIENT_ID")
+          [ -z "${{ secrets.PORTH_AUTH_TEST_TOKEN }}" ]     && MISSING+=("PORTH_AUTH_TEST_TOKEN")
           if [ ${#MISSING[@]} -gt 0 ]; then
             echo "❌ Missing required secrets: ${MISSING[*]}"
             exit 1
@@ -119,6 +121,7 @@ jobs:
 
       # ── Step 2: Cleanup (pre-test) ───────────────────────────────────────
       - name: Cleanup (pre-test)
+        if: github.ref == 'refs/heads/main'
         run: |
           python3 - <<'EOF'
           import boto3, json, sys
@@ -152,13 +155,14 @@ jobs:
 
       # ── Step 3: Run E2E tests ──────────────────────────────────────────────
       - name: Run E2E tests
+        if: github.ref == 'refs/heads/main'
         run: |
           PORTH_API_URL="${{ env.PORTH_API_URL }}" \
             bash scripts/api-tests/run-all.sh
 
       # ── Step 4: Cleanup (post-test) ───────────────────────────────────────
       - name: Cleanup (post-test)
-        if: always()
+        if: always() && github.ref == 'refs/heads/main'
         run: |
           python3 - <<'EOF'
           import boto3, json, sys
@@ -191,6 +195,9 @@ jobs:
           EOF
 
       # ── Step 5: Bootstrap platform tenant ────────────────────────────────
+      # Runs on every branch so every deployed environment has the platform
+      # tenant seeded.  Uses the CI test-token to authenticate against the
+      # Lambda-authorizer-protected API.
       - name: Install porth-common
         run: pip install "git+https://${{ secrets.GH_PAT }}@github.com/dragoninex1le/Components.git"
 
@@ -203,6 +210,10 @@ jobs:
 
       - name: Create platform org and tenant
         run: |
+          # CI test token stored as GitHub Secret — same value passed to the
+          # Lambda as AuthTestToken via the Components SAM deploy.
+          TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
+
           RESPONSE_FILE="/tmp/platform-org.json"
           PAYLOAD=$(cat <<EOF
           {
@@ -214,7 +225,8 @@ jobs:
               "environment_type": "production",
               "idp_config_override": {
                 "domain": "${{ secrets.PLATFORM_AUTH0_DOMAIN }}",
-                "client_id": "${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}"
+                "client_id": "${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}",
+                "audience": "${{ secrets.PLATFORM_AUTH0_AUDIENCE }}"
               }
             }
           }
@@ -223,8 +235,9 @@ jobs:
           STATUS=$(curl -s -L -o "$RESPONSE_FILE" -w "%{http_code}" \
             -X POST "${{ env.PORTH_API_URL }}/organizations" \
             -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $TEST_TOKEN" \
             -d "$PAYLOAD")
-          echo "POST /organizations/platform → HTTP $STATUS"
+          echo "POST /organizations → HTTP $STATUS"
           if [[ "$STATUS" == "200" || "$STATUS" == "201" ]]; then
             echo "Platform org and tenant created"
           elif [[ "$STATUS" == "409" ]]; then
@@ -234,6 +247,25 @@ jobs:
             cat "$RESPONSE_FILE"
             exit 1
           fi
+
+      - name: Patch platform tenant Auth0 audience
+        run: |
+          TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
+          AUDIENCE="${{ secrets.PLATFORM_AUTH0_AUDIENCE }}"
+          RESPONSE_FILE="/tmp/patch-tenant.json"
+          PAYLOAD="{\"idp_config_override\": {\"domain\": \"${{ secrets.PLATFORM_AUTH0_DOMAIN }}\", \"client_id\": \"${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}\", \"audience\": \"$AUDIENCE\"}}"
+          STATUS=$(curl -s -L -o "$RESPONSE_FILE" -w "%{http_code}" \
+            -X PATCH "${{ env.PORTH_API_URL }}/tenants/platform" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $TEST_TOKEN" \
+            -d "$PAYLOAD")
+          echo "PATCH /tenants/platform → HTTP $STATUS"
+          cat "$RESPONSE_FILE"
+          if [[ "$STATUS" != "200" ]]; then
+            echo "Failed to patch tenant audience"
+            exit 1
+          fi
+
 
       - name: Sync assets to S3
         run: |

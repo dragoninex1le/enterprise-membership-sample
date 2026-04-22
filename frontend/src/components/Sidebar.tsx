@@ -1,5 +1,6 @@
 import { NavLink } from 'react-router-dom'
 import { useHasRole } from '../hooks/useRoles'
+import { PLATFORM_ADMIN } from '../constants'
 
 const linkClass = ({ isActive }: { isActive: boolean }) =>
   `flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors ${
@@ -13,10 +14,13 @@ const sectionLabel = (label: string) => (
 )
 
 export default function Sidebar() {
-  const isAdmin = useHasRole('admin')
-  const canSeeAR = useHasRole('ar_clerk', 'controller', 'admin')
-  const canSeeAP = useHasRole('ap_clerk', 'controller', 'admin')
-  const canSeeApprovals = useHasRole('controller', 'admin')
+  const isPlatformAdmin = useHasRole(PLATFORM_ADMIN)
+
+  // Tenant-level app roles — these do not include platform-admin because
+  // platform admins have no business in the tenant application pages.
+  const canSeeAR = useHasRole('ar_clerk', 'controller')
+  const canSeeAP = useHasRole('ap_clerk', 'controller')
+  const canSeeApprovals = useHasRole('controller')
 
   return (
     <nav className="w-56 bg-white border-r border-gray-200 flex flex-col py-4 shrink-0">
@@ -26,49 +30,36 @@ export default function Sidebar() {
       </div>
       <div className="flex-1 px-2 space-y-1">
 
-        {sectionLabel('Main')}
-        <NavLink to="/dashboard" className={linkClass}>
-          <span>📊</span>Dashboard
-        </NavLink>
-        {canSeeAR && (
-          <NavLink to="/ar" className={linkClass}>
-            <span>📥</span>Accounts Receivable
-          </NavLink>
-        )}
-        {canSeeAP && (
-          <NavLink to="/ap" className={linkClass}>
-            <span>📤</span>Accounts Payable
-          </NavLink>
-        )}
-        {canSeeApprovals && (
-          <NavLink to="/approvals" className={linkClass}>
-            <span>✅</span>Approvals
-          </NavLink>
-        )}
-
-        {isAdmin && (
+        {isPlatformAdmin ? (
+          // Platform admins only manage organisations and tenants — no app sections.
           <>
             {sectionLabel('Platform Admin')}
             <NavLink to="/admin/platform/organizations" className={linkClass}>
               <span>🏢</span>Organizations
             </NavLink>
-
-            {sectionLabel('Tenant Admin')}
-            <NavLink to="/admin/tenant/users" className={linkClass}>
-              <span>👤</span>Users
+          </>
+        ) : (
+          // Tenant users see app-level pages based on their assigned roles.
+          <>
+            {sectionLabel('Main')}
+            <NavLink to="/dashboard" className={linkClass}>
+              <span>📊</span>Dashboard
             </NavLink>
-            <NavLink to="/admin/tenant/roles" className={linkClass}>
-              <span>🔑</span>Roles
-            </NavLink>
-            <NavLink to="/admin/tenant/permissions" className={linkClass}>
-              <span>🛡️</span>Permissions
-            </NavLink>
-            <NavLink to="/admin/tenant/claim-config" className={linkClass}>
-              <span>⚙️</span>Claim Config
-            </NavLink>
-            <NavLink to="/admin/tenant/claim-mappings" className={linkClass}>
-              <span>🔀</span>Claim Mappings
-            </NavLink>
+            {canSeeAR && (
+              <NavLink to="/ar" className={linkClass}>
+                <span>📥</span>Accounts Receivable
+              </NavLink>
+            )}
+            {canSeeAP && (
+              <NavLink to="/ap" className={linkClass}>
+                <span>📤</span>Accounts Payable
+              </NavLink>
+            )}
+            {canSeeApprovals && (
+              <NavLink to="/approvals" className={linkClass}>
+                <span>✅</span>Approvals
+              </NavLink>
+            )}
           </>
         )}
       </div>
