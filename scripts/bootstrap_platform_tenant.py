@@ -2,12 +2,17 @@
 
 Idempotently creates the following for the reserved 'platform' tenant:
 
-  1. Permissions       — via porth_common PermissionRepository
-  2. platform-admin    — via porth_common RoleRepository (system role)
-  3. Role–permissions  — via porth_common RoleRepository.set_role_permissions
-  4. Claim mapping     — via porth_common ClaimMappingConfigRepository
+  0. Platform org    — via porth_common OrganizationRepository (creates org + tenant together)
+  1. Permissions     — via porth_common PermissionRepository
+  2. platform-admin  — via porth_common RoleRepository (system role)
+  3. Role–permissions — via porth_common RoleRepository.set_role_permissions
+  4. Claim mapping   — via porth_common ClaimMappingConfigRepository
+
+Step 0 must run first — the TENANT#platform DynamoDB record must exist before the
+authorizer can resolve organization_id for platform admin logins.
 
 Table names are resolved from env vars by porth_common.config:
+    PORTH_TENANTS_TABLE
     PORTH_PERMISSIONS_TABLE
     PORTH_ROLES_TABLE
     PORTH_CLAIM_MAPPING_CONFIGS_TABLE
@@ -15,6 +20,7 @@ Table names are resolved from env vars by porth_common.config:
 These are set in CI from the porth-components CloudFormation stack outputs.
 
 Usage (local):
+    PORTH_TENANTS_TABLE=porth-tenants-dev \\
     PORTH_PERMISSIONS_TABLE=porth-permissions-dev \\
     PORTH_ROLES_TABLE=porth-roles-dev \\
     PORTH_CLAIM_MAPPING_CONFIGS_TABLE=porth-claim-mapping-configs-dev \\
@@ -28,8 +34,10 @@ import hashlib
 from porth_common.providers.aws.repositories.claim_mapping_config_repo import (
     ClaimMappingConfigRepository,
 )
+from porth_common.providers.aws.repositories.organization_repo import OrganizationRepository
 from porth_common.providers.aws.repositories.permission_repo import PermissionRepository
 from porth_common.providers.aws.repositories.role_repo import RoleRepository
+from porth_common.providers.aws.repositories.tenant_repo import TenantRepository
 from porth_common.services.claim_mapping_codegen import MappingCodegen
 
 # ---------------------------------------------------------------------------
@@ -151,6 +159,35 @@ MAPPING_SOURCE: dict = {
 # ---------------------------------------------------------------------------
 
 
+def bootstrap_platform_org_and_tenant(
+    org_repo: OrganizationRepository,
+    tenant_repo: TenantRepository,
+) -> str:
+    """Idempotently create the platform Organisation and TENANT#platform records.
+
+    The TENANT#platform record must exist in DynamoDB before the authorizer can
+    resolve organization_id for platform admin logins.  Returns the org_id.
+    """
+    existing = tenant_repo.get_by_id(TENANT_ID)
+    if existing:
+        print(f"    exists   TENANT#{TENANT_ID} (org_id={existing.org_id})")
+        return existing.org_id
+
+    org, tenant = org_repo.create_with_tenant(
+        org_data={
+            "name": "Platform",
+            "slug": "platform",
+        },
+        tenant_data={
+            "tenant_id": TENANT_ID,
+            "display_name": "Platform",
+            "environment_type": "production",
+        },
+    )
+    print(f"    created  ORG#{org.id} + TENANT#{TENANT_ID}")
+    return org.id
+
+
 def bootstrap_permissions(repo: PermissionRepository) -> list[str]:
     """Idempotently register all platform admin permissions."""
     permission_keys: list[str] = []
@@ -250,29 +287,35 @@ def bootstrap_claim_mapping_config(
 
 
 def main() -> None:
+    org_repo = OrganizationRepository()
+    tenant_repo = TenantRepository()
     perm_repo = PermissionRepository()
     role_repo = RoleRepository()
     config_repo = ClaimMappingConfigRepository()
 
     print("Bootstrapping platform tenant")
 
+    print("\n0. Platform org + tenant")
+    bootstrap_platform_org_and_tenant(org_repo, tenant_repo)
+    print("   ✅ platform org and tenant ready")
+
     print("\n1. Permissions")
     permission_keys = bootstrap_permissions(perm_repo)
-    print(f"   \u2705 {len(permission_keys)} permissions ready")
+    print(f"   ✅ {len(permission_keys)} permissions ready")
 
     print("\n2. platform-admin role")
     role_id = bootstrap_role(role_repo)
-    print(f"   \u2705 role_id={role_id}")
+    print(f"   ✅ role_id={role_id}")
 
-    print("\n3. Role\u2013permission links")
+    print("\n3. Role–permission links")
     bootstrap_role_permissions(role_repo, role_id, permission_keys)
-    print("   \u2705 permissions linked")
+    print("   ✅ permissions linked")
 
     print("\n4. Claim mapping config")
     bootstrap_claim_mapping_config(config_repo, role_id)
-    print("   \u2705 claim mapping config ready")
+    print("   ✅ claim mapping config ready")
 
-    print("\n\u2705 Platform tenant bootstrap complete")
+    print("\n✅ Platform tenant bootstrap complete")
 
 
 if __name__ == "__main__":
