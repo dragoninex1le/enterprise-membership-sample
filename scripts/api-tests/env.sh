@@ -13,6 +13,10 @@ NC='\033[0m' # No Color
 # API Configuration
 BASE_URL="${PORTH_API_URL:-https://1pdohk35u0.execute-api.us-east-1.amazonaws.com}"
 
+# Auth token — required now that the Lambda authorizer is live on all routes.
+# Set via PORTH_AUTH_TEST_TOKEN env var (GitHub Secret passed by deploy.yml).
+AUTH_TOKEN="${PORTH_AUTH_TEST_TOKEN:-}"
+
 # Test counters
 TESTS_PASSED=0
 TESTS_FAILED=0
@@ -72,7 +76,8 @@ check_status_and_content() {
     fi
 }
 
-# Helper function to make API requests and capture status code
+# Helper function to make API requests and capture status code.
+# Always includes the Authorization header so requests pass the Lambda authorizer.
 api_request() {
     local method="$1"
     local endpoint="$2"
@@ -82,10 +87,12 @@ api_request() {
     if [[ -z "$data" ]]; then
         curl -s -L -w "\n%{http_code}" -o "$output_file" \
             -X "$method" \
+            -H "Authorization: Bearer $AUTH_TOKEN" \
             "$BASE_URL$endpoint"
     else
         curl -s -L -w "\n%{http_code}" -o "$output_file" \
             -X "$method" \
+            -H "Authorization: Bearer $AUTH_TOKEN" \
             -H "Content-Type: application/json" \
             -d "$data" \
             "$BASE_URL$endpoint"
@@ -121,4 +128,4 @@ pretty_json() {
     python3 -m json.tool "$json_file" 2>/dev/null || cat "$json_file"
 }
 
-export BASE_URL TESTS_PASSED TESTS_FAILED RED GREEN YELLOW BLUE NC
+export BASE_URL AUTH_TOKEN TESTS_PASSED TESTS_FAILED RED GREEN YELLOW BLUE NC
