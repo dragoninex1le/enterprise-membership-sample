@@ -72,6 +72,7 @@ jobs:
               --output text
           }
           echo "PORTH_API_URL=$(get_output PorthApiUrl)"                                       >> $GITHUB_ENV
+          echo "PORTH_TENANTS_TABLE=$(get_output TenantsTableName)"                            >> $GITHUB_ENV
           echo "PORTH_PERMISSIONS_TABLE=$(get_output PermissionsTableName)"                    >> $GITHUB_ENV
           echo "PORTH_ROLES_TABLE=$(get_output RolesTableName)"                                >> $GITHUB_ENV
           echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$(get_output ClaimMappingConfigsTableName)"  >> $GITHUB_ENV
@@ -115,11 +116,15 @@ jobs:
             --stack-name porth-qa-tools \
             --query "Stacks[0].Outputs[?OutputKey=='QaCleanupFunctionArn'].OutputValue" \
             --output text)
-          echo "bucket=$BUCKET"       >> $GITHUB_OUTPUT
-          echo "cf_id=$CF_ID"         >> $GITHUB_OUTPUT
+          echo "bucket=$BUCKET"         >> $GITHUB_OUTPUT
+          echo "cf_id=$CF_ID"           >> $GITHUB_OUTPUT
           echo "cleanup_fn=$CLEANUP_FN" >> $GITHUB_OUTPUT
 
-      # ── Step 2: Cleanup (pre-test) ───────────────────────────────────────
+      # ── Step 2: Install porth-common (needed for bootstrap) ───────────────
+      - name: Install porth-common
+        run: pip install "git+https://${{ secrets.GH_PAT }}@github.com/dragoninex1le/Components.git"
+
+      # ── Step 3: Cleanup (pre-test) ────────────────────────────────────────
       - name: Cleanup (pre-test)
         if: github.ref == 'refs/heads/main'
         run: |
@@ -153,14 +158,28 @@ jobs:
           sys.exit(1 if failed else 0)
           EOF
 
-      # ── Step 3: Run E2E tests ──────────────────────────────────────────────
+      # ── Step 4: Bootstrap platform tenant (pre-test) ──────────────────────
+      # Must run after cleanup and before E2E tests. The bootstrap writes
+      # directly to DynamoDB via porth_common repositories — the Porth API
+      # itself calls assert_active(tenant_id) on every request, so the platform
+      # tenant record must exist before any API call can succeed.
+      - name: Bootstrap platform tenant (pre-test)
+        if: github.ref == 'refs/heads/main'
+        env:
+          PORTH_TENANTS_TABLE: ${{ env.PORTH_TENANTS_TABLE }}
+          PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
+          PORTH_ROLES_TABLE: ${{ env.PORTH_ROLES_TABLE }}
+          PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
+        run: python3 scripts/bootstrap_platform_tenant.py
+
+      # ── Step 5: Run E2E tests ─────────────────────────────────────────────
       - name: Run E2E tests
         if: github.ref == 'refs/heads/main'
         run: |
           PORTH_API_URL="${{ env.PORTH_API_URL }}" \
             bash scripts/api-tests/run-all.sh
 
-      # ── Step 4: Cleanup (post-test) ───────────────────────────────────────
+      # ── Step 6: Cleanup (post-test) ───────────────────────────────────────
       - name: Cleanup (post-test)
         if: always() && github.ref == 'refs/heads/main'
         run: |
@@ -194,78 +213,35 @@ jobs:
           sys.exit(1 if failed else 0)
           EOF
 
-      # ── Step 5: Bootstrap platform tenant ────────────────────────────────
-      # Runs on every branch so every deployed environment has the platform
-      # tenant seeded.  Uses the CI test-token to authenticate against the
-      # Lambda-authorizer-protected API.
-      - name: Install porth-common
-        run: pip install "git+https://${{ secrets.GH_PAT }}@github.com/dragoninex1le/Components.git"
-
-      - name: Bootstrap platform tenant
+      # ── Step 7: Bootstrap platform tenant (post-test) ─────────────────────
+      # Re-seed after post-test cleanup so the live environment has the platform
+      # tenant, roles, and permissions in place.
+      - name: Bootstrap platform tenant (post-test)
         env:
+          PORTH_TENANTS_TABLE: ${{ env.PORTH_TENANTS_TABLE }}
           PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
           PORTH_ROLES_TABLE: ${{ env.PORTH_ROLES_TABLE }}
           PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
         run: python3 scripts/bootstrap_platform_tenant.py
 
-      - name: Create platform org and tenant
-        run: |
-          # CI test token stored as GitHub Secret — same value passed to the
-          # Lambda as AuthTestToken via the Components SAM deploy.
-          TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
-
-          RESPONSE_FILE="/tmp/platform-org.json"
-          PAYLOAD=$(cat <<EOF
-          {
-            "name": "Platform",
-            "slug": "platform",
-            "tenant": {
-              "tenant_id": "platform",
-              "display_name": "Platform",
-              "environment_type": "production",
-              "idp_config_override": {
-                "domain": "${{ secrets.PLATFORM_AUTH0_DOMAIN }}",
-                "client_id": "${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}",
-                "audience": "${{ secrets.PLATFORM_AUTH0_AUDIENCE }}"
-              }
-            }
-          }
-          EOF
-          )
-          STATUS=$(curl -s -L -o "$RESPONSE_FILE" -w "%{http_code}" \
-            -X POST "${{ env.PORTH_API_URL }}/organizations" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $TEST_TOKEN" \
-            -d "$PAYLOAD")
-          echo "POST /organizations → HTTP $STATUS"
-          if [[ "$STATUS" == "200" || "$STATUS" == "201" ]]; then
-            echo "Platform org and tenant created"
-          elif [[ "$STATUS" == "409" ]]; then
-            echo "Platform org/tenant already exists — skipping"
-          else
-            echo "Unexpected status $STATUS:"
-            cat "$RESPONSE_FILE"
-            exit 1
-          fi
-
-      - name: Patch platform tenant Auth0 audience
+      # ── Step 8: Patch platform tenant IdP config ──────────────────────────
+      - name: Patch platform tenant IdP config
         run: |
           TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
-          AUDIENCE="${{ secrets.PLATFORM_AUTH0_AUDIENCE }}"
           RESPONSE_FILE="/tmp/patch-tenant.json"
-          PAYLOAD="{\"idp_config_override\": {\"domain\": \"${{ secrets.PLATFORM_AUTH0_DOMAIN }}\", \"client_id\": \"${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}\", \"audience\": \"$AUDIENCE\"}}"
+          PAYLOAD="{\"idp_config_override\": {\"domain\": \"${{ secrets.PLATFORM_AUTH0_DOMAIN }}\", \"client_id\": \"${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}\", \"audience\": \"${{ secrets.PLATFORM_AUTH0_AUDIENCE }}\"}}"
           STATUS=$(curl -s -L -o "$RESPONSE_FILE" -w "%{http_code}" \
             -X PATCH "${{ env.PORTH_API_URL }}/tenants/platform" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $TEST_TOKEN" \
             -d "$PAYLOAD")
           echo "PATCH /tenants/platform → HTTP $STATUS"
-          cat "$RESPONSE_FILE"
           if [[ "$STATUS" != "200" ]]; then
-            echo "Failed to patch tenant audience"
+            echo "❌ Failed to patch tenant IdP config"
+            cat "$RESPONSE_FILE"
             exit 1
           fi
-
+          echo "✅ Platform tenant IdP config updated"
 
       - name: Sync assets to S3
         run: |
