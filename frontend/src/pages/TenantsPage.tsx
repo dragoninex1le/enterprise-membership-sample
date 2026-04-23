@@ -9,11 +9,12 @@ const ENV_TYPES = ['production', 'staging', 'development', 'sandbox'] as const
 type EnvType = typeof ENV_TYPES[number]
 
 interface TenantForm {
+  tenant_id: string
   display_name: string
   environment_type: EnvType
 }
 
-const EMPTY_FORM: TenantForm = { display_name: '', environment_type: 'production' }
+const EMPTY_FORM: TenantForm = { tenant_id: '', display_name: '', environment_type: 'production' }
 
 export default function TenantsPage() {
   const { orgId } = useParams<{ orgId: string }>()
@@ -52,7 +53,7 @@ export default function TenantsPage() {
 
   function openEditModal(tenant: Tenant) {
     setEditingTenant(tenant)
-    setForm({ display_name: tenant.display_name, environment_type: tenant.environment_type })
+    setForm({ tenant_id: tenant.tenant_id, display_name: tenant.display_name, environment_type: tenant.environment_type })
     setSubmitError(null)
     setModalOpen(true)
   }
@@ -74,7 +75,7 @@ export default function TenantsPage() {
         const updated = await tenantsApi.update(editingTenant.tenant_id, body)
         setTenants(prev => prev.map(t => t.tenant_id === updated.tenant_id ? updated : t))
       } else {
-        const body: CreateTenantRequest = { org_id: orgId, display_name: form.display_name, environment_type: form.environment_type }
+        const body: CreateTenantRequest = { org_id: orgId, tenant_id: form.tenant_id, display_name: form.display_name, environment_type: form.environment_type }
         const created = await tenantsApi.create(body)
         setTenants(prev => [...prev, created])
       }
@@ -155,6 +156,7 @@ export default function TenantsPage() {
         <table className="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
           <thead className="bg-gray-50 text-left text-xs text-gray-500 uppercase tracking-wide">
             <tr>
+              <th className="px-4 py-3">Tenant ID</th>
               <th className="px-4 py-3">Display Name</th>
               <th className="px-4 py-3">Environment</th>
               <th className="px-4 py-3">Status</th>
@@ -165,6 +167,7 @@ export default function TenantsPage() {
           <tbody className="divide-y divide-gray-100 bg-white">
             {tenants.map(tenant => (
               <tr key={tenant.tenant_id} className="hover:bg-gray-50">
+                <td className="px-4 py-3 font-mono text-xs text-gray-500">{tenant.tenant_id}</td>
                 <td className="px-4 py-3 font-medium text-gray-900">{tenant.display_name}</td>
                 <td className="px-4 py-3 text-gray-500">{tenant.environment_type}</td>
                 <td className="px-4 py-3">
@@ -221,6 +224,20 @@ export default function TenantsPage() {
               </div>
             )}
             <form onSubmit={handleSubmit} className="space-y-4">
+              {!editingTenant && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Tenant ID</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. acme-dev"
+                    value={form.tenant_id}
+                    onChange={e => setForm(f => ({ ...f, tenant_id: e.target.value }))}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">Human-readable identifier — cannot be changed after creation.</p>
+                </div>
+              )}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
                 <input
