@@ -26,8 +26,18 @@ jobs:
           VITE_E2E_AUTH: 'true'
           VITE_API_BASE_URL: 'http://localhost:5173'
           VITE_DEV_TENANT_ID: 'test-tenant'
-      - name: Tier 2 tests (main branch only)
+      - name: Check Tier 2 readiness
+        id: tier2
         if: github.ref == 'refs/heads/main'
+        run: |
+          if [ -n "${{ secrets.PLAYWRIGHT_BASE_URL }}" ]; then
+            echo "enabled=true" >> $GITHUB_OUTPUT
+          else
+            echo "enabled=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Tier 2 skipped — PLAYWRIGHT_BASE_URL secret not configured"
+          fi
+      - name: Tier 2 tests (main branch only)
+        if: github.ref == 'refs/heads/main' && steps.tier2.outputs.enabled == 'true'
         run: npx playwright test tests/e2e/tier2/
         working-directory: frontend
         env:
