@@ -7,6 +7,7 @@ import type { TenantIdpConfig } from './useTenantConfig'
 export interface CurrentUser {
   porthUser: User
   roles: Role[]
+  permissions: string[]
 }
 
 /**
@@ -85,7 +86,7 @@ export function useCurrentUser(tenantConfig: TenantIdpConfig | null): {
         display_name: auth0User.name,
         avatar_url: auth0User.picture,
       })
-      .then(({ user: porthUser, roles }) => setCurrentUser({ porthUser, roles }))
+      .then(({ user: porthUser, roles, permissions }) => setCurrentUser({ porthUser, roles, permissions }))
       .catch(err => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false))
   }, [auth0Loading, isAuthenticated, auth0User, tenantConfig])
