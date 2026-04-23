@@ -45,12 +45,6 @@ Parameters:
       Environment name passed to Lambda functions as PORTH_ENVIRONMENT.
       Used to resolve DynamoDB table names (e.g. porth-sample-app-dev).
 
-  HttpApiId:
-    Type: String
-    Description: >
-      ID of the HTTP API Gateway from the porth-components stack
-      (output HttpApiId). Used to attach SampleAppFunction routes.
-
 Resources:
 
   # ── DynamoDB table for sample app data ───────────────────────────────────
@@ -93,7 +87,6 @@ Resources:
         ApiProxy:
           Type: HttpApi
           Properties:
-            ApiId: !Ref HttpApiId
             Path: /sample/{proxy+}
             Method: ANY
 
@@ -220,3 +213,9 @@ Outputs:
     Value: !Sub https://${CloudFrontDistribution.DomainName}
     Export:
       Name: !Sub ${AWS::StackName}-CloudFrontUrl
+
+  SampleAppApiUrl:
+    Description: Sample app API Gateway URL
+    Value: !Sub https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com
+    Export:
+      Name: !Sub ${AWS::StackName}-SampleAppApiUrl
