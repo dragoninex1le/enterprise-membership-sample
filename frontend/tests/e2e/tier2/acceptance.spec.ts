@@ -37,7 +37,26 @@ test.describe.serial('Acceptance', () => {
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
     await expect(page).toHaveURL(/\/admin\/platform\/organizations/)
     await expect(page.getByRole('heading', { name: 'Organizations' })).toBeVisible()
-    await expect(page.getByRole('button', { name: /New Organization/i })).toBeVisible()
+
+    // Open New Organization modal and fill all required fields
+    await page.getByRole('button', { name: /New Organization/i }).click()
+    await page.getByLabel('Name').fill('E2E Test Org')
+    await page.getByLabel('Slug').fill('e2e-test-org')
+    await page.getByLabel('Tenant ID').fill('e2e-test-dev')
+    await page.getByLabel('Display Name').fill('E2E Test Dev')
+    await page.getByRole('button', { name: 'Create' }).click()
+
+    // Accept either success (modal closes, org in list) or 409 conflict (org already exists from prev run)
+    await page.waitForTimeout(1500)
+    const modalVisible = await page.locator('text=New Organization').isVisible()
+    if (modalVisible) {
+      // Modal still open means API returned an error — check it's a conflict, not a validation error
+      const errorText = await page.locator('[class*="red"]').textContent() ?? ''
+      expect(errorText.toLowerCase()).toMatch(/already|exist|conflict/)
+    } else {
+      // Modal closed = org created successfully
+      await expect(page.getByText('E2E Test Org')).toBeVisible()
+    }
   })
 
   test('tenant user is provisioned and sees dashboard', async ({ page }) => {
