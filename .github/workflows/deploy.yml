@@ -76,6 +76,7 @@ jobs:
           echo "PORTH_PERMISSIONS_TABLE=$(get_output PermissionsTableName)"                    >> $GITHUB_ENV
           echo "PORTH_ROLES_TABLE=$(get_output RolesTableName)"                                >> $GITHUB_ENV
           echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$(get_output ClaimMappingConfigsTableName)"  >> $GITHUB_ENV
+          echo "PORTH_HTTP_API_ID=$(get_output HttpApiId)"                                     >> $GITHUB_ENV
 
       - name: Install frontend dependencies
         working-directory: frontend
@@ -99,6 +100,8 @@ jobs:
               Environment=dev \
               PorthApiUrl=${{ env.PORTH_API_URL }} \
               AcmCertificateArn=${{ secrets.ACM_CERTIFICATE_ARN }} \
+              PorthEnvironment=dev \
+              HttpApiId=${{ env.PORTH_HTTP_API_ID }} \
             --no-fail-on-empty-changeset
 
       - name: Resolve stack outputs
