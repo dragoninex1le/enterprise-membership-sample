@@ -88,13 +88,17 @@ jobs:
           VITE_API_BASE_URL: ${{ env.PORTH_API_URL }}
           VITE_PLATFORM_APEX: porth-sample
 
-      # ── Step 1: SAM deploy ─────────────────────────────────────────
+      # ── Step 1: SAM build + deploy ─────────────────────────────────────
+      - name: SAM build
+        run: sam build
+
       - name: SAM deploy (infrastructure)
         run: |
           sam deploy \
             --stack-name ${{ env.SAM_STACK_NAME }} \
             --region ${{ env.AWS_REGION }} \
             --capabilities CAPABILITY_IAM \
+            --resolve-s3 \
             --parameter-overrides \
               Environment=dev \
               PorthApiUrl=${{ env.PORTH_API_URL }} \
