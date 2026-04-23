@@ -1,44 +1,59 @@
 name: E2E Tests
+
 on:
   push:
     branches: ['**']
   pull_request:
   workflow_dispatch:
+  # Tier 2 only fires after the deploy finishes — prevents testing a stale live site
+  workflow_run:
+    workflows: ["Deploy Admin UI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
   e2e:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # When triggered by workflow_run, check out the commit that was deployed
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
       - uses: actions/setup-node@v4
         with: { node-version: '20', cache: 'npm', cache-dependency-path: 'frontend/package-lock.json' }
+
       - run: npm ci
         working-directory: frontend
+
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ hashFiles('frontend/package-lock.json') }}
+
       - run: npx playwright install --with-deps chromium
         working-directory: frontend
-      - name: Tier 1 tests
+
+      - name: Tier 1 tests (always)
+        # Tier 1 uses a mocked API — no live deployment needed
+        # Skip on workflow_run triggers to avoid re-running Tier 1 a second time for each push
+        if: github.event_name != 'workflow_run'
         run: npx playwright test tests/e2e/tier1/
         working-directory: frontend
         env:
           VITE_E2E_AUTH: 'true'
           VITE_API_BASE_URL: 'http://localhost:5173'
           VITE_DEV_TENANT_ID: 'test-tenant'
-      - name: Check Tier 2 readiness
-        id: tier2
-        if: github.ref == 'refs/heads/main'
-        run: |
-          if [ -n "${{ secrets.PLAYWRIGHT_BASE_URL }}" ]; then
-            echo "enabled=true" >> $GITHUB_OUTPUT
-          else
-            echo "enabled=false" >> $GITHUB_OUTPUT
-            echo "⚠️ Tier 2 skipped — PLAYWRIGHT_BASE_URL secret not configured"
-          fi
-      - name: Tier 2 tests (main branch only)
-        if: github.ref == 'refs/heads/main' && steps.tier2.outputs.enabled == 'true'
+
+      - name: Tier 2 tests (after successful deploy to main)
+        if: |
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.conclusion == 'success'
         run: npx playwright test tests/e2e/tier2/
         working-directory: frontend
         env:
@@ -49,6 +64,7 @@ jobs:
           PORTH_TENANT_USER_PASSWORD: ${{ secrets.PORTH_TENANT_USER_PASSWORD }}
           PORTH_VIEWER_EMAIL: ${{ secrets.PORTH_VIEWER_EMAIL }}
           PORTH_VIEWER_PASSWORD: ${{ secrets.PORTH_VIEWER_PASSWORD }}
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
