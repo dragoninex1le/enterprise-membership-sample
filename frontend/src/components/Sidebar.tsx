@@ -22,8 +22,6 @@ export default function Sidebar() {
   const canSeeAP = useHasRole('ap_clerk', 'controller')
   const canSeeApprovals = useHasRole('controller')
 
-  const tenantParam = tenantId ? `?tenantId=${tenantId}` : ''
-
   return (
     <nav className="w-56 bg-white border-r border-gray-200 flex flex-col py-4 shrink-0">
       <div className="px-4 mb-6">
@@ -31,33 +29,36 @@ export default function Sidebar() {
         <span className="ml-1 text-xs text-gray-400">Admin</span>
       </div>
       <div className="flex-1 px-2 space-y-1">
-
         {isPlatformAdmin ? (
           <>
             {sectionLabel('Platform Admin')}
-            <NavLink to="/admin/platform/organizations" className={linkClass}>
-              <span>🏢</span>Organizations
+            <NavLink to="/admin/platform/tenants" className={linkClass}>
+              <span>🏢</span>Tenants
             </NavLink>
 
-            {sectionLabel('Tenant Admin')}
-            {!tenantId && (
-              <p className="px-3 py-1 text-xs text-gray-400 italic">Select a tenant via Manage →</p>
+            {tenantId && (
+              <>
+                {sectionLabel('Managing Tenant')}
+                <div className="px-3 py-1">
+                  <p className="text-xs text-indigo-600 font-mono truncate" title={tenantId}>{tenantId}</p>
+                </div>
+                <NavLink to={`/admin/tenant/users?tenantId=${tenantId}`} className={linkClass}>
+                  <span>👥</span>Users
+                </NavLink>
+                <NavLink to={`/admin/tenant/roles?tenantId=${tenantId}`} className={linkClass}>
+                  <span>🛡️</span>Roles
+                </NavLink>
+                <NavLink to={`/admin/tenant/permissions?tenantId=${tenantId}`} className={linkClass}>
+                  <span>🔑</span>Permissions
+                </NavLink>
+                <NavLink to={`/admin/tenant/claim-config?tenantId=${tenantId}`} className={linkClass}>
+                  <span>🗒️</span>Claim Mapping
+                </NavLink>
+                <NavLink to={`/admin/tenant/claim-mappings?tenantId=${tenantId}`} className={linkClass}>
+                  <span>🔗</span>Claim Role Mapping
+                </NavLink>
+              </>
             )}
-            <NavLink to={`/admin/tenant/users${tenantParam}`} className={linkClass}>
-              <span>👥</span>Users
-            </NavLink>
-            <NavLink to={`/admin/tenant/roles${tenantParam}`} className={linkClass}>
-              <span>🛡️</span>Roles
-            </NavLink>
-            <NavLink to={`/admin/tenant/permissions${tenantParam}`} className={linkClass}>
-              <span>🔑</span>Permissions
-            </NavLink>
-            <NavLink to={`/admin/tenant/claim-config${tenantParam}`} className={linkClass}>
-              <span>🗒️</span>Claim Mapping
-            </NavLink>
-            <NavLink to={`/admin/tenant/claim-mappings${tenantParam}`} className={linkClass}>
-              <span>🔗</span>Claim Role Mapping
-            </NavLink>
           </>
         ) : (
           <>
