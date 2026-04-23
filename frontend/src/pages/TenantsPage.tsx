@@ -1,5 +1,5 @@
 // PORTH-128 — Tenants admin screen
-import { useParams } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { organizationsApi } from '../api/organizations'
 import { tenantsApi } from '../api/tenants'
@@ -18,6 +18,7 @@ const EMPTY_FORM: TenantForm = { tenant_id: '', display_name: '', environment_ty
 
 export default function TenantsPage() {
   const { orgId } = useParams<{ orgId: string }>()
+  const navigate = useNavigate()
 
   const [org, setOrg] = useState<Organization | null>(null)
   const [tenants, setTenants] = useState<Tenant[]>([])
@@ -182,6 +183,12 @@ export default function TenantsPage() {
                 </td>
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => navigate(`/admin/tenant/users?tenantId=${tenant.tenant_id}`)}
+                      className="text-xs px-2 py-1 bg-indigo-50 border border-indigo-200 rounded hover:bg-indigo-100 text-indigo-700 font-medium"
+                    >
+                      Manage →
+                    </button>
                     <button
                       onClick={() => openEditModal(tenant)}
                       className="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-100 text-gray-600"

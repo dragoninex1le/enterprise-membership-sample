@@ -1,4 +1,4 @@
-import { NavLink } from 'react-router-dom'
+import { NavLink, useSearchParams } from 'react-router-dom'
 import { useHasRole } from '../hooks/useRoles'
 import { PLATFORM_ADMIN } from '../constants'
 
@@ -15,12 +15,14 @@ const sectionLabel = (label: string) => (
 
 export default function Sidebar() {
   const isPlatformAdmin = useHasRole(PLATFORM_ADMIN)
+  const [searchParams] = useSearchParams()
+  const tenantId = searchParams.get('tenantId') ?? ''
 
-  // Tenant-level app roles — these do not include platform-admin because
-  // platform admins have no business in the tenant application pages.
   const canSeeAR = useHasRole('ar_clerk', 'controller')
   const canSeeAP = useHasRole('ap_clerk', 'controller')
   const canSeeApprovals = useHasRole('controller')
+
+  const tenantParam = tenantId ? `?tenantId=${tenantId}` : ''
 
   return (
     <nav className="w-56 bg-white border-r border-gray-200 flex flex-col py-4 shrink-0">
@@ -31,15 +33,33 @@ export default function Sidebar() {
       <div className="flex-1 px-2 space-y-1">
 
         {isPlatformAdmin ? (
-          // Platform admins only manage organisations and tenants — no app sections.
           <>
             {sectionLabel('Platform Admin')}
             <NavLink to="/admin/platform/organizations" className={linkClass}>
               <span>🏢</span>Organizations
             </NavLink>
+
+            {sectionLabel('Tenant Admin')}
+            {!tenantId && (
+              <p className="px-3 py-1 text-xs text-gray-400 italic">Select a tenant via Manage →</p>
+            )}
+            <NavLink to={`/admin/tenant/users${tenantParam}`} className={linkClass}>
+              <span>👥</span>Users
+            </NavLink>
+            <NavLink to={`/admin/tenant/roles${tenantParam}`} className={linkClass}>
+              <span>🛡️</span>Roles
+            </NavLink>
+            <NavLink to={`/admin/tenant/permissions${tenantParam}`} className={linkClass}>
+              <span>🔑</span>Permissions
+            </NavLink>
+            <NavLink to={`/admin/tenant/claim-config${tenantParam}`} className={linkClass}>
+              <span>🗒️</span>Claim Mapping
+            </NavLink>
+            <NavLink to={`/admin/tenant/claim-mappings${tenantParam}`} className={linkClass}>
+              <span>🔗</span>Claim Role Mapping
+            </NavLink>
           </>
         ) : (
-          // Tenant users see app-level pages based on their assigned roles.
           <>
             {sectionLabel('Main')}
             <NavLink to="/dashboard" className={linkClass}>
