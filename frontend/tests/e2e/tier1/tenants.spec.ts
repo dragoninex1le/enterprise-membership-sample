@@ -26,12 +26,11 @@ test.describe('Tenants page', () => {
 
   test('active tenant shows active status badge', async ({ page }) => {
     await page.goto('/admin/platform/organizations/org-1/tenants')
-    // The active tenant row has an 'active' badge
     await expect(page.locator('text=active').first()).toBeVisible()
   })
 
   test('suspended tenant shows suspended status badge', async ({ page }) => {
     await page.goto('/admin/platform/organizations/org-1/tenants')
-    await expect(page.getByText('suspended')).toBeVisible()
+    await expect(page.getByText('suspended', { exact: true })).toBeVisible()
   })
 })

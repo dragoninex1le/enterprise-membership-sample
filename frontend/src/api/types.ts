@@ -14,7 +14,7 @@ export interface Organization {
 export interface CreateOrganizationRequest {
   name: string
   slug: string
-  tenant: { tenant_id: string; org_id?: string; display_name: string; environment_type: 'production' | 'staging' | 'development' | 'sandbox' }
+  tenant: { tenant_id?: string; org_id?: string; display_name: string; environment_type: 'production' | 'staging' | 'development' | 'sandbox' }
 }
 export interface OrganizationCreateResponse { organization: Organization; tenant: Tenant }
 export interface UpdateOrganizationRequest { name?: string; idp_config?: IdpConfig }
