@@ -26,7 +26,8 @@ async function signIn(page: import('@playwright/test').Page, email: string, pass
   await page.getByLabel('Email address').fill(email)
   // Use #password to avoid strict-mode conflict with the "Show password" toggle button
   await page.locator('#password').fill(password)
-  await page.getByRole('button', { name: 'Continue' }).click()
+  // Use exact:true to avoid matching "Continue with Google" social button
+  await page.getByRole('button', { name: 'Continue', exact: true }).click()
   await page.waitForURL(new RegExp(process.env.PLAYWRIGHT_BASE_URL ?? 'localhost'))
 }
 
