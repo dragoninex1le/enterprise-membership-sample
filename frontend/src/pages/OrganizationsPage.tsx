@@ -138,8 +138,9 @@ export default function OrganizationsPage() {
             )}
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                <label htmlFor="org-name" className="block text-sm font-medium text-gray-700 mb-1">Name</label>
                 <input
+                  id="org-name"
                   type="text"
                   required
                   value={form.name}
@@ -148,8 +149,9 @@ export default function OrganizationsPage() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Slug</label>
+                <label htmlFor="org-slug" className="block text-sm font-medium text-gray-700 mb-1">Slug</label>
                 <input
+                  id="org-slug"
                   type="text"
                   required
                   value={form.slug}
@@ -161,8 +163,9 @@ export default function OrganizationsPage() {
                 <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">First Tenant</p>
                 <div className="space-y-3">
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Tenant ID</label>
+                    <label htmlFor="org-tenant-id" className="block text-sm font-medium text-gray-700 mb-1">Tenant ID</label>
                     <input
+                      id="org-tenant-id"
                       type="text"
                       required
                       placeholder="e.g. acme-dev"
@@ -173,8 +176,9 @@ export default function OrganizationsPage() {
                     <p className="mt-1 text-xs text-gray-400">Human-readable identifier — cannot be changed after creation.</p>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
+                    <label htmlFor="org-display-name" className="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
                     <input
+                      id="org-display-name"
                       type="text"
                       required
                       value={form.display_name}
@@ -183,8 +187,9 @@ export default function OrganizationsPage() {
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Environment Type</label>
+                    <label htmlFor="org-env-type" className="block text-sm font-medium text-gray-700 mb-1">Environment Type</label>
                     <select
+                      id="org-env-type"
                       value={form.environment_type}
                       onChange={e => setForm(f => ({ ...f, environment_type: e.target.value as EnvType }))}
                       className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
