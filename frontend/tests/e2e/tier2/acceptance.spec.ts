@@ -32,6 +32,9 @@ async function signIn(page: import('@playwright/test').Page, email: string, pass
 }
 
 test.describe.serial('Acceptance', () => {
+  // Auth0 redirect + page load can take 15-30s; give each test plenty of headroom
+  test.setTimeout(90000)
+
   test('platform admin can create org and tenant', async ({ page }) => {
     await page.goto('/')
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
