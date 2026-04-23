@@ -10,7 +10,13 @@ export interface Organization {
   id: string; name: string; slug: string; status: 'active' | 'suspended'
   idp_config?: IdpConfig; created_at: string; updated_at: string
 }
-export interface CreateOrganizationRequest { name: string; slug: string; idp_config?: IdpConfig }
+/** POST /organizations/ creates org + first tenant atomically. */
+export interface CreateOrganizationRequest {
+  name: string
+  slug: string
+  tenant: { org_id?: string; display_name: string; environment_type: 'production' | 'staging' | 'development' | 'sandbox' }
+}
+export interface OrganizationCreateResponse { organization: Organization; tenant: Tenant }
 export interface UpdateOrganizationRequest { name?: string; idp_config?: IdpConfig }
 
 // Tenants — field names match the Porth API Tenant model (PORTH-413)
@@ -98,10 +104,11 @@ export interface Permission {
 // Roles
 export interface Role {
   id: string; tenant_id: string; name: string; description?: string
-  is_system: boolean; created_at: string; updated_at: string
+  is_system: boolean; source_key?: string | string[]; created_at: string; updated_at: string
 }
-export interface CreateRoleRequest { tenant_id: string; name: string; description?: string }
-export interface UpdateRoleRequest { name?: string; description?: string }
+export interface CreateRoleRequest { tenant_id: string; name: string; description?: string; is_system?: boolean; source_key?: string | string[] }
+export interface UpdateRoleRequest { name?: string; description?: string; source_key?: string | string[] }
+export interface SetUserRolesRequest { tenant_id: string; role_ids: string[] }
 
 /**
  * PORTH-413: Single-call endpoint — provisions the user and returns the full
@@ -126,10 +133,20 @@ export interface CreateClaimRoleMappingRequest {
   claim_value: string; role_id: string; priority: number; is_active?: boolean
 }
 
+// Permissions — batch registration
+export interface PermissionRegistrationItem {
+  key: string; display_name: string; app_namespace: string
+  category?: string; description?: string; sort_order?: number
+}
+export interface BatchPermissionRequest {
+  tenant_id: string; app_namespace: string; permissions: PermissionRegistrationItem[]
+}
+export interface BatchPermissionResponse { registered: Permission[]; count: number }
+
 // Claim Mapping Configs
 export interface ClaimMappingConfig {
   id: string; tenant_id: string; app_namespace: string; version: number
-  mapping_source: Record<string, unknown>; compiled_ops?: unknown[]
+  mapping_source: Record<string, unknown>; compiled_source?: string
   compiled_hash?: string; example_jwt?: Record<string, unknown>
-  validation_report?: string; compiled_at?: string; created_at: string
+  validation_report?: string; created_at: string
 }
