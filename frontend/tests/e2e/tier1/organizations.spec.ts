@@ -18,8 +18,10 @@ test.describe('Organizations page', () => {
   test('renders tenant list with org names in filter', async ({ page }) => {
     await page.goto('/admin/platform/tenants')
     await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible()
-    await expect(page.getByRole('option', { name: DEFAULT_ORG.name })).toBeVisible()
-    await expect(page.getByRole('option', { name: DEFAULT_ORG_2.name })).toBeVisible()
+    // org names appear as <option> values in the filter <select> — check via toContainText
+    const orgFilter = page.locator('select').first()
+    await expect(orgFilter).toContainText(DEFAULT_ORG.name)
+    await expect(orgFilter).toContainText(DEFAULT_ORG_2.name)
   })
 
   test('New Organization button is visible', async ({ page }) => {
@@ -29,7 +31,8 @@ test.describe('Organizations page', () => {
 
   test('clicking Manage on a tenant row navigates to users page', async ({ page }) => {
     await page.goto('/admin/platform/tenants')
-    await expect(page.getByText(DEFAULT_TENANT.display_name)).toBeVisible()
+    // mock returns same tenants for both orgs, so rows are duplicated — use .first()
+    await expect(page.getByRole('cell', { name: DEFAULT_TENANT.display_name }).first()).toBeVisible()
     await page.getByRole('button', { name: 'Manage \u2192' }).first().click()
     await expect(page).toHaveURL(new RegExp(`/admin/tenant/users\\?tenantId=${DEFAULT_TENANT.tenant_id}`))
   })

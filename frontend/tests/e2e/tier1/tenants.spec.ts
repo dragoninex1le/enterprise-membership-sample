@@ -17,8 +17,9 @@ test.describe('Tenants page', () => {
   test('renders tenants list', async ({ page }) => {
     await page.goto('/admin/platform/tenants')
     await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible()
-    await expect(page.getByText(DEFAULT_TENANT.display_name)).toBeVisible()
-    await expect(page.getByText(DEFAULT_SUSPENDED_TENANT.display_name)).toBeVisible()
+    // mock returns same tenants for both orgs — use .first() to avoid strict mode violation
+    await expect(page.getByRole('cell', { name: DEFAULT_TENANT.display_name }).first()).toBeVisible()
+    await expect(page.getByRole('cell', { name: DEFAULT_SUSPENDED_TENANT.display_name }).first()).toBeVisible()
   })
 
   test('New Tenant button is visible', async ({ page }) => {
@@ -33,6 +34,6 @@ test.describe('Tenants page', () => {
 
   test('suspended tenant shows suspended status badge', async ({ page }) => {
     await page.goto('/admin/platform/tenants')
-    await expect(page.getByText('suspended', { exact: true })).toBeVisible()
+    await expect(page.getByText('suspended', { exact: true }).first()).toBeVisible()
   })
 })
