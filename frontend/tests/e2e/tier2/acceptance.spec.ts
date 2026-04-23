@@ -2,9 +2,9 @@
  * Tier 2 -- Acceptance tests against the real deployed stack.
  *
  * Tests 2 and 3 are currently skipped pending manual bootstrap:
- *   1. Create org "E2E Test Org" (slug: e2e-test-org) + tenant "e2e-test-dev" via admin UI
- *      (Test 1 does this, but it needs to succeed first)
- *   2. Go to /admin/tenant/claim-config?tenantId=e2e-test-dev and save the default mapping JSON
+ *   1. Test 1 creates org "E2E Test Org" (slug: e2e-test-org).
+ *      The initial tenant ID is auto-derived from the slug: "e2e-test-org".
+ *   2. Go to /admin/tenant/claim-config?tenantId=e2e-test-org and save the default mapping JSON
  *   3. Log in once as the tenant user to provision their Porth record
  *   4. In User Management, assign the tenant user the "controller" role
  *   Once complete, remove the test.skip calls from tests 2 and 3.
@@ -43,19 +43,19 @@ test.describe.serial('Acceptance', () => {
   test('platform admin can create org and tenant', async ({ page }) => {
     await page.goto('/')
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
-    await expect(page).toHaveURL(/\/admin\/platform\/organizations/)
-    await expect(page.getByRole('heading', { name: 'Organizations' })).toBeVisible()
+    // Platform admin lands on the flat tenants list
+    await expect(page).toHaveURL(/\/admin\/platform\/tenants/)
+    await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible()
+    // New Organization button present
+    await expect(page.getByRole('button', { name: /New Organization/i })).toBeVisible()
 
-    // Open New Organization modal and fill all required fields
+    // Open New Organization modal — only Organization Name and Slug fields
     await page.getByRole('button', { name: /New Organization/i }).click()
-    // exact:true required — "Name" would also match the "Display Name" input
-    await page.getByLabel('Name', { exact: true }).fill('E2E Test Org')
+    await page.getByLabel('Organization Name', { exact: true }).fill('E2E Test Org')
     await page.getByLabel('Slug', { exact: true }).fill('e2e-test-org')
-    await page.getByLabel('Tenant ID', { exact: true }).fill('e2e-test-dev')
-    await page.getByLabel('Display Name', { exact: true }).fill('E2E Test Dev')
     await page.getByRole('button', { name: 'Create' }).click()
 
-    // Accept either success (modal closes, org in list) or 409 conflict (already exists from prev run)
+    // Accept either success (modal closes, org/tenant in list) or 409 conflict (already exists)
     await page.waitForTimeout(1500)
     const modalVisible = await page.locator('text=New Organization').isVisible()
     if (modalVisible) {
@@ -67,7 +67,7 @@ test.describe.serial('Acceptance', () => {
   })
 
   test('tenant user is provisioned and sees dashboard', async ({ page }) => {
-    // Requires: claim mapping saved for e2e-test-dev, tenant user logged in once, controller role assigned
+    // Requires: claim mapping saved for e2e-test-org, tenant user logged in once, controller role assigned
     // Remove this skip once the pre-flight checklist above is complete.
     test.skip(true, 'Pending manual bootstrap — see checklist in file header')
     await page.goto('/')
