@@ -5,6 +5,11 @@ import { useTenantConfig } from './hooks/useTenantConfig'
 import App from './App'
 import './index.css'
 
+// E2E test bypass: VITE_E2E_AUTH=true skips Auth0 and injects a fake authenticated
+// user so Playwright tests never redirect to the Auth0 login page.
+import { MockAuth0Provider } from './test-utils/MockAuth0Provider'
+const E2E_AUTH = import.meta.env.VITE_E2E_AUTH === 'true'
+
 function TenantBootstrap() {
   const { config, loading, error } = useTenantConfig()
 
@@ -23,6 +28,14 @@ function TenantBootstrap() {
           {error ?? 'Unable to load tenant configuration.'}
         </div>
       </div>
+    )
+  }
+
+  if (E2E_AUTH) {
+    return (
+      <MockAuth0Provider>
+        <App tenantConfig={config} />
+      </MockAuth0Provider>
     )
   }
 
