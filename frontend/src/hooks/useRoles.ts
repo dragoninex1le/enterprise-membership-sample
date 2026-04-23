@@ -16,6 +16,13 @@ export function useRoles(): string[] {
 }
 
 export function useHasRole(...roles: string[]): boolean {
-  const userRoles = useRoles()
+  const { currentUser } = usePorthContext()
+  const userRoles = currentUser?.roles.map(r => r.name) ?? []
+  // Mirror the API's director.is_platform_admin check: users provisioned against
+  // the platform tenant are always treated as platform-admin on the frontend,
+  // even when the Auth0 Post-Login Action hasn't injected the role claim yet.
+  if (roles.includes('platform-admin') && currentUser?.porthUser.tenant_id === 'platform') {
+    return true
+  }
   return roles.some(r => userRoles.includes(r))
 }
