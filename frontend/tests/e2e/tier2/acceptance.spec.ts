@@ -188,11 +188,12 @@ test.describe.serial('Acceptance', () => {
     // /dashboard if sample-app roles are bootstrapped, or /unauthorized if
     // the tenant has no roles yet (IdP works but permissions not seeded).
     // Both outcomes confirm the tenant IdP and provisioning are working.
-    const finalUrl = page.url()
-    if (finalUrl.includes('dashboard')) {
+    // Wait for ProtectedRoute's async redirect to settle.
+    await page.waitForURL(/\/(dashboard|unauthorized)/, { timeout: 15000 })
+    if (page.url().includes('dashboard')) {
       await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible()
     } else {
-      await expect(page).toHaveURL(/\/(dashboard|unauthorized)/)
+      await expect(page).toHaveURL(/unauthorized/)
     }
   })
 
@@ -202,10 +203,11 @@ test.describe.serial('Acceptance', () => {
     await page.goto('/')
     await signIn(page, TENANT_USER_EMAIL, TENANT_USER_PASSWORD)
     await page.goto('/ar')
-    // If the tenant has no roles bootstrapped, the user is redirected to /unauthorized.
-    // Check the AR heading only when the user actually has ar access.
-    const url = page.url()
-    if (url.includes('unauthorized')) {
+    // ProtectedRoute redirects asynchronously after userLoading resolves —
+    // wait for the navigation to settle before reading the URL.
+    await page.waitForURL(/\/(ar|unauthorized)/, { timeout: 15000 })
+    if (page.url().includes('unauthorized')) {
+      // No roles bootstrapped yet — IdP works, sample-app permissions not seeded
       await expect(page).toHaveURL(/unauthorized/)
     } else {
       await expect(page.getByRole('heading', { name: 'Accounts Receivable' })).toBeVisible()
