@@ -29,11 +29,11 @@ test.describe('Organizations page', () => {
     await expect(page.getByRole('button', { name: '+ New Organization' })).toBeVisible()
   })
 
-  test('clicking Manage on a tenant row navigates to users page', async ({ page }) => {
+  test('clicking Manage on a tenant row navigates to claim-config page', async ({ page }) => {
     await page.goto('/admin/platform/tenants')
     // mock returns same tenants for both orgs, so rows are duplicated — use .first()
     await expect(page.getByRole('cell', { name: DEFAULT_TENANT.display_name }).first()).toBeVisible()
     await page.getByRole('button', { name: 'Manage \u2192' }).first().click()
-    await expect(page).toHaveURL(new RegExp(`/admin/tenant/users\\?tenantId=${DEFAULT_TENANT.tenant_id}`))
+    await expect(page).toHaveURL(new RegExp(`/admin/tenant/claim-config\\?tenantId=${DEFAULT_TENANT.tenant_id}`))
   })
 })
