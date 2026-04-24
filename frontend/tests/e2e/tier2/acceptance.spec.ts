@@ -27,25 +27,41 @@ const TENANT_CONFIG: { domain?: string; client_id?: string; audience?: string } 
   const raw = process.env.PORTH_TENANT_CONFIG
   if (!raw) return {}
 
+  // Diagnostics — safe: logs shape, not values
+  const trimmed = raw.trim()
+  console.log([
+    `PORTH_TENANT_CONFIG diagnostics:`,
+    `length=${raw.length}`,
+    `firstChar=${JSON.stringify(trimmed[0])}`,
+    `lastChar=${JSON.stringify(trimmed[trimmed.length - 1])}`,
+    `containsDomain=${raw.includes('domain')}`,
+    `containsClientId=${raw.includes('client_id')}`,
+    `containsEquals=${raw.includes('=')}`,
+    `containsColon=${raw.includes(':')}`,
+    `controlCharCount=${(raw.match(/[\x00-\x1F]/g) ?? []).length}`,
+  ].join(' | '))
+
   // Attempt 1: standard JSON parse
   try { return JSON.parse(raw) } catch {}
 
-  // Attempt 2: strip all control characters then parse
+  // Attempt 2: strip control chars then parse
   try { return JSON.parse(raw.replace(/[\x00-\x1F\x7F]/g, '')) } catch {}
 
-  // Attempt 3: regex field extraction — works regardless of JSON formatting,
-  // whitespace, or control characters in the secret value
+  // Attempt 3: double-parse (secret stored as JSON-encoded string)
+  try { return JSON.parse(JSON.parse(raw)) } catch {}
+
+  // Attempt 4: regex field extraction
   const get = (key: string) =>
-    raw.match(new RegExp(`["']${key}["']\\s*:\\s*["']([^"'\\n\\r]+)["']`))?.[1]
+    raw.match(new RegExp(`["']?${key}["']?\\s*[=:]\\s*["']?([^"',}\\n\\r]+)["']?`))?.[1]?.trim()
   const domain = get('domain')
   const client_id = get('client_id')
   const audience = get('audience')
   if (domain && client_id) {
-    console.log(`PORTH_TENANT_CONFIG: extracted fields via regex (domain=${domain})`)
+    console.log(`PORTH_TENANT_CONFIG: extracted via regex (domain=${domain})`)
     return { domain, client_id, audience }
   }
 
-  console.warn('PORTH_TENANT_CONFIG: could not extract domain/client_id — tenant setup will be skipped')
+  console.warn('PORTH_TENANT_CONFIG: all parse attempts failed — tenant setup will be skipped')
   return {}
 })()
 
