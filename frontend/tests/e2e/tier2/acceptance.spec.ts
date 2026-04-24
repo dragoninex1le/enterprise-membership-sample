@@ -23,8 +23,17 @@ const TENANT_USER_PASSWORD = process.env.PORTH_TENANT_USER_PASSWORD ?? ''
 const VIEWER_EMAIL = process.env.PORTH_VIEWER_EMAIL ?? ''
 const VIEWER_PASSWORD = process.env.PORTH_VIEWER_PASSWORD ?? ''
 
-const TENANT_CONFIG: { domain?: string; client_id?: string; audience?: string } =
-  process.env.PORTH_TENANT_CONFIG ? JSON.parse(process.env.PORTH_TENANT_CONFIG) : {}
+const TENANT_CONFIG: { domain?: string; client_id?: string; audience?: string } = (() => {
+  const raw = process.env.PORTH_TENANT_CONFIG
+  if (!raw) return {}
+  try {
+    // GitHub secrets can contain literal newlines/tabs — strip control chars before parsing
+    return JSON.parse(raw.replace(/[\x00-\x1F\x7F]+/g, ' ').trim())
+  } catch (e) {
+    console.warn('PORTH_TENANT_CONFIG could not be parsed as JSON:', e)
+    return {}
+  }
+})()
 
 const E2E_TENANT_ID = 'e2e-test-org'
 
