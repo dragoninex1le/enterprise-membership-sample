@@ -26,13 +26,27 @@ const VIEWER_PASSWORD = process.env.PORTH_VIEWER_PASSWORD ?? ''
 const TENANT_CONFIG: { domain?: string; client_id?: string; audience?: string } = (() => {
   const raw = process.env.PORTH_TENANT_CONFIG
   if (!raw) return {}
-  try {
-    // GitHub secrets can contain literal newlines/tabs — strip control chars before parsing
-    return JSON.parse(raw.replace(/[\x00-\x1F\x7F]+/g, ' ').trim())
-  } catch (e) {
-    console.warn('PORTH_TENANT_CONFIG could not be parsed as JSON:', e)
-    return {}
+
+  // Attempt 1: standard JSON parse
+  try { return JSON.parse(raw) } catch {}
+
+  // Attempt 2: strip all control characters then parse
+  try { return JSON.parse(raw.replace(/[\x00-\x1F\x7F]/g, '')) } catch {}
+
+  // Attempt 3: regex field extraction — works regardless of JSON formatting,
+  // whitespace, or control characters in the secret value
+  const get = (key: string) =>
+    raw.match(new RegExp(`["']${key}["']\\s*:\\s*["']([^"'\\n\\r]+)["']`))?.[1]
+  const domain = get('domain')
+  const client_id = get('client_id')
+  const audience = get('audience')
+  if (domain && client_id) {
+    console.log(`PORTH_TENANT_CONFIG: extracted fields via regex (domain=${domain})`)
+    return { domain, client_id, audience }
   }
+
+  console.warn('PORTH_TENANT_CONFIG: could not extract domain/client_id — tenant setup will be skipped')
+  return {}
 })()
 
 const E2E_TENANT_ID = 'e2e-test-org'
