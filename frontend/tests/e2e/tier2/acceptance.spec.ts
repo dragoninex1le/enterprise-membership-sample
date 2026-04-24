@@ -184,16 +184,20 @@ test.describe.serial('Acceptance', () => {
     test.skip(!TENANT_CONFIG.domain, 'PORTH_TENANT_CONFIG not configured — tenant has no IdP')
     await page.goto('/')
     await signIn(page, TENANT_USER_EMAIL, TENANT_USER_PASSWORD)
-    // After sign-in the user is provisioned in the Porth DB. They land on
-    // /dashboard if sample-app roles are bootstrapped, or /unauthorized if
-    // the tenant has no roles yet (IdP works but permissions not seeded).
-    // Both outcomes confirm the tenant IdP and provisioning are working.
-    // Wait for ProtectedRoute's async redirect to settle.
-    await page.waitForURL(/\/(dashboard|unauthorized)/, { timeout: 15000 })
-    if (page.url().includes('dashboard')) {
-      await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible()
-    } else {
+    // After sign-in the user is provisioned in the Porth DB. ProtectedRoute
+    // evaluates roles asynchronously — the URL may briefly show /dashboard
+    // before redirecting to /unauthorized if no roles are bootstrapped.
+    // Race heading-visible against unauthorized redirect to avoid snapshotting
+    // an intermediate URL.
+    await Promise.any([
+      page.getByRole('heading', { name: 'Dashboard' }).waitFor({ state: 'visible', timeout: 15000 }),
+      page.waitForURL(/unauthorized/, { timeout: 15000 }),
+    ])
+    if (page.url().includes('unauthorized')) {
+      // No roles bootstrapped yet — IdP works, sample-app permissions not seeded
       await expect(page).toHaveURL(/unauthorized/)
+    } else {
+      await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible()
     }
   })
 
@@ -203,9 +207,12 @@ test.describe.serial('Acceptance', () => {
     await page.goto('/')
     await signIn(page, TENANT_USER_EMAIL, TENANT_USER_PASSWORD)
     await page.goto('/ar')
-    // ProtectedRoute redirects asynchronously after userLoading resolves —
-    // wait for the navigation to settle before reading the URL.
-    await page.waitForURL(/\/(ar|unauthorized)/, { timeout: 15000 })
+    // Race heading-visible against unauthorized redirect to handle the async
+    // ProtectedRoute role-check without snapshotting an intermediate URL.
+    await Promise.any([
+      page.getByRole('heading', { name: 'Accounts Receivable' }).waitFor({ state: 'visible', timeout: 15000 }),
+      page.waitForURL(/unauthorized/, { timeout: 15000 }),
+    ])
     if (page.url().includes('unauthorized')) {
       // No roles bootstrapped yet — IdP works, sample-app permissions not seeded
       await expect(page).toHaveURL(/unauthorized/)
