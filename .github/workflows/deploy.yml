@@ -244,9 +244,12 @@ jobs:
           TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
           RESPONSE_FILE="/tmp/patch-tenant.json"
 
-          # Extract audience from PORTH_TENANT_CONFIG using a single-line python3
-          # pipe — avoids YAML literal-block indentation issues with multiline -c.
-          AUDIENCE=$(echo "$PORTH_TENANT_CONFIG" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('audience',''),end='')" 2>/dev/null)
+          # Extract audience from PORTH_TENANT_CONFIG.
+          # Use || true so bash -e doesn't exit if PORTH_TENANT_CONFIG is not
+          # valid JSON. Also try double-decode for JSON-encoded-JSON secrets.
+          AUDIENCE=$(echo "$PORTH_TENANT_CONFIG" | python3 -c \
+            "import json,sys; raw=sys.stdin.read().strip(); d=json.loads(raw); d=d if isinstance(d,dict) else json.loads(d); print(d.get('audience',''),end='')" \
+            2>/dev/null || true)
           if [ -z "$AUDIENCE" ]; then
             AUDIENCE="${{ secrets.PLATFORM_AUTH0_AUDIENCE }}"
           fi
