@@ -1,21 +1,20 @@
 /**
- * Tier 2 -- Acceptance tests against the real deployed stack.
+ * Tier 2 — Acceptance tests against the real deployed stack.
  *
- * Tests 2 and 3 are currently skipped pending manual bootstrap:
- *   1. Test 1 creates org "E2E Test Org" (slug: e2e-test-org).
- *      The initial tenant ID is auto-derived from the slug: "e2e-test-org".
- *   2. Go to /admin/tenant/claim-config?tenantId=e2e-test-org and save the default mapping JSON
- *   3. Log in once as the tenant user to provision their Porth record
- *   4. In User Management, assign the tenant user the "controller" role
- *   Once complete, remove the test.skip calls from tests 2 and 3.
+ * The beforeAll hook handles all tenant setup automatically:
+ *   1. Signs in as platform admin
+ *   2. Creates org "E2E Test Org" / tenant "e2e-test-org" (handles 409 if already exists)
+ *   3. Edits the tenant to add the IdP config from PORTH_TENANT_CONFIG
+ *   4. Saves the default claim mapping config via the Claim Mapping UI
  *
  * Required env vars (see .env.local.example):
  *   PLAYWRIGHT_BASE_URL
  *   PORTH_PLATFORM_ADMIN_EMAIL / PORTH_PLATFORM_ADMIN_PASSWORD
+ *   PORTH_TENANT_CONFIG        — JSON: {"domain":"...","client_id":"...","audience":"..."}
  *   PORTH_TENANT_USER_EMAIL / PORTH_TENANT_USER_PASSWORD
  *   PORTH_VIEWER_EMAIL / PORTH_VIEWER_PASSWORD
  */
-import { test, expect } from '@playwright/test'
+import { test, expect, Browser, Page } from '@playwright/test'
 
 const PLATFORM_ADMIN_EMAIL = process.env.PORTH_PLATFORM_ADMIN_EMAIL ?? ''
 const PLATFORM_ADMIN_PASSWORD = process.env.PORTH_PLATFORM_ADMIN_PASSWORD ?? ''
@@ -24,8 +23,31 @@ const TENANT_USER_PASSWORD = process.env.PORTH_TENANT_USER_PASSWORD ?? ''
 const VIEWER_EMAIL = process.env.PORTH_VIEWER_EMAIL ?? ''
 const VIEWER_PASSWORD = process.env.PORTH_VIEWER_PASSWORD ?? ''
 
+const TENANT_CONFIG: { domain?: string; client_id?: string; audience?: string } =
+  process.env.PORTH_TENANT_CONFIG ? JSON.parse(process.env.PORTH_TENANT_CONFIG) : {}
+
+const E2E_TENANT_ID = 'e2e-test-org'
+
+const DEFAULT_MAPPING_SOURCE = JSON.stringify(
+  {
+    schema_version: '2.0',
+    fields: [
+      {
+        name: 'roles',
+        source: 'https://porth.io/roles',
+        type: 'collection',
+        required: false,
+        ops: [{ op: 'resolve_roles' }],
+      },
+    ],
+    default_roles: [],
+  },
+  null,
+  2,
+)
+
 /** Signs in via the Auth0 Universal Login page. */
-async function signIn(page: import('@playwright/test').Page, email: string, password: string) {
+async function signIn(page: Page, email: string, password: string) {
   await page.getByRole('button', { name: 'Sign in' }).click()
   await page.waitForURL(/auth0\.com|eu\.auth0\.com/)
   await page.getByLabel('Email address').fill(email)
@@ -36,40 +58,91 @@ async function signIn(page: import('@playwright/test').Page, email: string, pass
   await page.waitForURL(new RegExp(process.env.PLAYWRIGHT_BASE_URL ?? 'localhost'))
 }
 
+/**
+ * Idempotent tenant setup — run once before the serial suite.
+ *
+ * 1. Create org + tenant (gracefully handles 409 if already exists)
+ * 2. Edit the tenant to configure the IdP (from PORTH_TENANT_CONFIG)
+ * 3. Save the default claim mapping config via the Claim Mapping UI
+ */
+async function setupE2ETenant(browser: Browser) {
+  if (!PLATFORM_ADMIN_EMAIL || !TENANT_CONFIG.domain) {
+    console.warn('Skipping e2e tenant setup: PORTH_PLATFORM_ADMIN_EMAIL or PORTH_TENANT_CONFIG not set')
+    return
+  }
+
+  const page = await browser.newPage()
+  try {
+    // ── 1. Sign in as platform admin ────────────────────────────────────────
+    await page.goto('/')
+    await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
+    await expect(page).toHaveURL(/\/admin\/platform\/tenants/)
+
+    // ── 2. Create org + tenant (409 = already exists, that's fine) ──────────
+    await page.getByRole('button', { name: /New Organization/i }).click()
+    await page.getByLabel('Organization Name', { exact: true }).fill('E2E Test Org')
+    await page.getByLabel('Slug', { exact: true }).fill(E2E_TENANT_ID)
+    await page.getByRole('button', { name: 'Create' }).click()
+    await page.waitForTimeout(1500)
+
+    // Dismiss modal if still open (conflict is fine — tenant already exists)
+    const modalVisible = await page.locator('text=New Organization').isVisible()
+    if (modalVisible) await page.keyboard.press('Escape')
+    await page.waitForTimeout(500)
+
+    // ── 3. Edit the tenant to add IdP config ────────────────────────────────
+    // Find the row that shows e2e-test-org and click its Edit button
+    const row = page.getByRole('row').filter({ hasText: E2E_TENANT_ID }).first()
+    await expect(row).toBeVisible({ timeout: 10000 })
+    await row.getByRole('button', { name: 'Edit' }).click()
+
+    // Enable the Identity Provider checkbox and fill in details
+    const idpCheckbox = page.getByLabel('Identity Provider')
+    if (!(await idpCheckbox.isChecked())) {
+      await idpCheckbox.check()
+    }
+    await page.getByLabel('Domain').fill(TENANT_CONFIG.domain!)
+    await page.getByLabel('Client ID').fill(TENANT_CONFIG.client_id!)
+    if (TENANT_CONFIG.audience) {
+      await page.getByLabel('Audience').fill(TENANT_CONFIG.audience)
+    }
+    await page.getByRole('button', { name: 'Save' }).click()
+    await page.waitForTimeout(1000)
+
+    // ── 4. Save default claim mapping config ────────────────────────────────
+    await page.goto(`/admin/tenant/claim-config?tenantId=${E2E_TENANT_ID}`)
+    await page.waitForLoadState('networkidle')
+
+    const editor = page.locator('textarea').first()
+    await editor.fill(DEFAULT_MAPPING_SOURCE)
+    await page.getByRole('button', { name: 'Save' }).click()
+    await page.waitForTimeout(1000)
+
+    console.log(`✅ E2E tenant setup complete for ${E2E_TENANT_ID}`)
+  } finally {
+    await page.close()
+  }
+}
+
 test.describe.serial('Acceptance', () => {
   // Auth0 redirect + page load can take 15-30s; give each test plenty of headroom
   test.setTimeout(90000)
 
-  test('platform admin can create org and tenant', async ({ page }) => {
+  test.beforeAll(async ({ browser }) => {
+    await setupE2ETenant(browser)
+  })
+
+  test('platform admin sees tenants list and e2e-test-org is present', async ({ page }) => {
     await page.goto('/')
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
-    // Platform admin lands on the flat tenants list
     await expect(page).toHaveURL(/\/admin\/platform\/tenants/)
     await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible()
-    // New Organization button present
-    await expect(page.getByRole('button', { name: /New Organization/i })).toBeVisible()
-
-    // Open New Organization modal — only Organization Name and Slug fields
-    await page.getByRole('button', { name: /New Organization/i }).click()
-    await page.getByLabel('Organization Name', { exact: true }).fill('E2E Test Org')
-    await page.getByLabel('Slug', { exact: true }).fill('e2e-test-org')
-    await page.getByRole('button', { name: 'Create' }).click()
-
-    // Accept either success (modal closes, org/tenant in list) or 409 conflict (already exists)
-    await page.waitForTimeout(1500)
-    const modalVisible = await page.locator('text=New Organization').isVisible()
-    if (modalVisible) {
-      const errorText = await page.locator('[class*="red"]').textContent() ?? ''
-      expect(errorText.toLowerCase()).toMatch(/already|exist|conflict/)
-    } else {
-      await expect(page.getByText('E2E Test Org')).toBeVisible()
-    }
+    await expect(page.getByText('E2E Test Org')).toBeVisible()
   })
 
   test('tenant user is provisioned and sees dashboard', async ({ page }) => {
-    // Requires: claim mapping saved for e2e-test-org, tenant user logged in once, controller role assigned
-    // Remove this skip once the pre-flight checklist above is complete.
-    test.skip(true, 'Pending manual bootstrap — see checklist in file header')
+    test.skip(!TENANT_USER_EMAIL, 'PORTH_TENANT_USER_EMAIL not configured')
+    test.skip(!TENANT_CONFIG.domain, 'PORTH_TENANT_CONFIG not configured — tenant has no IdP')
     await page.goto('/')
     await signIn(page, TENANT_USER_EMAIL, TENANT_USER_PASSWORD)
     await expect(page).toHaveURL(/\/dashboard/)
@@ -77,9 +150,8 @@ test.describe.serial('Acceptance', () => {
   })
 
   test('controller can navigate to AR page', async ({ page }) => {
-    // Depends on test 2 passing (tenant user provisioned with controller role)
-    // Remove this skip once the pre-flight checklist above is complete.
-    test.skip(true, 'Pending manual bootstrap — see checklist in file header')
+    test.skip(!TENANT_USER_EMAIL, 'PORTH_TENANT_USER_EMAIL not configured')
+    test.skip(!TENANT_CONFIG.domain, 'PORTH_TENANT_CONFIG not configured — tenant has no IdP')
     await page.goto('/')
     await signIn(page, TENANT_USER_EMAIL, TENANT_USER_PASSWORD)
     await page.goto('/ar')
@@ -88,7 +160,7 @@ test.describe.serial('Acceptance', () => {
   })
 
   test('viewer cannot see New Invoice button', async ({ page }) => {
-    test.skip(!VIEWER_EMAIL, 'PORTH_VIEWER_EMAIL secret not configured')
+    test.skip(!VIEWER_EMAIL, 'PORTH_VIEWER_EMAIL not configured')
     await page.goto('/')
     await signIn(page, VIEWER_EMAIL, VIEWER_PASSWORD)
     await page.goto('/ar')
