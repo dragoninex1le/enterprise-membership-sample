@@ -37,7 +37,85 @@ Parameters:
     Default: 'porth-sample.components-dev.estynsoftware.cloud'
     Description: Apex alternate domain name — used as the platform admin entry point.
 
+  PorthEnvironment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: >
+      Environment name passed to Lambda functions as PORTH_ENVIRONMENT.
+      Used to resolve DynamoDB table names (e.g. porth-sample-app-dev).
+
 Resources:
+
+  # ── DynamoDB table for sample app data ───────────────────────────────────
+
+  SampleAppTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub porth-sample-app-${PorthEnvironment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  # ── Sample app API Lambda ─────────────────────────────────────────────────
+
+  SampleAppFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub porth-sample-app-${PorthEnvironment}
+      CodeUri: lambdas/
+      Handler: sample_app.handler.handler
+      Runtime: python3.12
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          PORTH_ENVIRONMENT: !Ref PorthEnvironment
+          AWS_ACCOUNT_ID: !Ref AWS::AccountId
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SampleAppTable
+      Events:
+        ApiProxy:
+          Type: HttpApi
+          Properties:
+            Path: /sample/{proxy+}
+            Method: ANY
+
+  # ── Sample app EventBridge consumer Lambda ────────────────────────────────
+
+  SampleAppEventConsumerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub porth-sample-app-events-${PorthEnvironment}
+      CodeUri: lambdas/
+      Handler: sample_app_events.handler.handler
+      Runtime: python3.12
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          PORTH_ENVIRONMENT: !Ref PorthEnvironment
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SampleAppTable
+      Events:
+        PorthEntityEvents:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source:
+                - porth.components
+              detail-type:
+                - EntityEvent
 
   # ── S3 bucket for React SPA static assets ────────────────────────────────
 
@@ -135,3 +213,9 @@ Outputs:
     Value: !Sub https://${CloudFrontDistribution.DomainName}
     Export:
       Name: !Sub ${AWS::StackName}-CloudFrontUrl
+
+  SampleAppApiUrl:
+    Description: Sample app API Gateway URL
+    Value: !Sub https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com
+    Export:
+      Name: !Sub ${AWS::StackName}-SampleAppApiUrl

@@ -1,4 +1,4 @@
-import { NavLink } from 'react-router-dom'
+import { NavLink, useSearchParams } from 'react-router-dom'
 import { useHasRole } from '../hooks/useRoles'
 import { PLATFORM_ADMIN } from '../constants'
 
@@ -15,9 +15,9 @@ const sectionLabel = (label: string) => (
 
 export default function Sidebar() {
   const isPlatformAdmin = useHasRole(PLATFORM_ADMIN)
+  const [searchParams] = useSearchParams()
+  const tenantId = searchParams.get('tenantId') ?? ''
 
-  // Tenant-level app roles — these do not include platform-admin because
-  // platform admins have no business in the tenant application pages.
   const canSeeAR = useHasRole('ar_clerk', 'controller')
   const canSeeAP = useHasRole('ap_clerk', 'controller')
   const canSeeApprovals = useHasRole('controller')
@@ -29,17 +29,26 @@ export default function Sidebar() {
         <span className="ml-1 text-xs text-gray-400">Admin</span>
       </div>
       <div className="flex-1 px-2 space-y-1">
-
         {isPlatformAdmin ? (
-          // Platform admins only manage organisations and tenants — no app sections.
           <>
             {sectionLabel('Platform Admin')}
-            <NavLink to="/admin/platform/organizations" className={linkClass}>
-              <span>🏢</span>Organizations
+            <NavLink to="/admin/platform/tenants" className={linkClass}>
+              <span>🏢</span>Tenants
             </NavLink>
+
+            {tenantId && (
+              <>
+                {sectionLabel('Managing Tenant')}
+                <div className="px-3 py-1">
+                  <p className="text-xs text-indigo-600 font-mono truncate" title={tenantId}>{tenantId}</p>
+                </div>
+                <NavLink to={`/admin/tenant/claim-config?tenantId=${tenantId}`} className={linkClass}>
+                  <span>🗒️</span>Claim Mapping
+                </NavLink>
+              </>
+            )}
           </>
         ) : (
-          // Tenant users see app-level pages based on their assigned roles.
           <>
             {sectionLabel('Main')}
             <NavLink to="/dashboard" className={linkClass}>

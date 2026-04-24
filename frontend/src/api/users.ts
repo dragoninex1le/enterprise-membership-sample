@@ -1,5 +1,5 @@
 import { apiClient } from './client'
-import type { User, UpsertUserRequest, ProvisionRequest, ProvisionResponse, UserMeRequest, UserMeResponse } from './types'
+import type { User, UpsertUserRequest, ProvisionRequest, ProvisionResponse, UserMeRequest, UserMeResponse, Role, SetUserRolesRequest } from './types'
 
 export const usersApi = {
   listByTenant: (orgId: string, tenantId: string) =>
@@ -21,4 +21,10 @@ export const usersApi = {
   update: (id: string, body: Partial<UpsertUserRequest>) => apiClient.patch<User>(`/users/${id}`, body).then(r => r.data),
   suspend: (id: string) => apiClient.post<User>(`/users/${id}/suspend`).then(r => r.data),
   reactivate: (id: string) => apiClient.post<User>(`/users/${id}/reactivate`).then(r => r.data),
+  getUserRoles: (id: string, tenantId: string) =>
+    apiClient.get<Role[]>(`/users/${id}/roles`, { params: { tenant_id: tenantId } }).then(r => r.data),
+  setRoles: (id: string, body: SetUserRolesRequest) =>
+    apiClient.put<{ message: string }>(`/users/${id}/roles`, body).then(r => r.data),
+  getUserPermissions: (id: string, tenantId: string) =>
+    apiClient.get<string[]>(`/users/${id}/permissions`, { params: { tenant_id: tenantId } }).then(r => r.data),
 }

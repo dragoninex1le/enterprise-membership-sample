@@ -71,11 +71,13 @@ jobs:
               --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
               --output text
           }
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           echo "PORTH_API_URL=$(get_output PorthApiUrl)"                                       >> $GITHUB_ENV
           echo "PORTH_TENANTS_TABLE=$(get_output TenantsTableName)"                            >> $GITHUB_ENV
           echo "PORTH_PERMISSIONS_TABLE=$(get_output PermissionsTableName)"                    >> $GITHUB_ENV
           echo "PORTH_ROLES_TABLE=$(get_output RolesTableName)"                                >> $GITHUB_ENV
           echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$(get_output ClaimMappingConfigsTableName)"  >> $GITHUB_ENV
+          echo "SAM_ARTIFACTS_BUCKET=porth-sam-artifacts-${ACCOUNT_ID}"                       >> $GITHUB_ENV
 
       - name: Install frontend dependencies
         working-directory: frontend
@@ -88,17 +90,23 @@ jobs:
           VITE_API_BASE_URL: ${{ env.PORTH_API_URL }}
           VITE_PLATFORM_APEX: porth-sample
 
-      # ── Step 1: SAM deploy ─────────────────────────────────────────
+      # ── Step 1: SAM build + deploy ─────────────────────────────────────
+      - name: SAM build
+        run: sam build
+
       - name: SAM deploy (infrastructure)
         run: |
           sam deploy \
             --stack-name ${{ env.SAM_STACK_NAME }} \
             --region ${{ env.AWS_REGION }} \
             --capabilities CAPABILITY_IAM \
+            --s3-bucket ${{ env.SAM_ARTIFACTS_BUCKET }} \
+            --s3-prefix ${{ env.SAM_STACK_NAME }} \
             --parameter-overrides \
               Environment=dev \
               PorthApiUrl=${{ env.PORTH_API_URL }} \
               AcmCertificateArn=${{ secrets.ACM_CERTIFICATE_ARN }} \
+              PorthEnvironment=dev \
             --no-fail-on-empty-changeset
 
       - name: Resolve stack outputs
@@ -150,19 +158,15 @@ jobs:
               result = json.loads(resp["Payload"].read())
               body = json.loads(result.get("body", "{}"))
               if result.get("statusCode", 200) == 200:
-                  print(f"  \u2705 {table}: deleted {body.get('deleted', '?')} items")
+                  print(f"  ✅ {table}: deleted {body.get('deleted', '?')} items")
               else:
-                  print(f"  \u274c {table}: {body.get('error', result)}", file=sys.stderr)
+                  print(f"  ❌ {table}: {body.get('error', result)}", file=sys.stderr)
                   failed = True
 
           sys.exit(1 if failed else 0)
           EOF
 
       # ── Step 4: Bootstrap platform tenant (pre-test) ────────────────────────────
-      # Must run after cleanup and before E2E tests. The bootstrap writes
-      # directly to DynamoDB via porth_common repositories — the Porth API
-      # itself calls assert_active(tenant_id) on every request, so the platform
-      # tenant record must exist before any API call can succeed.
       - name: Bootstrap platform tenant (pre-test)
         if: github.ref == 'refs/heads/main'
         env:
@@ -207,17 +211,15 @@ jobs:
               result = json.loads(resp["Payload"].read())
               body = json.loads(result.get("body", "{}"))
               if result.get("statusCode", 200) == 200:
-                  print(f"  \u2705 {table}: deleted {body.get('deleted', '?')} items")
+                  print(f"  ✅ {table}: deleted {body.get('deleted', '?')} items")
               else:
-                  print(f"  \u274c {table}: {body.get('error', result)}", file=sys.stderr)
+                  print(f"  ❌ {table}: {body.get('error', result)}", file=sys.stderr)
                   failed = True
 
           sys.exit(1 if failed else 0)
           EOF
 
       # ── Step 7: Bootstrap platform tenant (post-test) ───────────────────────────
-      # Re-seed after post-test cleanup so the live environment has the platform
-      # tenant, roles, and permissions in place.
       - name: Bootstrap platform tenant (post-test)
         env:
           PORTH_TENANTS_TABLE: ${{ env.PORTH_TENANTS_TABLE }}
@@ -237,13 +239,13 @@ jobs:
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $TEST_TOKEN" \
             -d "$PAYLOAD")
-          echo "PATCH /tenants/platform \u2192 HTTP $STATUS"
+          echo "PATCH /tenants/platform → HTTP $STATUS"
           if [[ "$STATUS" != "200" ]]; then
-            echo "\u274c Failed to patch tenant IdP config"
+            echo "❌ Failed to patch tenant IdP config"
             cat "$RESPONSE_FILE"
             exit 1
           fi
-          echo "\u2705 Platform tenant IdP config updated"
+          echo "✅ Platform tenant IdP config updated"
 
       - name: Sync assets to S3
         run: |
