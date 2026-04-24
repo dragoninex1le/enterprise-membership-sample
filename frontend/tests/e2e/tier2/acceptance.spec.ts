@@ -3,7 +3,7 @@
  *
  * The beforeAll hook handles all tenant setup automatically:
  *   1. Signs in as platform admin
- *   2. Creates org "E2E Test Org" / tenant "e2e-test-org" (handles 409 if already exists)
+ *   2. Creates org "Demo Tenant" / tenant "demo-tenant" (handles 409 if already exists)
  *   3. Edits the tenant to add the IdP config from PORTH_TENANT_CONFIG
  *   4. Saves the default claim mapping config via the Claim Mapping UI
  *
@@ -65,7 +65,9 @@ const TENANT_CONFIG: { domain?: string; client_id?: string; audience?: string } 
   return {}
 })()
 
-const E2E_TENANT_ID = 'e2e-test-org'
+// Tenant ID must match the subdomain of the live frontend URL:
+// https://demo-tenant.porth-sample.components-dev.estynsoftware.cloud/
+const E2E_TENANT_ID = 'demo-tenant'
 
 const DEFAULT_MAPPING_SOURCE = JSON.stringify(
   {
@@ -127,7 +129,7 @@ async function setupE2ETenant(browser: Browser) {
 
     // ── 2. Create org + tenant (409 = already exists, that's fine) ──────────
     await page.getByRole('button', { name: /New Organization/i }).click()
-    await page.getByLabel('Organization Name', { exact: true }).fill('E2E Test Org')
+    await page.getByLabel('Organization Name', { exact: true }).fill('Demo Tenant')
     await page.getByLabel('Slug', { exact: true }).fill(E2E_TENANT_ID)
     await page.getByRole('button', { name: 'Create' }).click()
     await page.waitForTimeout(1500)
@@ -138,7 +140,7 @@ async function setupE2ETenant(browser: Browser) {
     await page.waitForTimeout(500)
 
     // ── 3. Edit the tenant to add IdP config ────────────────────────────────
-    // Find the row that shows e2e-test-org and click its Edit button
+    // Find the row that shows demo-tenant and click its Edit button
     const row = page.getByRole('row').filter({ hasText: E2E_TENANT_ID }).first()
     await expect(row).toBeVisible({ timeout: 10000 })
     await row.getByRole('button', { name: 'Edit' }).click()
@@ -165,7 +167,7 @@ async function setupE2ETenant(browser: Browser) {
     await page.getByRole('button', { name: 'Save' }).click()
     await page.waitForTimeout(1000)
 
-    console.log(`✅ E2E tenant setup complete for ${E2E_TENANT_ID}`)
+    console.log(`\u2705 E2E tenant setup complete for ${E2E_TENANT_ID}`)
   } finally {
     await page.close()
   }
@@ -179,12 +181,12 @@ test.describe.serial('Acceptance', () => {
     await setupE2ETenant(browser)
   })
 
-  test('platform admin sees tenants list and e2e-test-org is present', async ({ page }) => {
+  test('platform admin sees tenants list and demo-tenant is present', async ({ page }) => {
     await page.goto('/')
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
     await expect(page).toHaveURL(/\/admin\/platform\/tenants/)
     await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible()
-    await expect(page.getByRole('cell', { name: 'E2E Test Org' }).first()).toBeVisible()
+    await expect(page.getByRole('cell', { name: 'Demo Tenant' }).first()).toBeVisible()
   })
 
   test('tenant user is provisioned and sees dashboard', async ({ page }) => {
