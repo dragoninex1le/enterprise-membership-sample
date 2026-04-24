@@ -176,7 +176,7 @@ test.describe.serial('Acceptance', () => {
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
     await expect(page).toHaveURL(/\/admin\/platform\/tenants/)
     await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible()
-    await expect(page.getByText('E2E Test Org')).toBeVisible()
+    await expect(page.getByRole('cell', { name: 'E2E Test Org' }).first()).toBeVisible()
   })
 
   test('tenant user is provisioned and sees dashboard', async ({ page }) => {
