@@ -95,6 +95,14 @@ async function signIn(page: Page, email: string, password: string) {
   // Use exact:true to avoid matching "Continue with Google" social button
   await page.getByRole('button', { name: 'Continue', exact: true }).click()
   await page.waitForURL(new RegExp(process.env.PLAYWRIGHT_BASE_URL ?? 'localhost'))
+  // Wait for the Auth0 code exchange + /users/me provisioning to complete before
+  // returning. The SDK removes ?code= from the URL once the token is processed.
+  // Without this wait, immediately calling page.goto() interrupts the exchange,
+  // leaving PorthContext stuck with userLoading=true indefinitely.
+  await page.waitForFunction(
+    () => !window.location.search.includes('code='),
+    { timeout: 20000 }
+  ).catch(() => { /* some apps retain code= — best-effort only */ })
 }
 
 /**
