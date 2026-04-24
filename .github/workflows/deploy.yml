@@ -234,12 +234,44 @@ jobs:
           PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
         run: python3 scripts/bootstrap_platform_tenant.py
 
-      # ── Step 8: Patch platform tenant IdP config ────────────────────────────
+      # ── Step 8: Patch platform tenant IdP config ─────────────────────────────────
+      # The audience is extracted from PORTH_TENANT_CONFIG (the same JSON blob used
+      # for E2E IdP setup) because PLATFORM_AUTH0_AUDIENCE is not a required secret.
+      # Falls back to PLATFORM_AUTH0_AUDIENCE if PORTH_TENANT_CONFIG has no audience.
       - name: Patch platform tenant IdP config
+        env:
+          PORTH_TENANT_CONFIG: ${{ secrets.PORTH_TENANT_CONFIG }}
         run: |
           TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
           RESPONSE_FILE="/tmp/patch-tenant.json"
-          PAYLOAD="{\"idp_config_override\": {\"domain\": \"${{ secrets.PLATFORM_AUTH0_DOMAIN }}\", \"client_id\": \"${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}\", \"audience\": \"${{ secrets.PLATFORM_AUTH0_AUDIENCE }}\"}}"
+
+          # Extract audience from PORTH_TENANT_CONFIG, fall back to dedicated secret
+          AUDIENCE=$(python3 -c "
+import json, os, sys
+raw = os.environ.get('PORTH_TENANT_CONFIG', '').strip()
+audience = ''
+try:
+    cfg = json.loads(raw)
+    audience = cfg.get('audience', '') or ''
+except Exception:
+    pass
+if not audience:
+    audience = '${{ secrets.PLATFORM_AUTH0_AUDIENCE }}'
+print(audience, end='')
+")
+          echo "Resolved audience (length=${#AUDIENCE})"
+
+          PAYLOAD=$(python3 -c "
+import json, sys
+audience = sys.argv[1]
+print(json.dumps({
+    'idp_config_override': {
+        'domain': '${{ secrets.PLATFORM_AUTH0_DOMAIN }}',
+        'client_id': '${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}',
+        'audience': audience,
+    }
+}))
+" "$AUDIENCE")
 
           for attempt in 1 2 3 4 5; do
             STATUS=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
