@@ -18,11 +18,7 @@ import ApprovalsPage from './pages/ApprovalsPage'
 import UnauthorizedPage from './pages/UnauthorizedPage'
 import OrganizationsPage from './pages/OrganizationsPage'
 import TenantsPage from './pages/TenantsPage'
-import UsersPage from './pages/UsersPage'
-import RolesPage from './pages/RolesPage'
-import PermissionsPage from './pages/PermissionsPage'
 import ClaimMappingConfigPage from './pages/ClaimMappingConfigPage'
-import ClaimRoleMappingPage from './pages/ClaimRoleMappingPage'
 
 export const router = createBrowserRouter([
   {
@@ -67,12 +63,9 @@ export const router = createBrowserRouter([
         path: 'admin/tenant',
         element: <ProtectedRoute roles={[PLATFORM_ADMIN]} />,
         children: [
-          { index: true, element: <Navigate to="users" replace /> },
-          { path: 'users', element: <UsersPage /> },
-          { path: 'roles', element: <RolesPage /> },
-          { path: 'permissions', element: <PermissionsPage /> },
+          { index: true, element: <Navigate to="claim-config" replace /> },
           { path: 'claim-config', element: <ClaimMappingConfigPage /> },
-          { path: 'claim-mappings', element: <ClaimRoleMappingPage /> },
+          { path: 'claim-mappings', element: <Navigate to="claim-config" replace /> },
         ],
       },
     ],

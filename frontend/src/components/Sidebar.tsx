@@ -42,20 +42,8 @@ export default function Sidebar() {
                 <div className="px-3 py-1">
                   <p className="text-xs text-indigo-600 font-mono truncate" title={tenantId}>{tenantId}</p>
                 </div>
-                <NavLink to={`/admin/tenant/users?tenantId=${tenantId}`} className={linkClass}>
-                  <span>👥</span>Users
-                </NavLink>
-                <NavLink to={`/admin/tenant/roles?tenantId=${tenantId}`} className={linkClass}>
-                  <span>🛡️</span>Roles
-                </NavLink>
-                <NavLink to={`/admin/tenant/permissions?tenantId=${tenantId}`} className={linkClass}>
-                  <span>🔑</span>Permissions
-                </NavLink>
                 <NavLink to={`/admin/tenant/claim-config?tenantId=${tenantId}`} className={linkClass}>
                   <span>🗒️</span>Claim Mapping
-                </NavLink>
-                <NavLink to={`/admin/tenant/claim-mappings?tenantId=${tenantId}`} className={linkClass}>
-                  <span>🔗</span>Claim Role Mapping
                 </NavLink>
               </>
             )}

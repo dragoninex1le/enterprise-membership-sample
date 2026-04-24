@@ -37,7 +37,7 @@ function IdpFields<T extends { idp_enabled: boolean; idp_domain: string; idp_cli
         <input type="checkbox" checked={form.idp_enabled}
           onChange={e => setForm(f => ({ ...f, idp_enabled: e.target.checked }))}
           className="rounded" />
-        <span className="text-sm font-medium text-gray-700">Identity Provider (Auth0)</span>
+        <span className="text-sm font-medium text-gray-700">Identity Provider</span>
       </label>
       {form.idp_enabled && (
         <div className="mt-3 space-y-3">
@@ -247,7 +247,7 @@ export default function TenantsPage() {
                 </td>
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-2">
-                    <button onClick={() => navigate(`/admin/tenant/users?tenantId=${t.tenant_id}`)}
+                    <button onClick={() => navigate(`/admin/tenant/claim-config?tenantId=${t.tenant_id}`)}
                       className="text-xs px-2 py-1 bg-indigo-50 border border-indigo-200 rounded hover:bg-indigo-100 text-indigo-700 font-medium">
                       Manage →
                     </button>
