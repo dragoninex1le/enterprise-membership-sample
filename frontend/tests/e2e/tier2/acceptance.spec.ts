@@ -139,7 +139,14 @@ async function setupE2ETenant(browser: Browser) {
     // Organization') matches both the "+ New Organization" button AND the modal
     // heading when the modal is open.
     const modalVisible = await page.getByRole('heading', { name: 'New Organization' }).isVisible()
-    if (modalVisible) await page.keyboard.press('Escape')
+    if (modalVisible) {
+      await page.keyboard.press('Escape')
+      // Wait for the modal (and its backdrop overlay) to fully animate out before
+      // proceeding — the backdrop intercepts pointer events until it is gone.
+      await page.getByRole('heading', { name: 'New Organization' })
+        .waitFor({ state: 'hidden', timeout: 5000 })
+        .catch(() => { /* already closed or animation skipped */ })
+    }
     await page.waitForTimeout(500)
 
     // ── 3. Edit the tenant to add IdP config ────────────────────────────────
@@ -181,6 +188,11 @@ test.describe.serial('Acceptance', () => {
   test.setTimeout(90000)
 
   test.beforeAll(async ({ browser }) => {
+    // test.setTimeout() in the describe block only covers individual tests — not
+    // beforeAll/afterAll hooks, which keep the default 30 s.  Auth0 redirect +
+    // Lambda cold start + DynamoDB provisioning can collectively take 60+ s, so
+    // we must call test.setTimeout() here inside the hook itself.
+    test.setTimeout(90000)
     await setupE2ETenant(browser)
   })
 
