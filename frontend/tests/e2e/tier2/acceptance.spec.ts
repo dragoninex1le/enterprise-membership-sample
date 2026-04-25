@@ -70,26 +70,26 @@ const TENANT_CONFIG: { domain?: string; client_id?: string; audience?: string } 
 const E2E_TENANT_ID = 'demo-tenant'
 
 // PLAYWRIGHT_BASE_URL is the tenant subdomain URL (used by tenant user tests).
-// The platform admin UI lives at the ROOT domain — no tenant prefix.
-// Derive it by stripping the first subdomain segment:
-//   https://demo-tenant.porth-sample.components-dev.estynsoftware.cloud
-//   → https://porth-sample.components-dev.estynsoftware.cloud
-// Falls back to PLAYWRIGHT_BASE_URL when running locally against localhost.
-const PLATFORM_BASE_URL = (() => {
-  const base = process.env.PLAYWRIGHT_BASE_URL
-  if (!base) return 'http://localhost:5173'
-  try {
-    const url = new URL(base)
-    const parts = url.hostname.split('.')
-    // Only strip when there is a subdomain prefix (hostname has >3 labels for
-    // a *.x.y.tld pattern — adjust threshold if the apex itself has >2 labels)
-    if (parts.length > 3) {
-      url.hostname = parts.slice(1).join('.')
-      return url.origin
-    }
-  } catch { /* malformed URL — fall through */ }
-  return base
-})()
+// The platform admin UI lives at a different subdomain — not derivable from the
+// tenant URL by simple stripping because the two use different subdomain prefixes.
+// Use PORTH_PLATFORM_BASE_URL (set explicitly in CI secrets) when available.
+// Falls back to localhost for local dev runs.
+const PLATFORM_BASE_URL =
+  process.env.PORTH_PLATFORM_BASE_URL ||
+  (process.env.PLAYWRIGHT_BASE_URL ? (() => {
+    // Legacy fallback: strip the first subdomain. Works when the tenant URL has
+    // an extra subdomain level relative to the platform URL (e.g. demo-tenant.porth-sample.x.y.z
+    // → porth-sample.x.y.z). Does NOT work when both live at the same depth.
+    try {
+      const url = new URL(process.env.PLAYWRIGHT_BASE_URL!)
+      const parts = url.hostname.split('.')
+      if (parts.length > 3) {
+        url.hostname = parts.slice(1).join('.')
+        return url.origin
+      }
+    } catch { /* malformed URL — fall through */ }
+    return process.env.PLAYWRIGHT_BASE_URL!
+  })() : 'http://localhost:5173')
 
 const DEFAULT_MAPPING_SOURCE = JSON.stringify(
   {

@@ -58,6 +58,7 @@ jobs:
         working-directory: frontend
         env:
           PLAYWRIGHT_BASE_URL: ${{ secrets.PLAYWRIGHT_BASE_URL }}
+          PORTH_PLATFORM_BASE_URL: ${{ secrets.PORTH_PLATFORM_BASE_URL }}
           PORTH_PLATFORM_ADMIN_EMAIL: ${{ secrets.PORTH_PLATFORM_ADMIN_EMAIL }}
           PORTH_PLATFORM_ADMIN_PASSWORD: ${{ secrets.PORTH_PLATFORM_ADMIN_PASSWORD }}
           PORTH_TENANT_CONFIG: ${{ secrets.PORTH_TENANT_CONFIG }}
