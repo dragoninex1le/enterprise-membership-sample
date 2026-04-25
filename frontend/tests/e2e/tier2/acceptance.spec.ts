@@ -134,8 +134,11 @@ async function setupE2ETenant(browser: Browser) {
     await page.getByRole('button', { name: 'Create' }).click()
     await page.waitForTimeout(1500)
 
-    // Dismiss modal if still open (conflict is fine — tenant already exists)
-    const modalVisible = await page.locator('text=New Organization').isVisible()
+    // Dismiss modal if still open (conflict is fine — tenant already exists).
+    // Use the heading role to avoid a strict-mode violation: locator('text=New
+    // Organization') matches both the "+ New Organization" button AND the modal
+    // heading when the modal is open.
+    const modalVisible = await page.getByRole('heading', { name: 'New Organization' }).isVisible()
     if (modalVisible) await page.keyboard.press('Escape')
     await page.waitForTimeout(500)
 
