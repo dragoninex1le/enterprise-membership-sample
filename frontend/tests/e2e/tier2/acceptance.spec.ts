@@ -138,7 +138,8 @@ async function signIn(page: Page, email: string, password: string) {
   // Using a URL predicate rather than PLAYWRIGHT_BASE_URL so this works for
   // both the platform admin (redirects to the root domain) and tenant users
   // (redirects to the tenant subdomain).
-  await page.waitForURL(url => !url.includes('auth0.com'), { timeout: 30000 })
+  // waitForURL predicate receives a URL object (not string) — must use .href
+  await page.waitForURL(url => !url.href.includes('auth0.com'), { timeout: 30000 })
   // Wait for the Auth0 code exchange + /users/me provisioning to complete before
   // returning. The SDK removes ?code= from the URL once the token is processed.
   // Without this wait, immediately calling page.goto() interrupts the exchange,
