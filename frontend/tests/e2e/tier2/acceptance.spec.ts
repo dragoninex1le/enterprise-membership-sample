@@ -41,14 +41,30 @@ const TENANT_CONFIG: { domain?: string; client_id?: string; audience?: string } 
     `controlCharCount=${(raw.match(/[\x00-\x1F]/g) ?? []).length}`,
   ].join(' | '))
 
+  // Normalise a parsed object: supports both the slim format
+  //   { domain, client_id, audience }
+  // and the full porth-test-config.json format
+  //   { auth0: { domain, client_id, audience }, tenant: { ... } }
+  const normalise = (obj: Record<string, unknown>) => {
+    if (obj && typeof obj === 'object') {
+      if (typeof obj.domain === 'string') return obj as { domain: string; client_id?: string; audience?: string }
+      const auth0 = obj.auth0 as Record<string, unknown> | undefined
+      if (auth0 && typeof auth0.domain === 'string') {
+        console.log(`PORTH_TENANT_CONFIG: extracted from .auth0 subsection (domain=${auth0.domain})`)
+        return auth0 as { domain: string; client_id?: string; audience?: string }
+      }
+    }
+    return null
+  }
+
   // Attempt 1: standard JSON parse
-  try { return JSON.parse(raw) } catch {}
+  try { const r = normalise(JSON.parse(raw)); if (r) return r } catch {}
 
   // Attempt 2: strip control chars then parse
-  try { return JSON.parse(raw.replace(/[\x00-\x1F\x7F]/g, '')) } catch {}
+  try { const r = normalise(JSON.parse(raw.replace(/[\x00-\x1F\x7F]/g, ''))); if (r) return r } catch {}
 
   // Attempt 3: double-parse (secret stored as JSON-encoded string)
-  try { return JSON.parse(JSON.parse(raw)) } catch {}
+  try { const r = normalise(JSON.parse(JSON.parse(raw))); if (r) return r } catch {}
 
   // Attempt 4: regex field extraction
   const get = (key: string) =>
