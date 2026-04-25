@@ -69,6 +69,28 @@ const TENANT_CONFIG: { domain?: string; client_id?: string; audience?: string } 
 // https://demo-tenant.porth-sample.components-dev.estynsoftware.cloud/
 const E2E_TENANT_ID = 'demo-tenant'
 
+// PLAYWRIGHT_BASE_URL is the tenant subdomain URL (used by tenant user tests).
+// The platform admin UI lives at the ROOT domain — no tenant prefix.
+// Derive it by stripping the first subdomain segment:
+//   https://demo-tenant.porth-sample.components-dev.estynsoftware.cloud
+//   → https://porth-sample.components-dev.estynsoftware.cloud
+// Falls back to PLAYWRIGHT_BASE_URL when running locally against localhost.
+const PLATFORM_BASE_URL = (() => {
+  const base = process.env.PLAYWRIGHT_BASE_URL
+  if (!base) return 'http://localhost:5173'
+  try {
+    const url = new URL(base)
+    const parts = url.hostname.split('.')
+    // Only strip when there is a subdomain prefix (hostname has >3 labels for
+    // a *.x.y.tld pattern — adjust threshold if the apex itself has >2 labels)
+    if (parts.length > 3) {
+      url.hostname = parts.slice(1).join('.')
+      return url.origin
+    }
+  } catch { /* malformed URL — fall through */ }
+  return base
+})()
+
 const DEFAULT_MAPPING_SOURCE = JSON.stringify(
   {
     schema_version: '2.0',
@@ -96,7 +118,11 @@ async function signIn(page: Page, email: string, password: string) {
   await page.locator('#password').fill(password)
   // Use exact:true to avoid matching "Continue with Google" social button
   await page.getByRole('button', { name: 'Continue', exact: true }).click()
-  await page.waitForURL(new RegExp(process.env.PLAYWRIGHT_BASE_URL ?? 'localhost'))
+  // Wait for Auth0 to redirect back to the app (any non-Auth0 URL).
+  // Using a URL predicate rather than PLAYWRIGHT_BASE_URL so this works for
+  // both the platform admin (redirects to the root domain) and tenant users
+  // (redirects to the tenant subdomain).
+  await page.waitForURL(url => !url.includes('auth0.com'), { timeout: 30000 })
   // Wait for the Auth0 code exchange + /users/me provisioning to complete before
   // returning. The SDK removes ?code= from the URL once the token is processed.
   // Without this wait, immediately calling page.goto() interrupts the exchange,
@@ -123,7 +149,9 @@ async function setupE2ETenant(browser: Browser) {
   const page = await browser.newPage()
   try {
     // ── 1. Sign in as platform admin ────────────────────────────────────────
-    await page.goto('/')
+    // Navigate to the root-domain platform URL — the platform Auth0 app is
+    // configured with callbacks for this URL, not the tenant subdomain URL.
+    await page.goto(PLATFORM_BASE_URL)
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
     await expect(page).toHaveURL(/\/admin\/platform\/tenants/)
 
@@ -169,7 +197,10 @@ async function setupE2ETenant(browser: Browser) {
     await page.waitForTimeout(1000)
 
     // ── 4. Save default claim mapping config ────────────────────────────────
-    await page.goto(`/admin/tenant/claim-config?tenantId=${E2E_TENANT_ID}`)
+    // Must use PLATFORM_BASE_URL — the admin is authenticated at the root domain.
+    // page.goto('/path') always resolves against Playwright's baseURL (the tenant
+    // subdomain), which is a different origin and would lose the admin's session.
+    await page.goto(`${PLATFORM_BASE_URL}/admin/tenant/claim-config?tenantId=${E2E_TENANT_ID}`)
     await page.waitForLoadState('networkidle')
 
     const editor = page.locator('textarea').first()
@@ -197,7 +228,7 @@ test.describe.serial('Acceptance', () => {
   })
 
   test('platform admin sees tenants list and demo-tenant is present', async ({ page }) => {
-    await page.goto('/')
+    await page.goto(PLATFORM_BASE_URL)
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
     await expect(page).toHaveURL(/\/admin\/platform\/tenants/)
     await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible()
