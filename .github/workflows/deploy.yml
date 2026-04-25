@@ -289,7 +289,8 @@ jobs:
           RESPONSE_FILE="/tmp/demo-tenant.json"
 
           # Create org + tenant atomically (409 = already exists, that's fine)
-          STATUS=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
+          # -L follows the 307 redirect that the API returns for /organizations → /organizations/
+          STATUS=$(curl -s -L -o "$RESPONSE_FILE" -w "%{http_code}" \
             -X POST "$PORTH_API/organizations" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $TEST_TOKEN" \
@@ -313,7 +314,7 @@ jobs:
           elif [[ "$STATUS" == "409" ]]; then
             echo "✅ demo-tenant already exists — patching IdP config"
             # Re-patch the IdP config in case it was wiped by cleanup
-            PATCH_STATUS=$(curl -s -o /tmp/demo-patch.json -w "%{http_code}" \
+            PATCH_STATUS=$(curl -s -L -o /tmp/demo-patch.json -w "%{http_code}" \
               -X PATCH "$PORTH_API/tenants/demo-tenant" \
               -H "Content-Type: application/json" \
               -H "Authorization: Bearer $TEST_TOKEN" \
