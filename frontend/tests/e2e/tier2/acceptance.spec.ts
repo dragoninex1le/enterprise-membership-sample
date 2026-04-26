@@ -136,47 +136,39 @@ const DEFAULT_MAPPING_SOURCE = JSON.stringify(
 
 /** Signs in via the Auth0 Universal Login page.
  *
- * Two paths both end at auth0.com:
- *   A) ProtectedRoute auto-redirects via loginWithRedirect() — no button needed.
- *   B) Landing page shows "Sign in" button — must click to trigger redirect.
+ * Call this AFTER navigating to the root landing page (not a ProtectedRoute).
  *
- * We race both conditions with a 150 s window. This single large budget absorbs
- * cold Lambda starts, Auth0 SDK iframe silent-auth checks, and OIDC config
- * document fetches — any of which can take 60–120 s in CI. Sequential waits of
- * 60 s + 60 s proved insufficient; a single 150 s race covers both paths without
- * artificially splitting the budget.
+ * Why root-first matters: when the browser lands on a ProtectedRoute before
+ * sign-in, the Auth0 SDK's silent-auth iframe check hangs indefinitely in CI
+ * headless Chrome — the cross-origin postMessage from the auth0.com iframe never
+ * arrives, isLoading stays true, and loginWithRedirect() is never called.
+ *
+ * The root landing page shows a static "Sign in" button that is NOT gated on
+ * SDK initialisation. Clicking it calls loginWithRedirect() directly, which then
+ * navigates the top-level window to auth0.com (no iframe involved).
+ *
+ * After this function returns the page is back at the app root. The caller is
+ * responsible for navigating to the actual target page afterwards.
  */
 async function signIn(page: Page, email: string, password: string) {
   if (!page.url().includes('auth0.com')) {
     const t0 = Date.now()
-    console.log(`signIn: starting at ${page.url().replace(/[?#].*$/, '')}`)
+    console.log(`signIn: at ${page.url().replace(/[?#].*$/, '')}`)
 
-    // Race: auth0.com URL appearing (path A — ProtectedRoute auto-redirect) vs
-    // Sign in button appearing (path B — root landing page). Each leg catches its
-    // own timeout so Promise.race always resolves to a string tag (never rejects).
-    const result = await Promise.race([
-      page.waitForURL(/auth0\.com|eu\.auth0\.com/, { timeout: 150000 })
-          .then(() => 'at-auth0' as const)
-          .catch(() => 'url-timeout' as const),
-      page.getByRole('button', { name: 'Sign in' })
-          .waitFor({ state: 'visible', timeout: 150000 })
-          .then(() => 'button' as const)
-          .catch(() => 'button-timeout' as const),
-    ])
+    // Wait for the Sign in button. On the root landing page this is a static
+    // element — it appears as soon as the JS bundle parses, before the SDK
+    // completes its silent-auth check. 90 s is generous headroom for slow CDN.
+    const signInButton = page.getByRole('button', { name: 'Sign in' })
+    await signInButton.waitFor({ state: 'visible', timeout: 90000 })
+    console.log(`signIn: Sign in button visible (${Date.now() - t0} ms)`)
 
-    console.log(`signIn: race result = ${result} (${Date.now() - t0} ms)`)
+    await signInButton.click()
+    console.log(`signIn: clicked Sign in button`)
 
-    if (result === 'button') {
-      await page.getByRole('button', { name: 'Sign in' }).click()
-      console.log(`signIn: clicked Sign in button`)
-      await page.waitForURL(/auth0\.com|eu\.auth0\.com/, { timeout: 90000 })
-      console.log(`signIn: at auth0 after click (${Date.now() - t0} ms)`)
-    } else if (result !== 'at-auth0') {
-      throw new Error(
-        `signIn: neither auth0 redirect nor Sign in button appeared within 150 s. ` +
-        `URL: ${page.url().replace(/[?#].*$/, '')}`,
-      )
-    }
+    // loginWithRedirect() fetches the OIDC config document then navigates.
+    // Allow up to 90 s for that round-trip in CI.
+    await page.waitForURL(/auth0\.com|eu\.auth0\.com/, { timeout: 90000 })
+    console.log(`signIn: at auth0 (${Date.now() - t0} ms)`)
   }
 
   // ── At Auth0 Universal Login ─────────────────────────────────────────────
@@ -279,15 +271,19 @@ async function setupE2ETenant(browser: Browser) {
   const page = await browser.newPage()
   try {
     // ── 1. Sign in as platform admin ────────────────────────────────────────
-    // Navigate to the TARGET page BEFORE signIn so Auth0 stores it as
-    // appState.returnTo. After the code exchange the SDK navigates client-side
-    // to that URL — the in-memory token is preserved. Calling page.goto()
-    // AFTER signIn does a full reload which clears the token and triggers a
-    // slow iframe silent-auth that burns the beforeAll timeout budget.
-    await page.goto(`${PLATFORM_BASE_URL}/admin/platform/tenants`)
+    // Navigate to the ROOT page first — the Sign in button there is a static
+    // element unaffected by Auth0 SDK initialisation state. Navigating directly
+    // to a protected route causes the SDK's silent-auth iframe check to hang
+    // indefinitely in CI headless Chrome (no postMessage arrives), leaving
+    // loginWithRedirect() uncalled for 150+ s.
+    await page.goto(PLATFORM_BASE_URL)
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
+    // Navigate to the tenants admin page. Auth0 session is now active so the
+    // SDK's silent-auth check on this reload succeeds quickly (session cookie
+    // present → fast iframe response → isAuthenticated = true).
+    await page.goto(`${PLATFORM_BASE_URL}/admin/platform/tenants`)
     // Wait for the TenantsPage to render. /users/me Lambda cold start can add
-    // 30–60 s before RootRedirect resolves the platform-admin role and navigates.
+    // 30–60 s before the platform-admin role is resolved and TenantsPage shows.
     await page.getByRole('heading', { name: 'Tenants' }).waitFor({ state: 'visible', timeout: 60000 })
 
     // ── 2. Create org + tenant (409 = already exists, that's fine) ──────────
@@ -356,36 +352,36 @@ async function setupE2ETenant(browser: Browser) {
 }
 
 test.describe.serial('Acceptance', () => {
-  // Each test does a full Auth0 sign-in from a fresh browser context. The race
-  // in signIn() can take up to 150 s on a cold CI runner, plus ~30 s for the
-  // code exchange and page assertions. 240 s (4 min) gives adequate headroom.
+  // Each test does a full Auth0 sign-in from scratch (fresh browser context).
+  // signIn() waits up to 90 s for the Sign in button + 90 s for auth0.com
+  // navigation + a few seconds for code exchange. 240 s (4 min) is adequate.
   test.setTimeout(240000)
 
   test.beforeAll(async ({ browser }) => {
-    // beforeAll runs setupE2ETenant which includes one full sign-in cycle plus
-    // several API/UI steps. 300 s covers the worst case: 2× 60 s auth0 waits +
-    // Lambda cold start + org/tenant creation + IdP config + claim mapping save.
+    // beforeAll includes one sign-in cycle + API seeding + UI setup steps.
+    // 300 s covers: 90s button wait + 90s auth0 nav + Lambda cold start (60 s)
+    // + org/tenant creation + IdP config patch + claim mapping save.
     test.setTimeout(300000)
     await setupE2ETenant(browser)
   })
 
   test('platform admin sees tenants list and demo-tenant is present', async ({ page }) => {
-    // Navigate to target page BEFORE signIn — Auth0 uses it as returnTo and
-    // navigates back client-side (token stays in memory, no silent-auth reload).
-    await page.goto(`${PLATFORM_BASE_URL}/admin/platform/tenants`)
+    // Sign in at root (Sign in button is static — no SDK dependency).
+    // Navigate to the target AFTER sign-in; Auth0 session is warm so the
+    // SDK's silent-auth reload check succeeds quickly.
+    await page.goto(PLATFORM_BASE_URL)
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
-    await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible({ timeout: 15000 })
+    await page.goto(`${PLATFORM_BASE_URL}/admin/platform/tenants`)
+    await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible({ timeout: 30000 })
     await expect(page.getByRole('cell', { name: 'Demo Corp' }).first()).toBeVisible({ timeout: 10000 })
   })
 
   test('platform admin creates controller role via Roles UI', async ({ page }) => {
-    // The platform admin has access to /admin/tenant/roles for any tenant.
-    // Using platform admin credentials avoids the need for a separate tenant-admin
-    // secret — the controller role is created by an operator on behalf of the tenant.
-    // Navigate to target page BEFORE signIn — Auth0 uses it as returnTo.
-    await page.goto(`${PLATFORM_BASE_URL}/admin/tenant/roles?tenantId=${E2E_TENANT_ID}`)
+    // Sign in at root first (static Sign in button), then navigate to target.
+    await page.goto(PLATFORM_BASE_URL)
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
-    await expect(page.getByRole('heading', { name: 'Roles' })).toBeVisible({ timeout: 15000 })
+    await page.goto(`${PLATFORM_BASE_URL}/admin/tenant/roles?tenantId=${E2E_TENANT_ID}`)
+    await expect(page.getByRole('heading', { name: 'Roles' })).toBeVisible({ timeout: 30000 })
 
     // Create the controller role via the "+ New Role" button.
     // The modal labels are not htmlFor-associated with their inputs, so we scope
