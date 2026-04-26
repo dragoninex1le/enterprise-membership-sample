@@ -6,7 +6,7 @@
  *   2. Creates org "Demo Corp" / tenant "demo-tenant" (handles 409 if already exists)
  *   3. Seeds sample-app permissions + roles (tenant-admin, controller) with source_key
  *   4. Patches the tenant IdP config via Porth API (PATCH /tenants/{id})
- *   5. Saves the default claim mapping config via the Claim Mapping UI
+ *   5. Saves the default claim mapping config via the Porth API (POST /claim-mapping-configs/)
  *
  * Subsequent tests validate the full self-service flow:
  *   6. Platform admin sees organizations list with Demo Corp
@@ -114,23 +114,19 @@ const PLATFORM_BASE_URL =
 
 const TENANT_BASE_URL = process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:5173'
 
-const DEFAULT_MAPPING_SOURCE = JSON.stringify(
-  {
-    schema_version: '2.0',
-    fields: [
-      {
-        name: 'roles',
-        source: 'https://porth.io/roles',
-        type: 'collection',
-        required: false,
-        ops: [{ op: 'resolve_roles' }],
-      },
-    ],
-    default_roles: [],
-  },
-  null,
-  2,
-)
+const DEFAULT_MAPPING_SOURCE = {
+  schema_version: '2.0' as const,
+  fields: [
+    {
+      name: 'roles',
+      source: 'https://porth.io/roles',
+      type: 'collection' as const,
+      required: false,
+      ops: [{ op: 'resolve_roles' as const }],
+    },
+  ],
+  default_roles: [] as string[],
+}
 
 async function signIn(page: Page, email: string, password: string) {
   if (!page.url().includes('auth0.com')) {
@@ -304,6 +300,35 @@ async function patchIdpConfig(tenantId: string) {
   }
 }
 
+async function saveClaimMappingConfig(tenantId: string) {
+  if (!PORTH_API_URL || !PORTH_AUTH_TEST_TOKEN) {
+    console.warn('Skipping claim mapping config save: PORTH_API_URL or PORTH_AUTH_TEST_TOKEN not set')
+    return
+  }
+  const apiCtx = await playwrightRequest.newContext()
+  try {
+    const resp = await apiCtx.post(
+      `${PORTH_API_URL}/claim-mapping-configs/?tenant_id=${encodeURIComponent(tenantId)}`,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${PORTH_AUTH_TEST_TOKEN}`,
+        },
+        data: { mapping_source: DEFAULT_MAPPING_SOURCE },
+      },
+    )
+    if (!resp.ok()) {
+      console.warn(
+        `Failed to save claim mapping config: HTTP ${resp.status()} — ${await resp.text()}`,
+      )
+    } else {
+      console.log(`✅ Claim mapping config saved for ${tenantId}`)
+    }
+  } finally {
+    await apiCtx.dispose()
+  }
+}
+
 async function setupE2ETenant(browser: Browser) {
   if (!PLATFORM_ADMIN_EMAIL || !TENANT_CONFIG.domain) {
     console.warn('Skipping e2e tenant setup: PORTH_PLATFORM_ADMIN_EMAIL or PORTH_TENANT_CONFIG not set')
@@ -338,16 +363,8 @@ async function setupE2ETenant(browser: Browser) {
     // ── 4. Patch IdP config via API ──────────────────────────────────────────
     await patchIdpConfig(E2E_TENANT_ID)
 
-    // ── 5. Save default claim mapping config via UI ──────────────────────────
-    await page.evaluate((tenantId) => {
-      window.history.pushState({}, '', `/admin/tenant/claim-config?tenantId=${tenantId}`)
-      window.dispatchEvent(new PopStateEvent('popstate'))
-    }, E2E_TENANT_ID)
-    const editor = page.locator('textarea').first()
-    await editor.waitFor({ state: 'visible', timeout: 30000 })
-    await editor.fill(DEFAULT_MAPPING_SOURCE)
-    await page.getByRole('button', { name: 'Save' }).click()
-    await page.waitForTimeout(1000)
+    // ── 5. Save default claim mapping config via API ──────────────────────────
+    await saveClaimMappingConfig(E2E_TENANT_ID)
 
     console.log(`✅ E2E tenant setup complete for ${E2E_TENANT_ID}`)
   } finally {
