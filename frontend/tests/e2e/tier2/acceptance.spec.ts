@@ -237,14 +237,16 @@ async function setupE2ETenant(browser: Browser) {
   const page = await browser.newPage()
   try {
     // ── 1. Sign in as platform admin ────────────────────────────────────────
-    // Navigate to the root-domain platform URL — the platform Auth0 app is
-    // configured with callbacks for this URL, not the tenant subdomain URL.
-    await page.goto(PLATFORM_BASE_URL)
-    await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
-    // Post-login redirect URL varies by deployed version — navigate explicitly
-    // rather than asserting the landing URL.
+    // Navigate to the TARGET page BEFORE signIn so Auth0 stores it as
+    // appState.returnTo. After the code exchange the SDK navigates client-side
+    // to that URL — the in-memory token is preserved. Calling page.goto()
+    // AFTER signIn does a full reload which clears the token and triggers a
+    // slow iframe silent-auth that burns the beforeAll timeout budget.
     await page.goto(`${PLATFORM_BASE_URL}/admin/platform/tenants`)
-    await page.waitForLoadState('networkidle', { timeout: 20000 })
+    await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
+    // Wait for the TenantsPage to render — more reliable than networkidle
+    // which can fire during brief inter-request gaps while the page is still loading.
+    await page.getByRole('heading', { name: 'Tenants' }).waitFor({ state: 'visible', timeout: 30000 })
 
     // ── 2. Create org + tenant (409 = already exists, that's fine) ──────────
     await page.getByRole('button', { name: /New Organization/i }).click()
@@ -320,15 +322,16 @@ test.describe.serial('Acceptance', () => {
     // beforeAll/afterAll hooks, which keep the default 30 s.  Auth0 redirect +
     // Lambda cold start + DynamoDB provisioning can collectively take 60+ s, so
     // we must call test.setTimeout() here inside the hook itself.
-    test.setTimeout(90000)
+    // 150 s covers: signIn (~40s) + org/tenant creation + API seeding + IdP edit + claim mapping
+    test.setTimeout(150000)
     await setupE2ETenant(browser)
   })
 
   test('platform admin sees tenants list and demo-tenant is present', async ({ page }) => {
-    await page.goto(PLATFORM_BASE_URL)
-    await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
-    // Navigate explicitly — post-login redirect URL may vary by deployed version
+    // Navigate to target page BEFORE signIn — Auth0 uses it as returnTo and
+    // navigates back client-side (token stays in memory, no silent-auth reload).
     await page.goto(`${PLATFORM_BASE_URL}/admin/platform/tenants`)
+    await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
     await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible({ timeout: 15000 })
     await expect(page.getByRole('cell', { name: 'Demo Corp' }).first()).toBeVisible({ timeout: 10000 })
   })
@@ -337,10 +340,9 @@ test.describe.serial('Acceptance', () => {
     // The platform admin has access to /admin/tenant/roles for any tenant.
     // Using platform admin credentials avoids the need for a separate tenant-admin
     // secret — the controller role is created by an operator on behalf of the tenant.
-    await page.goto(PLATFORM_BASE_URL)
-    await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
-
+    // Navigate to target page BEFORE signIn — Auth0 uses it as returnTo.
     await page.goto(`${PLATFORM_BASE_URL}/admin/tenant/roles?tenantId=${E2E_TENANT_ID}`)
+    await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
     await expect(page.getByRole('heading', { name: 'Roles' })).toBeVisible({ timeout: 15000 })
 
     // Create the controller role via the "+ New Role" button.
