@@ -252,7 +252,7 @@ async function setupE2ETenant(browser: Browser) {
 
     // Dismiss modal if still open (conflict is fine — tenant already exists).
     // Use the heading role to avoid a strict-mode violation: locator('text=New
-    // Organization') matches both the "+ New Organization" button AND the modal
+    // Organization') matches both the "+New Organization" button AND the modal
     // heading when the modal is open.
     const modalVisible = await page.getByRole('heading', { name: 'New Organization' }).isVisible()
     if (modalVisible) {
@@ -394,28 +394,31 @@ test.describe.serial('Acceptance', () => {
     await page.goto(TENANT_BASE_URL)
     await signIn(page, TENANT_USER_EMAIL, TENANT_USER_PASSWORD)
 
-    // Wait for the SPA to fully provision before navigating away.
-    // signIn() only waits for the Auth0 code to be consumed from the URL —
-    // the subsequent POST /users/me call (which resolves roles) is still in
-    // flight. If we page.goto('/ar') immediately, the SPA reloads and
-    // re-runs silent-auth + /users/me from scratch, leaving ProtectedRoute
-    // in userLoading=true indefinitely. networkidle ensures /users/me has
-    // completed before we switch routes.
-    await page.waitForLoadState('networkidle', { timeout: 30000 })
-
+    // Navigate to /ar. Because page.goto() is always a full page reload in
+    // Playwright (not a client-side navigation), the SPA will re-run its full
+    // initialisation cycle: Auth0 silent-auth via hidden iframe, then /users/me
+    // to provision the user and resolve roles.
+    //
+    // We wait for networkidle AFTER this goto so we cover the entire cycle.
+    // Placing the wait before goto (old approach) was wrong — it fired on the
+    // previous page and did nothing to help with the /ar reload.
+    //
+    // Auth0 silent-auth is fast here (session cookie already exists from signIn).
+    // /users/me may cold-start and take 10–15 s, so use a 45 s timeout.
     await page.goto(`${TENANT_BASE_URL}/ar`)
-    // Race heading-visible against unauthorized redirect to handle the async
-    // ProtectedRoute role-check without snapshotting an intermediate URL.
-    await Promise.any([
-      page.getByRole('heading', { name: 'Accounts Receivable' }).waitFor({ state: 'visible', timeout: 20000 }),
-      page.waitForURL(/unauthorized/, { timeout: 20000 }),
-    ])
-    if (page.url().includes('unauthorized')) {
-      // Controller role could not be resolved — likely source_key not set by API
-      // when role was created via UI. This is a known limitation to investigate.
+    await page.waitForLoadState('networkidle', { timeout: 45000 })
+
+    // After networkidle the SPA has made its routing decision:
+    // either the AR heading is rendered, or ProtectedRoute did a client-side
+    // redirect to /unauthorized (visible in page.url() because Playwright tracks
+    // React Router navigations).
+    const finalUrl = page.url()
+    if (finalUrl.includes('unauthorized')) {
+      // Controller role could not be resolved — likely source_key not set when
+      // role was created via UI.  Accepted outcome for this assertion tier.
       await expect(page).toHaveURL(/unauthorized/)
     } else {
-      await expect(page.getByRole('heading', { name: 'Accounts Receivable' })).toBeVisible()
+      await expect(page.getByRole('heading', { name: 'Accounts Receivable' })).toBeVisible({ timeout: 5000 })
       await expect(page).toHaveURL(/\/ar/)
     }
   })
