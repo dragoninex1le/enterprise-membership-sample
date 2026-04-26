@@ -353,7 +353,10 @@ test.describe.serial('Acceptance', () => {
     }, E2E_TENANT_ID)
     await expect(page.getByRole('heading', { name: 'Roles' })).toBeVisible({ timeout: 30000 })
 
-    // Create the controller role
+    // Create the controller role.
+    // Idempotent: if the role already exists from a prior run the API returns 409,
+    // the modal shows a submit error and stays open. We detect this and dismiss the
+    // modal explicitly so the row click is not blocked by the backdrop overlay.
     await page.getByRole('button', { name: '+ New Role' }).click()
     await page.getByRole('heading', { name: 'New Role' }).waitFor({ state: 'visible' })
     // RolesPage modal labels have no htmlFor — locate inputs by position
@@ -361,11 +364,21 @@ test.describe.serial('Acceptance', () => {
     await roleModalForm.locator('input[type="text"]').nth(0).fill('controller')
     await roleModalForm.locator('input[type="text"]').nth(1).fill('Controller — full access to AR/AP and approvals')
     await page.getByRole('button', { name: 'Create' }).click()
-    await page.getByRole('heading', { name: 'New Role' })
-      .waitFor({ state: 'hidden', timeout: 5000 })
-      .catch(() => {})
+    // If the modal closes naturally the role was just created.
+    // If it stays open (e.g. 409 conflict) dismiss it — the role already exists.
+    const roleModalClosed = await page.getByRole('heading', { name: 'New Role' })
+      .waitFor({ state: 'hidden', timeout: 10000 })
+      .then(() => true)
+      .catch(() => false)
+    if (!roleModalClosed) {
+      console.log('\u2139\ufe0f New Role modal still open after Create — role likely already exists, dismissing')
+      await page.keyboard.press('Escape')
+      await page.getByRole('heading', { name: 'New Role' })
+        .waitFor({ state: 'hidden', timeout: 5000 })
+        .catch(() => {})
+    }
 
-    // Verify the role appears in the table
+    // Verify the controller row is in the table (either just created or pre-existing)
     const controllerRow = page.getByRole('row').filter({ hasText: 'controller' }).first()
     await expect(controllerRow).toBeVisible({ timeout: 10000 })
 
