@@ -4,14 +4,20 @@
  * The beforeAll hook handles all tenant setup automatically:
  *   1. Signs in as platform admin
  *   2. Creates org "Demo Corp" / tenant "demo-tenant" (handles 409 if already exists)
- *   3. Seeds sample-app permissions + tenant-admin role via Porth API
+ *   3. Seeds sample-app permissions + roles (tenant-admin, controller) with source_key
  *   4. Patches the tenant IdP config via Porth API (PATCH /tenants/{id})
  *   5. Saves the default claim mapping config via the Claim Mapping UI
  *
  * Subsequent tests validate the full self-service flow:
  *   6. Platform admin sees organizations list with Demo Corp
- *   7. Platform admin creates "controller" role + assigns permissions via Roles UI
+ *   7. Platform admin assigns permissions to the controller role via Roles UI
  *   8. Controller user signs in and verifies access to the AR page
+ *
+ * WHY source_key matters:
+ *   The Porth resolve_roles op builds an in-memory registry keyed by source_key.
+ *   Roles without source_key are SKIPPED. If both tenant-admin and controller are
+ *   created without source_key (the API default), no JWT claim can ever resolve to
+ *   a Porth role and every user gets 401/unauthorized regardless of Auth0 roles.
  *
  * Navigation note — page.goto() is avoided after sign-in:
  *   Every full page reload resets the Auth0 SDK's in-memory token. The SDK
@@ -47,7 +53,6 @@ const TENANT_CONFIG: { domain?: string; client_id?: string; audience?: string } 
   const raw = process.env.PORTH_TENANT_CONFIG
   if (!raw) return {}
 
-  // Diagnostics — safe: logs shape, not values
   const trimmed = raw.trim()
   console.log([
     `PORTH_TENANT_CONFIG diagnostics:`,
@@ -91,8 +96,6 @@ const TENANT_CONFIG: { domain?: string; client_id?: string; audience?: string } 
   return {}
 })()
 
-// Tenant ID must match the subdomain of the live frontend URL:
-// https://demo-tenant.porth-sample.components-dev.estynsoftware.cloud/
 const E2E_TENANT_ID = 'demo-tenant'
 
 const PLATFORM_BASE_URL =
@@ -129,29 +132,17 @@ const DEFAULT_MAPPING_SOURCE = JSON.stringify(
   2,
 )
 
-/** Signs in via the Auth0 Universal Login page.
- *
- * Call this AFTER navigating to the root landing page (not a ProtectedRoute).
- * The root landing page shows a static "Sign in" button that is NOT gated on
- * SDK initialisation. Clicking it calls loginWithRedirect() directly, which
- * navigates the top-level window to auth0.com (no iframe involved).
- */
 async function signIn(page: Page, email: string, password: string) {
   if (!page.url().includes('auth0.com')) {
     const t0 = Date.now()
     console.log(`signIn: at ${page.url().replace(/[?#].*$/, '')}`)
-
     const signInButton = page.getByRole('button', { name: 'Sign in' })
     await signInButton.waitFor({ state: 'visible', timeout: 90000 })
     console.log(`signIn: Sign in button visible (${Date.now() - t0} ms)`)
-
     await signInButton.click()
-    console.log(`signIn: clicked Sign in button`)
-
     await page.waitForURL(/auth0\.com|eu\.auth0\.com/, { timeout: 90000 })
     console.log(`signIn: at auth0 (${Date.now() - t0} ms)`)
   }
-
   await page.getByLabel('Email address').fill(email)
   await page.locator('#password').fill(password)
   await page.getByRole('button', { name: 'Continue', exact: true }).click()
@@ -159,16 +150,79 @@ async function signIn(page: Page, email: string, password: string) {
   await page.waitForFunction(
     () => !window.location.search.includes('code='),
     { timeout: 20000 }
-  ).catch(() => { /* some apps retain code= — best-effort only */ })
+  ).catch(() => {})
 }
 
 /**
- * Seed sample-app permissions + tenant-admin role via the Porth API.
- * Safe to call even if they already exist (409 responses are ignored).
+ * Ensure a role exists for the tenant with the given name and source_key.
+ *
+ * - If the role doesn't exist: create it (POST /roles/).
+ * - If it already exists (409): list roles to find the existing record, then
+ *   PATCH it to set source_key. This repairs roles that were previously
+ *   created without source_key (which would make resolve_roles skip them).
+ *
+ * source_key MUST be set: the Porth resolve_roles op builds an in-memory
+ * registry keyed by source_key. Roles without it are silently skipped.
  */
-async function seedPermissionsAndTenantAdminRole(tenantId: string) {
+async function ensureRoleWithSourceKey(
+  apiCtx: Awaited<ReturnType<typeof playwrightRequest.newContext>>,
+  headers: Record<string, string>,
+  tenantId: string,
+  name: string,
+  sourceKey: string,
+  description: string,
+) {
+  const createResp = await apiCtx.post(`${PORTH_API_URL}/roles/`, {
+    headers,
+    data: { tenant_id: tenantId, name, source_key: sourceKey, description },
+  })
+
+  if (createResp.ok()) {
+    console.log(`✅ Created role '${name}' with source_key='${sourceKey}'`)
+    return
+  }
+
+  if (createResp.status() !== 409) {
+    console.warn(`Failed to create role '${name}': HTTP ${createResp.status()} — ${await createResp.text()}`)
+    return
+  }
+
+  // Role already exists — find its ID and PATCH source_key onto it.
+  // Roles without source_key are invisible to resolve_roles, so this repair
+  // step is essential for feature branches where the role was created in a
+  // prior run before this fix was applied.
+  console.log(`ℹ️ Role '${name}' already exists — patching source_key='${sourceKey}'`)
+  const listResp = await apiCtx.get(`${PORTH_API_URL}/roles/?tenant_id=${tenantId}`, { headers })
+  if (!listResp.ok()) {
+    console.warn(`Failed to list roles: HTTP ${listResp.status()}`)
+    return
+  }
+  const roles = (await listResp.json()) as Array<{ id: string; name: string }>
+  const existing = roles.find(r => r.name === name)
+  if (!existing) {
+    console.warn(`Role '${name}' not found in list after 409 — cannot patch source_key`)
+    return
+  }
+  const patchResp = await apiCtx.patch(`${PORTH_API_URL}/roles/${tenantId}/${existing.id}`, {
+    headers,
+    data: { source_key: sourceKey },
+  })
+  if (!patchResp.ok()) {
+    console.warn(`Failed to PATCH source_key on role '${name}': HTTP ${patchResp.status()} — ${await patchResp.text()}`)
+  } else {
+    console.log(`✅ Patched source_key='${sourceKey}' on existing role '${name}'`)
+  }
+}
+
+/**
+ * Seed sample-app permissions + required roles with source_key set.
+ *
+ * Both tenant-admin and controller need source_key so resolve_roles can
+ * match JWT claim values to Porth roles. Idempotent via 409 + PATCH repair.
+ */
+async function seedPermissionsAndRoles(tenantId: string) {
   if (!PORTH_API_URL || !PORTH_AUTH_TEST_TOKEN) {
-    console.warn('Skipping permission/role seeding: PORTH_API_URL or PORTH_AUTH_TEST_TOKEN not set')
+    console.warn('Skipping seeding: PORTH_API_URL or PORTH_AUTH_TEST_TOKEN not set')
     return
   }
 
@@ -178,6 +232,7 @@ async function seedPermissionsAndTenantAdminRole(tenantId: string) {
     Authorization: `Bearer ${PORTH_AUTH_TEST_TOKEN}`,
   }
 
+  // Register sample-app permissions
   const permResp = await apiCtx.post(`${PORTH_API_URL}/permissions/`, {
     headers,
     data: {
@@ -198,26 +253,27 @@ async function seedPermissionsAndTenantAdminRole(tenantId: string) {
     console.warn(`Failed to batch-register permissions: HTTP ${permResp.status()} — ${await permResp.text()}`)
   }
 
-  const roleResp = await apiCtx.post(`${PORTH_API_URL}/roles/`, {
-    headers,
-    data: {
-      tenant_id: tenantId,
-      name: 'tenant-admin',
-      description: 'Tenant Administrator — manages roles and claim mapping',
-    },
-  })
-  if (!roleResp.ok() && roleResp.status() !== 409) {
-    console.warn(`Failed to create tenant-admin role: HTTP ${roleResp.status()}`)
-  }
+  // Seed tenant-admin role with source_key (required for claim mapping to resolve it)
+  await ensureRoleWithSourceKey(
+    apiCtx, headers, tenantId,
+    'tenant-admin', 'tenant-admin',
+    'Tenant Administrator — manages roles and claim mapping',
+  )
+
+  // Seed controller role with source_key. The Roles UI (test 2) will try to
+  // create it again — it'll get a 409 and click Cancel, which is fine.
+  // Seeding via API here ensures source_key is always set, even if the UI
+  // creates the role without it on the first run.
+  await ensureRoleWithSourceKey(
+    apiCtx, headers, tenantId,
+    'controller', 'controller',
+    'Controller — full access to AR/AP and approvals',
+  )
 
   await apiCtx.dispose()
-  console.log(`✅ Permissions and tenant-admin role seeded for ${tenantId}`)
+  console.log(`✅ Permissions and roles seeded for ${tenantId}`)
 }
 
-/**
- * Patch the tenant's IdP config via direct API call.
- * TenantsPage in the deployed app has no IdP config fields — must be done via API.
- */
 async function patchIdpConfig(tenantId: string) {
   if (!TENANT_CONFIG.domain || !PORTH_API_URL || !PORTH_AUTH_TEST_TOKEN) {
     console.warn('Skipping IdP config patch: TENANT_CONFIG, PORTH_API_URL or PORTH_AUTH_TEST_TOKEN not set')
@@ -248,14 +304,6 @@ async function patchIdpConfig(tenantId: string) {
   }
 }
 
-/**
- * Idempotent tenant setup — run once before the serial suite.
- *
- * 1. Create org + first tenant via UI (handles 409 if already exists)
- * 2. Seed permissions + tenant-admin role via API
- * 3. Patch tenant IdP config via API
- * 4. Save the default claim mapping config via the Claim Mapping UI
- */
 async function setupE2ETenant(browser: Browser) {
   if (!PLATFORM_ADMIN_EMAIL || !TENANT_CONFIG.domain) {
     console.warn('Skipping e2e tenant setup: PORTH_PLATFORM_ADMIN_EMAIL or PORTH_TENANT_CONFIG not set')
@@ -267,18 +315,16 @@ async function setupE2ETenant(browser: Browser) {
     // ── 1. Sign in as platform admin ────────────────────────────────────────
     await page.goto(PLATFORM_BASE_URL)
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
-    // RootRedirect navigates to /admin/platform/organizations (React Router,
-    // client-side, no reload — SDK in-memory token preserved).
     await page.waitForURL('**/admin/platform/organizations**', { timeout: 120000 })
     await page.getByRole('heading', { name: 'Organizations' }).waitFor({ state: 'visible', timeout: 30000 })
 
-    // ── 2. Create org + first tenant (409 = already exists, that's fine) ────
+    // ── 2. Create org + first tenant (409 = already exists) ──────────────────
     await page.getByRole('button', { name: '+ New Organization' }).click()
     await page.getByRole('heading', { name: 'New Organization' }).waitFor({ state: 'visible' })
     const modalForm = page.locator('form').last()
-    await modalForm.locator('input[type="text"]').nth(0).fill('Demo Corp')        // Name
-    await modalForm.locator('input[type="text"]').nth(1).fill('demo-tenant')     // Slug
-    await modalForm.locator('input[type="text"]').nth(2).fill('Demo Tenant Dev') // First Tenant Display Name
+    await modalForm.locator('input[type="text"]').nth(0).fill('Demo Corp')
+    await modalForm.locator('input[type="text"]').nth(1).fill('demo-tenant')
+    await modalForm.locator('input[type="text"]').nth(2).fill('Demo Tenant Dev')
     await page.getByRole('button', { name: 'Create' }).click()
     await page.waitForTimeout(2000)
     const orgModalVisible = await page.getByRole('heading', { name: 'New Organization' }).isVisible()
@@ -286,16 +332,13 @@ async function setupE2ETenant(browser: Browser) {
       console.log('ℹ️ New Organization modal still open (409 conflict) — will be dismissed by navigation')
     }
 
-    // ── 3. Seed permissions + tenant-admin role via API ──────────────────────
-    await seedPermissionsAndTenantAdminRole(E2E_TENANT_ID)
+    // ── 3. Seed permissions + roles with source_key ───────────────────────
+    await seedPermissionsAndRoles(E2E_TENANT_ID)
 
     // ── 4. Patch IdP config via API ──────────────────────────────────────────
     await patchIdpConfig(E2E_TENANT_ID)
 
     // ── 5. Save default claim mapping config via UI ──────────────────────────
-    // No sidebar link for platform admin — use React Router history manipulation.
-    // pushState + popstate: no page reload, SDK in-memory token preserved.
-    // Also unmounts OrganizationsPage (and any open modal) as a side effect.
     await page.evaluate((tenantId) => {
       window.history.pushState({}, '', `/admin/tenant/claim-config?tenantId=${tenantId}`)
       window.dispatchEvent(new PopStateEvent('popstate'))
@@ -328,20 +371,20 @@ test.describe.serial('Acceptance', () => {
     await expect(page.getByRole('cell', { name: 'Demo Corp' }).first()).toBeVisible({ timeout: 10000 })
   })
 
-  test('platform admin creates controller role via Roles UI', async ({ page }) => {
+  test('platform admin assigns permissions to controller role via Roles UI', async ({ page }) => {
     await page.goto(PLATFORM_BASE_URL)
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
     await page.waitForURL('**/admin/platform/organizations**', { timeout: 120000 })
     await page.getByRole('heading', { name: 'Organizations' }).waitFor({ state: 'visible', timeout: 30000 })
 
-    // Navigate to Roles — platform admin sidebar has no Roles link.
     await page.evaluate((tenantId) => {
       window.history.pushState({}, '', `/admin/tenant/roles?tenantId=${tenantId}`)
       window.dispatchEvent(new PopStateEvent('popstate'))
     }, E2E_TENANT_ID)
     await expect(page.getByRole('heading', { name: 'Roles' })).toBeVisible({ timeout: 30000 })
 
-    // Create the controller role (idempotent — 409 handled via Cancel button).
+    // The controller role was seeded via API in beforeAll with source_key set.
+    // Try to create via UI anyway (idempotent — 409 handled via Cancel button).
     await page.getByRole('button', { name: '+ New Role' }).click()
     await page.getByRole('heading', { name: 'New Role' }).waitFor({ state: 'visible' })
     const roleModalForm = page.locator('form').last()
@@ -353,14 +396,14 @@ test.describe.serial('Acceptance', () => {
       .then(() => true)
       .catch(() => false)
     if (!roleModalClosed) {
-      console.log('ℹ️ New Role modal still open — role likely already exists, clicking Cancel')
+      console.log('ℹ️ New Role modal still open — role already exists (seeded via API), clicking Cancel')
       await page.getByRole('button', { name: 'Cancel' }).click()
       await page.getByRole('heading', { name: 'New Role' })
         .waitFor({ state: 'hidden', timeout: 5000 })
         .catch(() => {})
     }
 
-    // Open side panel for the controller role and assign permissions.
+    // Open side panel and assign permissions
     const controllerRow = page.getByRole('row').filter({ hasText: 'controller' }).first()
     await expect(controllerRow).toBeVisible({ timeout: 10000 })
     await controllerRow.click()
@@ -380,16 +423,13 @@ test.describe.serial('Acceptance', () => {
       }
     }
 
-    // Save Permissions is only enabled when isDirty (selected keys ≠ assigned keys).
-    // On repeat runs all permissions are already set — no checkboxes changed,
-    // button stays disabled. Skip the click if nothing to save.
     const saveBtn = page.getByRole('button', { name: 'Save Permissions' })
     if (await saveBtn.isEnabled()) {
       await saveBtn.click()
       await page.waitForTimeout(1500)
       await expect(page.locator('.bg-red-50').first()).not.toBeVisible()
     } else {
-      console.log('ℹ️ Save Permissions button is disabled — permissions already current, no save needed')
+      console.log('ℹ️ Save Permissions button is disabled — permissions already current')
     }
 
     console.log('✅ Controller role verified and permissions confirmed via Roles UI')
@@ -402,9 +442,8 @@ test.describe.serial('Acceptance', () => {
     await page.goto(TENANT_BASE_URL)
     await signIn(page, TENANT_USER_EMAIL, TENANT_USER_PASSWORD)
 
-    // Wait up to 120s for the AR sidebar link. Its appearance signals that
-    // /users/me completed and the claim mapping resolved the controller role.
-    // 120s covers Lambda cold-start latency (typically 30–90s for /users/me).
+    // Wait for the AR sidebar link — appears only after /users/me resolves the
+    // controller role via claim mapping. 120s covers Lambda cold-start latency.
     const arLink = page.getByRole('link', { name: /Accounts Receivable/i })
     const roleResolved = await arLink
       .waitFor({ state: 'visible', timeout: 120000 })
@@ -412,23 +451,17 @@ test.describe.serial('Acceptance', () => {
       .catch(() => false)
 
     if (roleResolved) {
-      // Client-side React Router navigation — Auth0 in-memory token preserved.
       await arLink.click()
       await expect(page.getByRole('heading', { name: 'Accounts Receivable' })).toBeVisible({ timeout: 10000 })
       await expect(page).toHaveURL(/\/ar/)
       console.log('✅ Controller can see and navigate to AR page')
     } else {
-      // AR link didn't appear within 120s.
-      // Use pushState to navigate — NEVER page.goto() after sign-in, because that
-      // resets the Auth0 in-memory token and the SDK's silent-auth iframe check
-      // hangs indefinitely in CI headless Chrome.
+      // AR link didn't appear in 120s — navigate via pushState (never page.goto)
       console.log('ℹ️ AR link not visible after 120 s — navigating via pushState to /ar')
       await page.evaluate(() => {
         window.history.pushState({}, '', '/ar')
         window.dispatchEvent(new PopStateEvent('popstate'))
       })
-
-      // Accept either valid outcome: AR page loaded, or role not resolved (/unauthorized).
       const arHeading = page.getByRole('heading', { name: 'Accounts Receivable' })
       const outcome = await Promise.race([
         arHeading.waitFor({ state: 'visible', timeout: 30000 }).then(() => 'ar' as const),
@@ -439,9 +472,16 @@ test.describe.serial('Acceptance', () => {
         await expect(page).toHaveURL(/\/ar/)
         console.log('✅ Controller can access AR page (role resolved, navigated via pushState)')
       } else if (outcome === 'unauthorized') {
-        console.log('✅ Controller correctly redirected to /unauthorized (role not yet resolved)')
+        // AR link not visible AND /unauthorized — role did not resolve.
+        // This is a REAL failure: the controller user cannot access AR.
+        throw new Error(
+          'Controller user was redirected to /unauthorized — the controller Porth role ' +
+          'did not resolve from the JWT claim. Check that: (1) the Auth0 user has the ' +
+          '"controller" Auth0 role assigned, (2) the Auth0 post-login Action injects ' +
+          'roles into the https://porth.io/roles JWT claim, and (3) the Porth controller ' +
+          'role has source_key="controller" (seeded in beforeAll — check API logs).'
+        )
       } else {
-        // Neither outcome matched — fail with a clear assertion.
         await expect(arHeading).toBeVisible({ timeout: 1000 })
       }
     }
