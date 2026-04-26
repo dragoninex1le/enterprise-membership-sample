@@ -278,13 +278,17 @@ async function setupE2ETenant(browser: Browser) {
     // loginWithRedirect() uncalled for 150+ s.
     await page.goto(PLATFORM_BASE_URL)
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
-    // Navigate to the tenants admin page. Auth0 session is now active so the
-    // SDK's silent-auth check on this reload succeeds quickly (session cookie
-    // present → fast iframe response → isAuthenticated = true).
-    await page.goto(`${PLATFORM_BASE_URL}/admin/platform/tenants`)
-    // Wait for the TenantsPage to render. /users/me Lambda cold start can add
-    // 30–60 s before the platform-admin role is resolved and TenantsPage shows.
-    await page.getByRole('heading', { name: 'Tenants' }).waitFor({ state: 'visible', timeout: 60000 })
+    // After sign-in the SDK has processed the code exchange → isAuthenticated=true.
+    // Do NOT call page.goto() here — every full reload resets the Auth0 SDK's
+    // in-memory token. The SDK then starts a silent-auth iframe check, and in CI
+    // headless Chrome the cross-origin postMessage from the auth0.com iframe hangs
+    // for >60 s (with an active session), blocking the whole app.
+    // Instead, let RootRedirect navigate to /admin/platform/tenants client-side
+    // (React Router <Navigate>, no reload). It only fires once App re-renders with
+    // isAuthenticated=true AND userLoading=false, so the 120 s budget covers the
+    // /users/me Lambda cold start (typically 30–90 s).
+    await page.waitForURL('**/admin/platform/tenants**', { timeout: 120000 })
+    await page.getByRole('heading', { name: 'Tenants' }).waitFor({ state: 'visible', timeout: 30000 })
 
     // ── 2. Create org + tenant (409 = already exists, that's fine) ──────────
     await page.getByRole('button', { name: /New Organization/i }).click()
@@ -334,11 +338,15 @@ async function setupE2ETenant(browser: Browser) {
     await page.waitForTimeout(1000)
 
     // ── 5. Save default claim mapping config ────────────────────────────────
-    // Must use PLATFORM_BASE_URL — the admin is authenticated at the root domain.
-    // page.goto('/path') always resolves against Playwright's baseURL (the tenant
-    // subdomain), which is a different origin and would lose the admin's session.
-    await page.goto(`${PLATFORM_BASE_URL}/admin/tenant/claim-config?tenantId=${E2E_TENANT_ID}`)
-    await page.waitForLoadState('networkidle')
+    // Navigate to claim-config for demo-tenant via the "Manage →" button on the
+    // tenant row. TenantsPage.navigate() is a React Router navigate() call —
+    // no page reload, SDK in-memory token is preserved.
+    // (page.goto() here would reset the token and trigger the same iframe hang.)
+    const claimRow = page.getByRole('row').filter({ hasText: E2E_TENANT_ID }).first()
+    await claimRow.waitFor({ state: 'visible', timeout: 15000 })
+    await claimRow.getByRole('button', { name: 'Manage →' }).click()
+    await page.waitForURL('**/admin/tenant/claim-config**', { timeout: 15000 })
+    await page.waitForLoadState('networkidle', { timeout: 30000 })
 
     const editor = page.locator('textarea').first()
     await editor.fill(DEFAULT_MAPPING_SOURCE)
@@ -359,28 +367,41 @@ test.describe.serial('Acceptance', () => {
 
   test.beforeAll(async ({ browser }) => {
     // beforeAll includes one sign-in cycle + API seeding + UI setup steps.
-    // 300 s covers: 90s button wait + 90s auth0 nav + Lambda cold start (60 s)
+    // 300 s covers: 90s button wait + 90s auth0 nav + Lambda cold start (90 s)
     // + org/tenant creation + IdP config patch + claim mapping save.
     test.setTimeout(300000)
     await setupE2ETenant(browser)
   })
 
   test('platform admin sees tenants list and demo-tenant is present', async ({ page }) => {
-    // Sign in at root (Sign in button is static — no SDK dependency).
-    // Navigate to the target AFTER sign-in; Auth0 session is warm so the
-    // SDK's silent-auth reload check succeeds quickly.
+    // Sign in at root (static Sign in button — no SDK dependency).
+    // After sign-in RootRedirect auto-navigates to /admin/platform/tenants
+    // via React Router (client-side, no reload → SDK in-memory token preserved).
     await page.goto(PLATFORM_BASE_URL)
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
-    await page.goto(`${PLATFORM_BASE_URL}/admin/platform/tenants`)
-    await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible({ timeout: 30000 })
+    await page.waitForURL('**/admin/platform/tenants**', { timeout: 120000 })
+    await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible({ timeout: 10000 })
     await expect(page.getByRole('cell', { name: 'Demo Corp' }).first()).toBeVisible({ timeout: 10000 })
   })
 
   test('platform admin creates controller role via Roles UI', async ({ page }) => {
-    // Sign in at root first (static Sign in button), then navigate to target.
+    // Sign in at root; RootRedirect auto-navigates to tenants (client-side).
+    // Then navigate to the roles page via "Manage →" + Roles sidebar link —
+    // both are React Router navigations (no reload, SDK token preserved).
     await page.goto(PLATFORM_BASE_URL)
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
-    await page.goto(`${PLATFORM_BASE_URL}/admin/tenant/roles?tenantId=${E2E_TENANT_ID}`)
+    await page.waitForURL('**/admin/platform/tenants**', { timeout: 120000 })
+    await page.getByRole('heading', { name: 'Tenants' }).waitFor({ state: 'visible', timeout: 30000 })
+    // Click "Manage →" on the demo-tenant row — React Router navigates to
+    // /admin/tenant/claim-config?tenantId=demo-tenant (still in-memory session).
+    // With tenantId in the URL, the sidebar exposes the Roles link.
+    const rolesNavRow = page.getByRole('row').filter({ hasText: E2E_TENANT_ID }).first()
+    await rolesNavRow.waitFor({ state: 'visible', timeout: 15000 })
+    await rolesNavRow.getByRole('button', { name: 'Manage →' }).click()
+    // Wait for the sidebar Roles link to appear (tenantId now in search params)
+    const rolesLink = page.locator('nav a[href*="/admin/tenant/roles"]')
+    await rolesLink.waitFor({ state: 'visible', timeout: 10000 })
+    await rolesLink.click()
     await expect(page.getByRole('heading', { name: 'Roles' })).toBeVisible({ timeout: 30000 })
 
     // Create the controller role via the "+ New Role" button.
