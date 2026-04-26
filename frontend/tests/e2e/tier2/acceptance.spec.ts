@@ -282,13 +282,15 @@ async function setupE2ETenant(browser: Browser) {
     await modalForm.locator('input[type="text"]').nth(2).fill('Demo Tenant Dev') // First Tenant Display Name
     await page.getByRole('button', { name: 'Create' }).click()
     await page.waitForTimeout(2000)
-    // Dismiss modal if still open (submit error = org/slug conflict — that's fine)
-    const modalVisible = await page.getByRole('heading', { name: 'New Organization' }).isVisible()
-    if (modalVisible) {
-      await page.keyboard.press('Escape')
-      await page.getByRole('heading', { name: 'New Organization' })
-        .waitFor({ state: 'hidden', timeout: 5000 })
-        .catch(() => {})
+    // Dismiss modal if still open (submit error = org/slug conflict — that's fine).
+    // OrganizationsPage modal has no onKeyDown Escape handler, but navigating
+    // away via pushState unmounts the OrganizationsPage component (and modal).
+    // We rely on the pushState navigation in step 5 to clean up the modal rather
+    // than attempting to click Cancel here (which would require the backdrop to
+    // not be intercepting pointer events, a chicken-and-egg problem).
+    const orgModalVisible = await page.getByRole('heading', { name: 'New Organization' }).isVisible()
+    if (orgModalVisible) {
+      console.log('\u2139\ufe0f New Organization modal still open (409 conflict) — will be dismissed by navigation')
     }
 
     // ── 3. Seed permissions + tenant-admin role via API ──────────────────────
@@ -303,6 +305,7 @@ async function setupE2ETenant(browser: Browser) {
     // Use React Router history manipulation: pushState updates the URL,
     // dispatching popstate causes React Router v6 to re-render the new route.
     // No page reload — Auth0 SDK in-memory token is preserved.
+    // This also unmounts OrganizationsPage (and any open modal) as a side effect.
     await page.evaluate((tenantId) => {
       window.history.pushState({}, '', `/admin/tenant/claim-config?tenantId=${tenantId}`)
       window.dispatchEvent(new PopStateEvent('popstate'))
@@ -356,7 +359,8 @@ test.describe.serial('Acceptance', () => {
     // Create the controller role.
     // Idempotent: if the role already exists from a prior run the API returns 409,
     // the modal shows a submit error and stays open. We detect this and dismiss the
-    // modal explicitly so the row click is not blocked by the backdrop overlay.
+    // modal by clicking Cancel (RolesPage modal has no onKeyDown Escape handler —
+    // closeModal() is only called from the Cancel button or a successful Create).
     await page.getByRole('button', { name: '+ New Role' }).click()
     await page.getByRole('heading', { name: 'New Role' }).waitFor({ state: 'visible' })
     // RolesPage modal labels have no htmlFor — locate inputs by position
@@ -365,14 +369,15 @@ test.describe.serial('Acceptance', () => {
     await roleModalForm.locator('input[type="text"]').nth(1).fill('Controller — full access to AR/AP and approvals')
     await page.getByRole('button', { name: 'Create' }).click()
     // If the modal closes naturally the role was just created.
-    // If it stays open (e.g. 409 conflict) dismiss it — the role already exists.
+    // If it stays open (e.g. 409 conflict) dismiss it via Cancel — the role already
+    // exists from a prior run, which is fine.
     const roleModalClosed = await page.getByRole('heading', { name: 'New Role' })
       .waitFor({ state: 'hidden', timeout: 10000 })
       .then(() => true)
       .catch(() => false)
     if (!roleModalClosed) {
-      console.log('\u2139\ufe0f New Role modal still open after Create — role likely already exists, dismissing')
-      await page.keyboard.press('Escape')
+      console.log('\u2139\ufe0f New Role modal still open after Create — role likely already exists, clicking Cancel')
+      await page.getByRole('button', { name: 'Cancel' }).click()
       await page.getByRole('heading', { name: 'New Role' })
         .waitFor({ state: 'hidden', timeout: 5000 })
         .catch(() => {})
