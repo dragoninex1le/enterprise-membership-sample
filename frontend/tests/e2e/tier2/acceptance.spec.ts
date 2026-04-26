@@ -179,36 +179,37 @@ async function seedPermissionsAndTenantAdminRole(tenantId: string) {
     Authorization: `Bearer ${PORTH_AUTH_TEST_TOKEN}`,
   }
 
-  // Register sample-app permissions for the tenant
-  const permissions = [
-    { key: 'dashboard.read',    display_name: 'View Dashboard',        category: 'Dashboard',           sort_order: 1  },
-    { key: 'ar.invoices.read',  display_name: 'View Invoices',         category: 'Accounts Receivable', sort_order: 10 },
-    { key: 'ar.invoices.write', display_name: 'Create/Edit Invoices',  category: 'Accounts Receivable', sort_order: 11 },
-    { key: 'ap.bills.read',     display_name: 'View Bills',            category: 'Accounts Payable',    sort_order: 20 },
-    { key: 'ap.bills.write',    display_name: 'Create/Edit Bills',     category: 'Accounts Payable',    sort_order: 21 },
-    { key: 'approvals.read',    display_name: 'View Approval Queue',   category: 'Approvals',           sort_order: 30 },
-    { key: 'approvals.write',   display_name: 'Approve/Reject',        category: 'Approvals',           sort_order: 31 },
-  ]
-
-  for (const perm of permissions) {
-    const resp = await apiCtx.post(`${PORTH_API_URL}/permissions`, {
-      headers,
-      data: { ...perm, tenant_id: tenantId, app_namespace: 'sample-app' },
-    })
-    if (!resp.ok() && resp.status() !== 409) {
-      console.warn(`Failed to register permission ${perm.key}: HTTP ${resp.status()}`)
-    }
+  // Register sample-app permissions for the tenant using the batch endpoint.
+  // The API expects POST /permissions/ (trailing slash) with a single batch body.
+  const permResp = await apiCtx.post(`${PORTH_API_URL}/permissions/`, {
+    headers,
+    data: {
+      tenant_id: tenantId,
+      app_namespace: 'sample-app',
+      permissions: [
+        { key: 'dashboard.read',    display_name: 'View Dashboard',       category: 'Dashboard',           app_namespace: 'sample-app', sort_order: 1  },
+        { key: 'ar.invoices.read',  display_name: 'View Invoices',        category: 'Accounts Receivable', app_namespace: 'sample-app', sort_order: 10 },
+        { key: 'ar.invoices.write', display_name: 'Create/Edit Invoices', category: 'Accounts Receivable', app_namespace: 'sample-app', sort_order: 11 },
+        { key: 'ap.bills.read',     display_name: 'View Bills',           category: 'Accounts Payable',    app_namespace: 'sample-app', sort_order: 20 },
+        { key: 'ap.bills.write',    display_name: 'Create/Edit Bills',    category: 'Accounts Payable',    app_namespace: 'sample-app', sort_order: 21 },
+        { key: 'approvals.read',    display_name: 'View Approval Queue',  category: 'Approvals',           app_namespace: 'sample-app', sort_order: 30 },
+        { key: 'approvals.write',   display_name: 'Approve/Reject',       category: 'Approvals',           app_namespace: 'sample-app', sort_order: 31 },
+      ],
+    },
+  })
+  if (!permResp.ok()) {
+    console.warn(`Failed to batch-register permissions: HTTP ${permResp.status()} — ${await permResp.text()}`)
   }
 
-  // Create tenant-admin role with source_key so resolve_roles can map the JWT
-  // claim value "tenant-admin" → this Porth role
-  const roleResp = await apiCtx.post(`${PORTH_API_URL}/roles`, {
+  // Create tenant-admin role. The Porth API auto-sets source_key from name
+  // when not explicitly provided, so resolve_roles can map the JWT claim
+  // value "tenant-admin" → this Porth role without extra config.
+  const roleResp = await apiCtx.post(`${PORTH_API_URL}/roles/`, {
     headers,
     data: {
       tenant_id: tenantId,
       name: 'tenant-admin',
       description: 'Tenant Administrator — manages roles and claim mapping',
-      source_key: 'tenant-admin',
     },
   })
   if (!roleResp.ok() && roleResp.status() !== 409) {
@@ -338,11 +339,14 @@ test.describe.serial('Acceptance', () => {
     await page.goto(`${PLATFORM_BASE_URL}/admin/tenant/roles?tenantId=${E2E_TENANT_ID}`)
     await expect(page.getByRole('heading', { name: 'Roles' })).toBeVisible({ timeout: 15000 })
 
-    // Create the controller role via the "+ New Role" button
+    // Create the controller role via the "+ New Role" button.
+    // The modal labels are not htmlFor-associated with their inputs, so we scope
+    // to the modal form and target inputs by position (Name=first, Description=second).
     await page.getByRole('button', { name: '+ New Role' }).click()
     await expect(page.getByRole('heading', { name: 'New Role' })).toBeVisible()
-    await page.getByLabel('Name').fill('controller')
-    await page.getByLabel('Description').fill('Controller — full access to AR/AP and approvals')
+    const modalForm = page.locator('form').last()
+    await modalForm.locator('input[type="text"]').first().fill('controller')
+    await modalForm.locator('input[type="text"]').nth(1).fill('Controller — full access to AR/AP and approvals')
     await page.getByRole('button', { name: 'Create' }).click()
 
     // Wait for modal to close and new role to appear in the table
