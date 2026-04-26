@@ -211,7 +211,7 @@ async function seedPermissionsAndTenantAdminRole(tenantId: string) {
   }
 
   await apiCtx.dispose()
-  console.log(`\u2705 Permissions and tenant-admin role seeded for ${tenantId}`)
+  console.log(`✅ Permissions and tenant-admin role seeded for ${tenantId}`)
 }
 
 /**
@@ -241,7 +241,7 @@ async function patchIdpConfig(tenantId: string) {
     if (!resp.ok()) {
       console.warn(`Failed to patch IdP config: HTTP ${resp.status()} — ${await resp.text()}`)
     } else {
-      console.log(`\u2705 IdP config patched for ${tenantId}`)
+      console.log(`✅ IdP config patched for ${tenantId}`)
     }
   } finally {
     await apiCtx.dispose()
@@ -275,50 +275,38 @@ async function setupE2ETenant(browser: Browser) {
     // ── 2. Create org + first tenant (409 = already exists, that's fine) ────
     await page.getByRole('button', { name: '+ New Organization' }).click()
     await page.getByRole('heading', { name: 'New Organization' }).waitFor({ state: 'visible' })
-    // OrganizationsPage modal labels have no htmlFor — locate inputs by position
     const modalForm = page.locator('form').last()
     await modalForm.locator('input[type="text"]').nth(0).fill('Demo Corp')        // Name
     await modalForm.locator('input[type="text"]').nth(1).fill('demo-tenant')     // Slug
     await modalForm.locator('input[type="text"]').nth(2).fill('Demo Tenant Dev') // First Tenant Display Name
     await page.getByRole('button', { name: 'Create' }).click()
     await page.waitForTimeout(2000)
-    // Dismiss modal if still open (submit error = org/slug conflict — that's fine).
-    // OrganizationsPage modal has no onKeyDown Escape handler, but navigating
-    // away via pushState unmounts the OrganizationsPage component (and modal).
-    // We rely on the pushState navigation in step 5 to clean up the modal rather
-    // than attempting to click Cancel here (which would require the backdrop to
-    // not be intercepting pointer events, a chicken-and-egg problem).
     const orgModalVisible = await page.getByRole('heading', { name: 'New Organization' }).isVisible()
     if (orgModalVisible) {
-      console.log('\u2139\ufe0f New Organization modal still open (409 conflict) — will be dismissed by navigation')
+      console.log('ℹ️ New Organization modal still open (409 conflict) — will be dismissed by navigation')
     }
 
     // ── 3. Seed permissions + tenant-admin role via API ──────────────────────
     await seedPermissionsAndTenantAdminRole(E2E_TENANT_ID)
 
     // ── 4. Patch IdP config via API ──────────────────────────────────────────
-    // TenantsPage has no IdP config fields — done via direct API call instead.
     await patchIdpConfig(E2E_TENANT_ID)
 
     // ── 5. Save default claim mapping config via UI ──────────────────────────
-    // No sidebar link for platform admin to reach ClaimMappingConfigPage.
-    // Use React Router history manipulation: pushState updates the URL,
-    // dispatching popstate causes React Router v6 to re-render the new route.
-    // No page reload — Auth0 SDK in-memory token is preserved.
-    // This also unmounts OrganizationsPage (and any open modal) as a side effect.
+    // No sidebar link for platform admin — use React Router history manipulation.
+    // pushState + popstate: no page reload, SDK in-memory token preserved.
+    // Also unmounts OrganizationsPage (and any open modal) as a side effect.
     await page.evaluate((tenantId) => {
       window.history.pushState({}, '', `/admin/tenant/claim-config?tenantId=${tenantId}`)
       window.dispatchEvent(new PopStateEvent('popstate'))
     }, E2E_TENANT_ID)
-    // ClaimMappingConfigPage shows a loading skeleton then the textarea.
-    // Wait for the textarea, which signals the loading phase is complete.
     const editor = page.locator('textarea').first()
     await editor.waitFor({ state: 'visible', timeout: 30000 })
     await editor.fill(DEFAULT_MAPPING_SOURCE)
     await page.getByRole('button', { name: 'Save' }).click()
     await page.waitForTimeout(1000)
 
-    console.log(`\u2705 E2E tenant setup complete for ${E2E_TENANT_ID}`)
+    console.log(`✅ E2E tenant setup complete for ${E2E_TENANT_ID}`)
   } finally {
     await page.close()
   }
@@ -335,7 +323,6 @@ test.describe.serial('Acceptance', () => {
   test('platform admin sees organizations list and Demo Corp is present', async ({ page }) => {
     await page.goto(PLATFORM_BASE_URL)
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
-    // RootRedirect → /admin/platform/organizations
     await page.waitForURL('**/admin/platform/organizations**', { timeout: 120000 })
     await expect(page.getByRole('heading', { name: 'Organizations' })).toBeVisible({ timeout: 10000 })
     await expect(page.getByRole('cell', { name: 'Demo Corp' }).first()).toBeVisible({ timeout: 10000 })
@@ -344,50 +331,38 @@ test.describe.serial('Acceptance', () => {
   test('platform admin creates controller role via Roles UI', async ({ page }) => {
     await page.goto(PLATFORM_BASE_URL)
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
-    // Wait for RootRedirect to land on organizations
     await page.waitForURL('**/admin/platform/organizations**', { timeout: 120000 })
     await page.getByRole('heading', { name: 'Organizations' }).waitFor({ state: 'visible', timeout: 30000 })
 
-    // Navigate to Roles page — platform admin sidebar has no Roles link.
-    // Use React Router history manipulation: no page reload, SDK token preserved.
+    // Navigate to Roles — platform admin sidebar has no Roles link.
     await page.evaluate((tenantId) => {
       window.history.pushState({}, '', `/admin/tenant/roles?tenantId=${tenantId}`)
       window.dispatchEvent(new PopStateEvent('popstate'))
     }, E2E_TENANT_ID)
     await expect(page.getByRole('heading', { name: 'Roles' })).toBeVisible({ timeout: 30000 })
 
-    // Create the controller role.
-    // Idempotent: if the role already exists from a prior run the API returns 409,
-    // the modal shows a submit error and stays open. We detect this and dismiss the
-    // modal by clicking Cancel (RolesPage modal has no onKeyDown Escape handler —
-    // closeModal() is only called from the Cancel button or a successful Create).
+    // Create the controller role (idempotent — 409 handled via Cancel button).
     await page.getByRole('button', { name: '+ New Role' }).click()
     await page.getByRole('heading', { name: 'New Role' }).waitFor({ state: 'visible' })
-    // RolesPage modal labels have no htmlFor — locate inputs by position
     const roleModalForm = page.locator('form').last()
     await roleModalForm.locator('input[type="text"]').nth(0).fill('controller')
     await roleModalForm.locator('input[type="text"]').nth(1).fill('Controller — full access to AR/AP and approvals')
     await page.getByRole('button', { name: 'Create' }).click()
-    // If the modal closes naturally the role was just created.
-    // If it stays open (e.g. 409 conflict) dismiss it via Cancel — the role already
-    // exists from a prior run, which is fine.
     const roleModalClosed = await page.getByRole('heading', { name: 'New Role' })
       .waitFor({ state: 'hidden', timeout: 10000 })
       .then(() => true)
       .catch(() => false)
     if (!roleModalClosed) {
-      console.log('\u2139\ufe0f New Role modal still open after Create — role likely already exists, clicking Cancel')
+      console.log('ℹ️ New Role modal still open — role likely already exists, clicking Cancel')
       await page.getByRole('button', { name: 'Cancel' }).click()
       await page.getByRole('heading', { name: 'New Role' })
         .waitFor({ state: 'hidden', timeout: 5000 })
         .catch(() => {})
     }
 
-    // Verify the controller row is in the table (either just created or pre-existing)
+    // Open side panel for the controller role and assign permissions.
     const controllerRow = page.getByRole('row').filter({ hasText: 'controller' }).first()
     await expect(controllerRow).toBeVisible({ timeout: 10000 })
-
-    // Open side panel and assign permissions
     await controllerRow.click()
     await page.locator('label').filter({ hasText: 'View Dashboard' }).waitFor({ state: 'visible', timeout: 15000 })
 
@@ -405,11 +380,19 @@ test.describe.serial('Acceptance', () => {
       }
     }
 
-    await page.getByRole('button', { name: 'Save Permissions' }).click()
-    await page.waitForTimeout(1500)
-    await expect(page.locator('.bg-red-50').first()).not.toBeVisible()
+    // Save Permissions is only enabled when isDirty (selected keys ≠ assigned keys).
+    // On repeat runs all permissions are already set — no checkboxes changed,
+    // button stays disabled. Skip the click if nothing to save.
+    const saveBtn = page.getByRole('button', { name: 'Save Permissions' })
+    if (await saveBtn.isEnabled()) {
+      await saveBtn.click()
+      await page.waitForTimeout(1500)
+      await expect(page.locator('.bg-red-50').first()).not.toBeVisible()
+    } else {
+      console.log('ℹ️ Save Permissions button is disabled — permissions already current, no save needed')
+    }
 
-    console.log('\u2705 Controller role created and permissions assigned via Roles UI')
+    console.log('✅ Controller role verified and permissions confirmed via Roles UI')
   })
 
   test('controller can navigate to AR page', async ({ page }) => {
@@ -420,8 +403,7 @@ test.describe.serial('Acceptance', () => {
     await signIn(page, TENANT_USER_EMAIL, TENANT_USER_PASSWORD)
 
     // Wait for the sidebar AR link — its appearance confirms /users/me resolved
-    // the controller role. Click it for a client-side React Router navigation
-    // that preserves the Auth0 in-memory token.
+    // the controller role. Click it for a client-side React Router navigation.
     const arLink = page.getByRole('link', { name: /Accounts Receivable/i })
     const roleResolved = await arLink
       .waitFor({ state: 'visible', timeout: 30000 })
@@ -432,20 +414,18 @@ test.describe.serial('Acceptance', () => {
       await arLink.click()
       await expect(page.getByRole('heading', { name: 'Accounts Receivable' })).toBeVisible({ timeout: 10000 })
       await expect(page).toHaveURL(/\/ar/)
-      console.log('\u2705 Controller can see and navigate to AR page')
+      console.log('✅ Controller can see and navigate to AR page')
     } else {
-      // AR link didn't appear — /users/me cold start may have been slow.
-      // Navigate directly and accept either outcome.
-      console.log('\u2139\ufe0f AR link not visible after 30 s — navigating directly to /ar')
+      console.log('ℹ️ AR link not visible after 30 s — navigating directly to /ar')
       await page.goto(`${TENANT_BASE_URL}/ar`)
       await page.waitForLoadState('networkidle', { timeout: 30000 })
       if (page.url().includes('unauthorized')) {
         await expect(page).toHaveURL(/unauthorized/)
-        console.log('\u2705 Controller correctly redirected to /unauthorized (role not resolved)')
+        console.log('✅ Controller correctly redirected to /unauthorized (role not resolved)')
       } else {
         await expect(page.getByRole('heading', { name: 'Accounts Receivable' })).toBeVisible({ timeout: 5000 })
         await expect(page).toHaveURL(/\/ar/)
-        console.log('\u2705 Controller can access AR page via direct navigation (role resolved)')
+        console.log('✅ Controller can access AR page via direct navigation (role resolved)')
       }
     }
   })
