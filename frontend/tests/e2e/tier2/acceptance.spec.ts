@@ -140,37 +140,42 @@ const DEFAULT_MAPPING_SOURCE = JSON.stringify(
  *   A) ProtectedRoute auto-redirects via loginWithRedirect() — no button needed.
  *   B) Landing page shows "Sign in" button — must click to trigger redirect.
  *
- * We wait 60 s for the auth0.com URL to appear on its own (path A). If it
- * doesn't, we check for the Sign in button and click it, then wait another 60 s
- * (path B). The long waits absorb cold Lambda starts, slow OIDC config fetches,
- * and Auth0 SDK iframe-based silent-auth checks (all of which can take 30–60 s
- * in CI before loginWithRedirect() finally fires).
+ * We race both conditions with a 150 s window. This single large budget absorbs
+ * cold Lambda starts, Auth0 SDK iframe silent-auth checks, and OIDC config
+ * document fetches — any of which can take 60–120 s in CI. Sequential waits of
+ * 60 s + 60 s proved insufficient; a single 150 s race covers both paths without
+ * artificially splitting the budget.
  */
 async function signIn(page: Page, email: string, password: string) {
   if (!page.url().includes('auth0.com')) {
     const t0 = Date.now()
     console.log(`signIn: starting at ${page.url().replace(/[?#].*$/, '')}`)
 
-    // Step 1 — wait for auth0.com URL to appear on its own (ProtectedRoute auto-redirect).
-    const autoRedirected = await page
-      .waitForURL(/auth0\.com|eu\.auth0\.com/, { timeout: 60000 })
-      .then(() => { console.log(`signIn: auto-redirected to auth0 in ${Date.now() - t0} ms`); return true })
-      .catch(() => false)
+    // Race: auth0.com URL appearing (path A — ProtectedRoute auto-redirect) vs
+    // Sign in button appearing (path B — root landing page). Each leg catches its
+    // own timeout so Promise.race always resolves to a string tag (never rejects).
+    const result = await Promise.race([
+      page.waitForURL(/auth0\.com|eu\.auth0\.com/, { timeout: 150000 })
+          .then(() => 'at-auth0' as const)
+          .catch(() => 'url-timeout' as const),
+      page.getByRole('button', { name: 'Sign in' })
+          .waitFor({ state: 'visible', timeout: 150000 })
+          .then(() => 'button' as const)
+          .catch(() => 'button-timeout' as const),
+    ])
 
-    if (!autoRedirected) {
-      console.log(`signIn: no auto-redirect after 60 s — checking for Sign in button`)
-      const signInButton = page.getByRole('button', { name: 'Sign in' })
-      const buttonVisible = await signInButton.isVisible()
-      console.log(`signIn: Sign in button visible = ${buttonVisible}`)
-      if (buttonVisible) {
-        await signInButton.click()
-        console.log(`signIn: clicked Sign in button`)
-      }
-      // Step 2 — wait for auth0.com URL after button click (or delayed auto-redirect).
-      // loginWithRedirect() may need to fetch the OIDC config document first —
-      // give it 60 s to complete that network round-trip and navigate.
-      await page.waitForURL(/auth0\.com|eu\.auth0\.com/, { timeout: 60000 })
-      console.log(`signIn: navigated to auth0 in ${Date.now() - t0} ms (post-click)`)
+    console.log(`signIn: race result = ${result} (${Date.now() - t0} ms)`)
+
+    if (result === 'button') {
+      await page.getByRole('button', { name: 'Sign in' }).click()
+      console.log(`signIn: clicked Sign in button`)
+      await page.waitForURL(/auth0\.com|eu\.auth0\.com/, { timeout: 90000 })
+      console.log(`signIn: at auth0 after click (${Date.now() - t0} ms)`)
+    } else if (result !== 'at-auth0') {
+      throw new Error(
+        `signIn: neither auth0 redirect nor Sign in button appeared within 150 s. ` +
+        `URL: ${page.url().replace(/[?#].*$/, '')}`,
+      )
     }
   }
 
@@ -351,10 +356,10 @@ async function setupE2ETenant(browser: Browser) {
 }
 
 test.describe.serial('Acceptance', () => {
-  // Each test does a full Auth0 sign-in from a fresh browser context. Cold
-  // Lambda starts + slow OIDC config fetches can each take 60 s in CI, so
-  // give every test 3 minutes of headroom.
-  test.setTimeout(180000)
+  // Each test does a full Auth0 sign-in from a fresh browser context. The race
+  // in signIn() can take up to 150 s on a cold CI runner, plus ~30 s for the
+  // code exchange and page assertions. 240 s (4 min) gives adequate headroom.
+  test.setTimeout(240000)
 
   test.beforeAll(async ({ browser }) => {
     // beforeAll runs setupE2ETenant which includes one full sign-in cycle plus
