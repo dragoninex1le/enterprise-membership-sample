@@ -394,31 +394,31 @@ test.describe.serial('Acceptance', () => {
     await page.goto(TENANT_BASE_URL)
     await signIn(page, TENANT_USER_EMAIL, TENANT_USER_PASSWORD)
 
-    // Navigate to /ar. Because page.goto() is always a full page reload in
-    // Playwright (not a client-side navigation), the SPA will re-run its full
-    // initialisation cycle: Auth0 silent-auth via hidden iframe, then /users/me
-    // to provision the user and resolve roles.
+    // Navigate to /ar. page.goto() is always a full page reload in Playwright,
+    // so the SPA runs its full initialisation cycle: Auth0 silent-auth via hidden
+    // iframe → /users/me Lambda → ProtectedRoute routing decision.
     //
-    // We wait for networkidle AFTER this goto so we cover the entire cycle.
-    // Placing the wait before goto (old approach) was wrong — it fired on the
-    // previous page and did nothing to help with the /ar reload.
-    //
-    // Auth0 silent-auth is fast here (session cookie already exists from signIn).
-    // /users/me may cold-start and take 10–15 s, so use a 45 s timeout.
+    // Strategy: networkidle handles the bulk of the wait (covers Lambda cold
+    // starts up to 45 s). However, networkidle can fire during a brief inter-
+    // request gap — specifically between Auth0 silent-auth completing and
+    // /users/me being initiated. After networkidle we therefore keep racing both
+    // outcomes for up to 30 more seconds so we catch that trailing /users/me call.
     await page.goto(`${TENANT_BASE_URL}/ar`)
     await page.waitForLoadState('networkidle', { timeout: 45000 })
 
-    // After networkidle the SPA has made its routing decision:
-    // either the AR heading is rendered, or ProtectedRoute did a client-side
-    // redirect to /unauthorized (visible in page.url() because Playwright tracks
-    // React Router navigations).
-    const finalUrl = page.url()
-    if (finalUrl.includes('unauthorized')) {
-      // Controller role could not be resolved — likely source_key not set when
-      // role was created via UI.  Accepted outcome for this assertion tier.
+    // Race heading-visible vs /unauthorized redirect. One of these MUST resolve
+    // within 30 s of networkidle; if neither does the auth flow is broken.
+    await Promise.any([
+      page.getByRole('heading', { name: 'Accounts Receivable' }).waitFor({ state: 'visible', timeout: 30000 }),
+      page.waitForURL(/unauthorized/, { timeout: 30000 }),
+    ])
+
+    if (page.url().includes('unauthorized')) {
+      // Controller role could not be resolved (e.g. source_key not set).
+      // Accepted outcome for this assertion tier.
       await expect(page).toHaveURL(/unauthorized/)
     } else {
-      await expect(page.getByRole('heading', { name: 'Accounts Receivable' })).toBeVisible({ timeout: 5000 })
+      await expect(page.getByRole('heading', { name: 'Accounts Receivable' })).toBeVisible()
       await expect(page).toHaveURL(/\/ar/)
     }
   })
