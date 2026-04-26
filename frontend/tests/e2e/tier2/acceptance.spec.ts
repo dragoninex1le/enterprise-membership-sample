@@ -394,15 +394,21 @@ test.describe.serial('Acceptance', () => {
     await page.goto(TENANT_BASE_URL)
     await signIn(page, TENANT_USER_EMAIL, TENANT_USER_PASSWORD)
 
+    // Wait for the SPA to fully provision before navigating away.
+    // signIn() only waits for the Auth0 code to be consumed from the URL —
+    // the subsequent POST /users/me call (which resolves roles) is still in
+    // flight. If we page.goto('/ar') immediately, the SPA reloads and
+    // re-runs silent-auth + /users/me from scratch, leaving ProtectedRoute
+    // in userLoading=true indefinitely. networkidle ensures /users/me has
+    // completed before we switch routes.
+    await page.waitForLoadState('networkidle', { timeout: 30000 })
+
     await page.goto(`${TENANT_BASE_URL}/ar`)
     // Race heading-visible against unauthorized redirect to handle the async
     // ProtectedRoute role-check without snapshotting an intermediate URL.
-    // 30s budget: first sign-in for this user triggers Lambda cold-start + new
-    // user provisioning in DynamoDB, so userLoading stays true longer than
-    // for returning users — 15s was too tight.
     await Promise.any([
-      page.getByRole('heading', { name: 'Accounts Receivable' }).waitFor({ state: 'visible', timeout: 30000 }),
-      page.waitForURL(/unauthorized/, { timeout: 30000 }),
+      page.getByRole('heading', { name: 'Accounts Receivable' }).waitFor({ state: 'visible', timeout: 20000 }),
+      page.waitForURL(/unauthorized/, { timeout: 20000 }),
     ])
     if (page.url().includes('unauthorized')) {
       // Controller role could not be resolved — likely source_key not set by API
