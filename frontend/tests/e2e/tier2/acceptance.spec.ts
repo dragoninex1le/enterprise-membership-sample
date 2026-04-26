@@ -136,40 +136,41 @@ const DEFAULT_MAPPING_SOURCE = JSON.stringify(
 
 /** Signs in via the Auth0 Universal Login page.
  *
- * Handles two scenarios:
+ * Two paths both end at auth0.com:
+ *   A) ProtectedRoute auto-redirects via loginWithRedirect() — no button needed.
+ *   B) Landing page shows "Sign in" button — must click to trigger redirect.
  *
- *  A) App shows a "Sign in" button — user navigated to an unprotected page
- *     (e.g. root landing page) and the app renders the button explicitly.
- *
- *  B) App auto-redirects to Auth0 via loginWithRedirect() — user navigated to a
- *     ProtectedRoute before signing in; the Auth0 SDK fires loginWithRedirect()
- *     before the app renders any UI, so the "Sign in" button never appears.
- *
- * The "navigate to target page BEFORE signIn" strategy (used for platform admin
- * flows) exploits scenario B: Auth0 stores the target path as appState.returnTo
- * and after the code exchange performs a client-side navigation back to it —
- * preserving the in-memory token rather than losing it to a page.goto() reload.
+ * We wait 60 s for the auth0.com URL to appear on its own (path A). If it
+ * doesn't, we check for the Sign in button and click it, then wait another 60 s
+ * (path B). The long waits absorb cold Lambda starts, slow OIDC config fetches,
+ * and Auth0 SDK iframe-based silent-auth checks (all of which can take 30–60 s
+ * in CI before loginWithRedirect() finally fires).
  */
 async function signIn(page: Page, email: string, password: string) {
   if (!page.url().includes('auth0.com')) {
-    // Race: either the app renders the "Sign in" button (scenario A — unprotected
-    // landing page), or the Auth0 SDK fires loginWithRedirect() automatically
-    // (scenario B — ProtectedRoute). Use a 60s window: CloudFront cold start +
-    // SPA bundle parse + Auth0 SDK init can take 30+ s in CI before the redirect fires.
-    const signInButton = page.getByRole('button', { name: 'Sign in' })
-    await Promise.race([
-      signInButton.waitFor({ state: 'visible', timeout: 60000 }),
-      page.waitForURL(/auth0\.com|eu\.auth0\.com/, { timeout: 60000 }),
-    ]).catch(() => { /* both timed out — fall through */ })
+    const t0 = Date.now()
+    console.log(`signIn: starting at ${page.url().replace(/[?#].*$/, '')}`)
 
-    if (!page.url().includes('auth0.com')) {
-      // If the button is actually visible (scenario A), click it.
-      // If it's not visible (timed out before redirect), don't hang on a missing button —
-      // just wait for the auth0.com URL directly.
-      if (await signInButton.isVisible()) {
+    // Step 1 — wait for auth0.com URL to appear on its own (ProtectedRoute auto-redirect).
+    const autoRedirected = await page
+      .waitForURL(/auth0\.com|eu\.auth0\.com/, { timeout: 60000 })
+      .then(() => { console.log(`signIn: auto-redirected to auth0 in ${Date.now() - t0} ms`); return true })
+      .catch(() => false)
+
+    if (!autoRedirected) {
+      console.log(`signIn: no auto-redirect after 60 s — checking for Sign in button`)
+      const signInButton = page.getByRole('button', { name: 'Sign in' })
+      const buttonVisible = await signInButton.isVisible()
+      console.log(`signIn: Sign in button visible = ${buttonVisible}`)
+      if (buttonVisible) {
         await signInButton.click()
+        console.log(`signIn: clicked Sign in button`)
       }
-      await page.waitForURL(/auth0\.com|eu\.auth0\.com/, { timeout: 30000 })
+      // Step 2 — wait for auth0.com URL after button click (or delayed auto-redirect).
+      // loginWithRedirect() may need to fetch the OIDC config document first —
+      // give it 60 s to complete that network round-trip and navigate.
+      await page.waitForURL(/auth0\.com|eu\.auth0\.com/, { timeout: 60000 })
+      console.log(`signIn: navigated to auth0 in ${Date.now() - t0} ms (post-click)`)
     }
   }
 
@@ -280,9 +281,9 @@ async function setupE2ETenant(browser: Browser) {
     // slow iframe silent-auth that burns the beforeAll timeout budget.
     await page.goto(`${PLATFORM_BASE_URL}/admin/platform/tenants`)
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
-    // Wait for the TenantsPage to render — more reliable than networkidle
-    // which can fire during brief inter-request gaps while the page is still loading.
-    await page.getByRole('heading', { name: 'Tenants' }).waitFor({ state: 'visible', timeout: 30000 })
+    // Wait for the TenantsPage to render. /users/me Lambda cold start can add
+    // 30–60 s before RootRedirect resolves the platform-admin role and navigates.
+    await page.getByRole('heading', { name: 'Tenants' }).waitFor({ state: 'visible', timeout: 60000 })
 
     // ── 2. Create org + tenant (409 = already exists, that's fine) ──────────
     await page.getByRole('button', { name: /New Organization/i }).click()
@@ -350,15 +351,16 @@ async function setupE2ETenant(browser: Browser) {
 }
 
 test.describe.serial('Acceptance', () => {
-  // Auth0 redirect + page load can take 15-30s; give each test plenty of headroom
-  test.setTimeout(90000)
+  // Each test does a full Auth0 sign-in from a fresh browser context. Cold
+  // Lambda starts + slow OIDC config fetches can each take 60 s in CI, so
+  // give every test 3 minutes of headroom.
+  test.setTimeout(180000)
 
   test.beforeAll(async ({ browser }) => {
-    // test.setTimeout() in the describe block only covers individual tests — not
-    // beforeAll/afterAll hooks, which keep the default 30 s.  Auth0 redirect +
-    // Lambda cold start + DynamoDB provisioning can collectively take 60+ s, so
-    // we must call test.setTimeout() here inside the hook itself.
-    test.setTimeout(150000)
+    // beforeAll runs setupE2ETenant which includes one full sign-in cycle plus
+    // several API/UI steps. 300 s covers the worst case: 2× 60 s auth0 waits +
+    // Lambda cold start + org/tenant creation + IdP config + claim mapping save.
+    test.setTimeout(300000)
     await setupE2ETenant(browser)
   })
 
