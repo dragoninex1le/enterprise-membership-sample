@@ -394,32 +394,40 @@ test.describe.serial('Acceptance', () => {
     await page.goto(TENANT_BASE_URL)
     await signIn(page, TENANT_USER_EMAIL, TENANT_USER_PASSWORD)
 
-    // Navigate to /ar. page.goto() is always a full page reload in Playwright,
-    // so the SPA runs its full initialisation cycle: Auth0 silent-auth via hidden
-    // iframe → /users/me Lambda → ProtectedRoute routing decision.
+    // DO NOT use page.goto('/ar') — that causes a full page reload which clears
+    // the Auth0 in-memory token. getTokenSilently() then has to re-authenticate
+    // via a hidden iframe, and if the Auth0 session is not valid for the page-
+    // reloaded context (e.g. PKCE-only apps without refresh-token rotation), it
+    // returns login_required and the SPA shows an unauthenticated state
+    // indefinitely — neither the heading nor /unauthorized ever appears.
     //
-    // Strategy: networkidle handles the bulk of the wait (covers Lambda cold
-    // starts up to 45 s). However, networkidle can fire during a brief inter-
-    // request gap — specifically between Auth0 silent-auth completing and
-    // /users/me being initiated. After networkidle we therefore keep racing both
-    // outcomes for up to 30 more seconds so we catch that trailing /users/me call.
-    await page.goto(`${TENANT_BASE_URL}/ar`)
-    await page.waitForLoadState('networkidle', { timeout: 45000 })
+    // Instead, wait for the sidebar "Accounts Receivable" link to appear (which
+    // signals that /users/me has returned and resolved the controller role), then
+    // click it for a client-side React Router navigation that preserves the token.
+    //
+    // The link's appearance is a reliable proxy for "user is provisioned and has
+    // an AR-access role", eliminating any separate networkidle/Promise.any races.
+    const arLink = page.getByRole('link', { name: /Accounts Receivable/i })
+    const roleResolved = await arLink
+      .waitFor({ state: 'visible', timeout: 30000 })
+      .then(() => true)
+      .catch(() => false)
 
-    // Race heading-visible vs /unauthorized redirect. One of these MUST resolve
-    // within 30 s of networkidle; if neither does the auth flow is broken.
-    await Promise.any([
-      page.getByRole('heading', { name: 'Accounts Receivable' }).waitFor({ state: 'visible', timeout: 30000 }),
-      page.waitForURL(/unauthorized/, { timeout: 30000 }),
-    ])
-
-    if (page.url().includes('unauthorized')) {
-      // Controller role could not be resolved (e.g. source_key not set).
-      // Accepted outcome for this assertion tier.
-      await expect(page).toHaveURL(/unauthorized/)
-    } else {
-      await expect(page.getByRole('heading', { name: 'Accounts Receivable' })).toBeVisible()
+    if (roleResolved) {
+      // Client-side navigation — Auth0 in-memory token preserved, no re-auth.
+      await arLink.click()
+      await expect(page.getByRole('heading', { name: 'Accounts Receivable' })).toBeVisible({ timeout: 10000 })
       await expect(page).toHaveURL(/\/ar/)
+      console.log('✅ Controller can see and navigate to AR page')
+    } else {
+      // AR link never appeared — controller role was not resolved (claim mapping
+      // or source_key issue). Navigate directly to confirm access is correctly
+      // denied. This is an accepted outcome at this assertion tier.
+      console.log('ℹ️ AR link not visible after 30 s — role not resolved. Confirming /unauthorized...')
+      await page.goto(`${TENANT_BASE_URL}/ar`)
+      await page.waitForLoadState('networkidle', { timeout: 30000 })
+      await expect(page).toHaveURL(/unauthorized/)
+      console.log('✅ Controller correctly redirected to /unauthorized')
     }
   })
 })
