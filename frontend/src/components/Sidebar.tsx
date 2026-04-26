@@ -1,6 +1,7 @@
 import { NavLink, useSearchParams } from 'react-router-dom'
 import { useHasRole } from '../hooks/useRoles'
-import { PLATFORM_ADMIN } from '../constants'
+import { usePorthContext } from '../context/PorthContext'
+import { PLATFORM_ADMIN, SAMPLE_ROLES } from '../constants'
 
 const linkClass = ({ isActive }: { isActive: boolean }) =>
   `flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors ${
@@ -15,8 +16,12 @@ const sectionLabel = (label: string) => (
 
 export default function Sidebar() {
   const isPlatformAdmin = useHasRole(PLATFORM_ADMIN)
+  const isTenantAdmin = useHasRole(SAMPLE_ROLES.TENANT_ADMIN)
+  const { currentUser } = usePorthContext()
   const [searchParams] = useSearchParams()
-  const tenantId = searchParams.get('tenantId') ?? ''
+  // Prefer explicit ?tenantId= param (platform admin managing a tenant);
+  // fall back to the signed-in user's own tenant (tenant-admin self-service).
+  const tenantId = searchParams.get('tenantId') ?? currentUser?.porthUser.tenant_id ?? ''
 
   const canSeeAR = useHasRole('ar_clerk', 'controller')
   const canSeeAP = useHasRole('ap_clerk', 'controller')
@@ -42,11 +47,29 @@ export default function Sidebar() {
                 <div className="px-3 py-1">
                   <p className="text-xs text-indigo-600 font-mono truncate" title={tenantId}>{tenantId}</p>
                 </div>
+                <NavLink to={`/admin/tenant/roles?tenantId=${tenantId}`} className={linkClass}>
+                  <span>🎭</span>Roles
+                </NavLink>
                 <NavLink to={`/admin/tenant/claim-config?tenantId=${tenantId}`} className={linkClass}>
                   <span>🗒️</span>Claim Mapping
                 </NavLink>
               </>
             )}
+          </>
+        ) : isTenantAdmin ? (
+          <>
+            {sectionLabel('Tenant Admin')}
+            {tenantId && (
+              <div className="px-3 py-1">
+                <p className="text-xs text-indigo-600 font-mono truncate" title={tenantId}>{tenantId}</p>
+              </div>
+            )}
+            <NavLink to={`/admin/tenant/roles${tenantId ? `?tenantId=${tenantId}` : ''}`} className={linkClass}>
+              <span>🎭</span>Roles
+            </NavLink>
+            <NavLink to={`/admin/tenant/claim-config${tenantId ? `?tenantId=${tenantId}` : ''}`} className={linkClass}>
+              <span>🗒️</span>Claim Mapping
+            </NavLink>
           </>
         ) : (
           <>
