@@ -134,10 +134,40 @@ const DEFAULT_MAPPING_SOURCE = JSON.stringify(
   2,
 )
 
-/** Signs in via the Auth0 Universal Login page. */
+/** Signs in via the Auth0 Universal Login page.
+ *
+ * Handles two scenarios:
+ *
+ *  A) App shows a "Sign in" button — user navigated to an unprotected page
+ *     (e.g. root landing page) and the app renders the button explicitly.
+ *
+ *  B) App auto-redirects to Auth0 via loginWithRedirect() — user navigated to a
+ *     ProtectedRoute before signing in; the Auth0 SDK fires loginWithRedirect()
+ *     before the app renders any UI, so the "Sign in" button never appears.
+ *
+ * The "navigate to target page BEFORE signIn" strategy (used for platform admin
+ * flows) exploits scenario B: Auth0 stores the target path as appState.returnTo
+ * and after the code exchange performs a client-side navigation back to it —
+ * preserving the in-memory token rather than losing it to a page.goto() reload.
+ */
 async function signIn(page: Page, email: string, password: string) {
-  await page.getByRole('button', { name: 'Sign in' }).click()
-  await page.waitForURL(/auth0\.com|eu\.auth0\.com/)
+  if (!page.url().includes('auth0.com')) {
+    // Race: either the app renders the "Sign in" button (scenario A), or the
+    // Auth0 SDK fires loginWithRedirect() and takes us straight to Auth0 (scenario B).
+    const signInButton = page.getByRole('button', { name: 'Sign in' })
+    await Promise.race([
+      signInButton.waitFor({ state: 'visible', timeout: 20000 }),
+      page.waitForURL(/auth0\.com|eu\.auth0\.com/, { timeout: 20000 }),
+    ]).catch(() => { /* if neither fires in 20 s we fall through and try anyway */ })
+
+    // Only click button if we're still on the app side (not yet at Auth0)
+    if (!page.url().includes('auth0.com')) {
+      await signInButton.click()
+      await page.waitForURL(/auth0\.com|eu\.auth0\.com/, { timeout: 15000 })
+    }
+  }
+
+  // ── At Auth0 Universal Login ─────────────────────────────────────────────
   await page.getByLabel('Email address').fill(email)
   // Use #password to avoid strict-mode conflict with the "Show password" toggle button
   await page.locator('#password').fill(password)
@@ -322,7 +352,6 @@ test.describe.serial('Acceptance', () => {
     // beforeAll/afterAll hooks, which keep the default 30 s.  Auth0 redirect +
     // Lambda cold start + DynamoDB provisioning can collectively take 60+ s, so
     // we must call test.setTimeout() here inside the hook itself.
-    // 150 s covers: signIn (~40s) + org/tenant creation + API seeding + IdP edit + claim mapping
     test.setTimeout(150000)
     await setupE2ETenant(browser)
   })
