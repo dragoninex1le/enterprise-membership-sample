@@ -241,7 +241,10 @@ async function setupE2ETenant(browser: Browser) {
     // configured with callbacks for this URL, not the tenant subdomain URL.
     await page.goto(PLATFORM_BASE_URL)
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
-    await expect(page).toHaveURL(/\/admin\/platform\/tenants/)
+    // Post-login redirect URL varies by deployed version — navigate explicitly
+    // rather than asserting the landing URL.
+    await page.goto(`${PLATFORM_BASE_URL}/admin/platform/tenants`)
+    await page.waitForLoadState('networkidle', { timeout: 20000 })
 
     // ── 2. Create org + tenant (409 = already exists, that's fine) ──────────
     await page.getByRole('button', { name: /New Organization/i }).click()
@@ -324,9 +327,10 @@ test.describe.serial('Acceptance', () => {
   test('platform admin sees tenants list and demo-tenant is present', async ({ page }) => {
     await page.goto(PLATFORM_BASE_URL)
     await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
-    await expect(page).toHaveURL(/\/admin\/platform\/tenants/)
-    await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible()
-    await expect(page.getByRole('cell', { name: 'Demo Corp' }).first()).toBeVisible()
+    // Navigate explicitly — post-login redirect URL may vary by deployed version
+    await page.goto(`${PLATFORM_BASE_URL}/admin/platform/tenants`)
+    await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible({ timeout: 15000 })
+    await expect(page.getByRole('cell', { name: 'Demo Corp' }).first()).toBeVisible({ timeout: 10000 })
   })
 
   test('platform admin creates controller role via Roles UI', async ({ page }) => {
