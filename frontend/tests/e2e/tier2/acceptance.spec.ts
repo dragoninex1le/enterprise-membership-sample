@@ -397,9 +397,12 @@ test.describe.serial('Acceptance', () => {
     await page.goto(`${TENANT_BASE_URL}/ar`)
     // Race heading-visible against unauthorized redirect to handle the async
     // ProtectedRoute role-check without snapshotting an intermediate URL.
+    // 30s budget: first sign-in for this user triggers Lambda cold-start + new
+    // user provisioning in DynamoDB, so userLoading stays true longer than
+    // for returning users — 15s was too tight.
     await Promise.any([
-      page.getByRole('heading', { name: 'Accounts Receivable' }).waitFor({ state: 'visible', timeout: 15000 }),
-      page.waitForURL(/unauthorized/, { timeout: 15000 }),
+      page.getByRole('heading', { name: 'Accounts Receivable' }).waitFor({ state: 'visible', timeout: 30000 }),
+      page.waitForURL(/unauthorized/, { timeout: 30000 }),
     ])
     if (page.url().includes('unauthorized')) {
       // Controller role could not be resolved — likely source_key not set by API
