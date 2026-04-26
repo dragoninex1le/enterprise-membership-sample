@@ -402,30 +402,47 @@ test.describe.serial('Acceptance', () => {
     await page.goto(TENANT_BASE_URL)
     await signIn(page, TENANT_USER_EMAIL, TENANT_USER_PASSWORD)
 
-    // Wait for the sidebar AR link — its appearance confirms /users/me resolved
-    // the controller role. Click it for a client-side React Router navigation.
+    // Wait up to 120s for the AR sidebar link. Its appearance signals that
+    // /users/me completed and the claim mapping resolved the controller role.
+    // 120s covers Lambda cold-start latency (typically 30–90s for /users/me).
     const arLink = page.getByRole('link', { name: /Accounts Receivable/i })
     const roleResolved = await arLink
-      .waitFor({ state: 'visible', timeout: 30000 })
+      .waitFor({ state: 'visible', timeout: 120000 })
       .then(() => true)
       .catch(() => false)
 
     if (roleResolved) {
+      // Client-side React Router navigation — Auth0 in-memory token preserved.
       await arLink.click()
       await expect(page.getByRole('heading', { name: 'Accounts Receivable' })).toBeVisible({ timeout: 10000 })
       await expect(page).toHaveURL(/\/ar/)
       console.log('✅ Controller can see and navigate to AR page')
     } else {
-      console.log('ℹ️ AR link not visible after 30 s — navigating directly to /ar')
-      await page.goto(`${TENANT_BASE_URL}/ar`)
-      await page.waitForLoadState('networkidle', { timeout: 30000 })
-      if (page.url().includes('unauthorized')) {
-        await expect(page).toHaveURL(/unauthorized/)
-        console.log('✅ Controller correctly redirected to /unauthorized (role not resolved)')
-      } else {
-        await expect(page.getByRole('heading', { name: 'Accounts Receivable' })).toBeVisible({ timeout: 5000 })
+      // AR link didn't appear within 120s.
+      // Use pushState to navigate — NEVER page.goto() after sign-in, because that
+      // resets the Auth0 in-memory token and the SDK's silent-auth iframe check
+      // hangs indefinitely in CI headless Chrome.
+      console.log('ℹ️ AR link not visible after 120 s — navigating via pushState to /ar')
+      await page.evaluate(() => {
+        window.history.pushState({}, '', '/ar')
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      })
+
+      // Accept either valid outcome: AR page loaded, or role not resolved (/unauthorized).
+      const arHeading = page.getByRole('heading', { name: 'Accounts Receivable' })
+      const outcome = await Promise.race([
+        arHeading.waitFor({ state: 'visible', timeout: 30000 }).then(() => 'ar' as const),
+        page.waitForURL(/unauthorized/, { timeout: 30000 }).then(() => 'unauthorized' as const),
+      ]).catch(() => 'unknown' as const)
+
+      if (outcome === 'ar') {
         await expect(page).toHaveURL(/\/ar/)
-        console.log('✅ Controller can access AR page via direct navigation (role resolved)')
+        console.log('✅ Controller can access AR page (role resolved, navigated via pushState)')
+      } else if (outcome === 'unauthorized') {
+        console.log('✅ Controller correctly redirected to /unauthorized (role not yet resolved)')
+      } else {
+        // Neither outcome matched — fail with a clear assertion.
+        await expect(arHeading).toBeVisible({ timeout: 1000 })
       }
     }
   })
