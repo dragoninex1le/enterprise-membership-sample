@@ -66,8 +66,6 @@ jobs:
           PORTH_TENANT_CONFIG: ${{ secrets.PORTH_TENANT_CONFIG }}
           PORTH_TENANT_USER_EMAIL: ${{ secrets.PORTH_TENANT_USER_EMAIL }}
           PORTH_TENANT_USER_PASSWORD: ${{ secrets.PORTH_TENANT_USER_PASSWORD }}
-          PORTH_CONTROLLER_EMAIL: ${{ secrets.PORTH_CONTROLLER_EMAIL }}
-          PORTH_CONTROLLER_PASSWORD: ${{ secrets.PORTH_CONTROLLER_PASSWORD }}
 
       - name: Upload test results
         if: always()

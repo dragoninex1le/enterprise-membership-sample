@@ -19,8 +19,7 @@
  *   PORTH_AUTH_TEST_TOKEN           — service token for direct API calls (seeding)
  *   PORTH_PLATFORM_ADMIN_EMAIL / PORTH_PLATFORM_ADMIN_PASSWORD
  *   PORTH_TENANT_CONFIG             — JSON: {"domain":"...","client_id":"...","audience":"..."}
- *   PORTH_TENANT_USER_EMAIL / PORTH_TENANT_USER_PASSWORD   — tenant-admin user
- *   PORTH_CONTROLLER_EMAIL / PORTH_CONTROLLER_PASSWORD     — controller user
+ *   PORTH_TENANT_USER_EMAIL / PORTH_TENANT_USER_PASSWORD   — controller user (validates AR access)
  */
 import { test, expect, Browser, Page, request as playwrightRequest } from '@playwright/test'
 
@@ -28,8 +27,6 @@ const PLATFORM_ADMIN_EMAIL = process.env.PORTH_PLATFORM_ADMIN_EMAIL ?? ''
 const PLATFORM_ADMIN_PASSWORD = process.env.PORTH_PLATFORM_ADMIN_PASSWORD ?? ''
 const TENANT_USER_EMAIL = process.env.PORTH_TENANT_USER_EMAIL ?? ''
 const TENANT_USER_PASSWORD = process.env.PORTH_TENANT_USER_PASSWORD ?? ''
-const CONTROLLER_EMAIL = process.env.PORTH_CONTROLLER_EMAIL ?? ''
-const CONTROLLER_PASSWORD = process.env.PORTH_CONTROLLER_PASSWORD ?? ''
 const PORTH_API_URL = (process.env.PORTH_API_URL ?? '').replace(/\/$/, '')
 const PORTH_AUTH_TEST_TOKEN = process.env.PORTH_AUTH_TEST_TOKEN ?? ''
 
@@ -331,18 +328,14 @@ test.describe.serial('Acceptance', () => {
     await expect(page.getByRole('cell', { name: 'Demo Corp' }).first()).toBeVisible()
   })
 
-  test('tenant admin creates controller role via Roles UI', async ({ page }) => {
-    test.skip(!TENANT_USER_EMAIL, 'PORTH_TENANT_USER_EMAIL not configured')
-    test.skip(!TENANT_CONFIG.domain, 'PORTH_TENANT_CONFIG not configured — tenant has no IdP')
+  test('platform admin creates controller role via Roles UI', async ({ page }) => {
+    // The platform admin has access to /admin/tenant/roles for any tenant.
+    // Using platform admin credentials avoids the need for a separate tenant-admin
+    // secret — the controller role is created by an operator on behalf of the tenant.
+    await page.goto(PLATFORM_BASE_URL)
+    await signIn(page, PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD)
 
-    // Sign in as tenant admin at the tenant subdomain
-    await page.goto(TENANT_BASE_URL)
-    await signIn(page, TENANT_USER_EMAIL, TENANT_USER_PASSWORD)
-
-    // Tenant admin is redirected to /admin/tenant/roles (or /unauthorized if
-    // provisioning is still in-flight). Navigate directly so we don't race the
-    // initial redirect.
-    await page.goto(`${TENANT_BASE_URL}/admin/tenant/roles?tenantId=${E2E_TENANT_ID}`)
+    await page.goto(`${PLATFORM_BASE_URL}/admin/tenant/roles?tenantId=${E2E_TENANT_ID}`)
     await expect(page.getByRole('heading', { name: 'Roles' })).toBeVisible({ timeout: 15000 })
 
     // Create the controller role via the "+ New Role" button
@@ -391,11 +384,11 @@ test.describe.serial('Acceptance', () => {
   })
 
   test('controller can navigate to AR page', async ({ page }) => {
-    test.skip(!CONTROLLER_EMAIL, 'PORTH_CONTROLLER_EMAIL not configured')
+    test.skip(!TENANT_USER_EMAIL, 'PORTH_TENANT_USER_EMAIL not configured')
     test.skip(!TENANT_CONFIG.domain, 'PORTH_TENANT_CONFIG not configured — tenant has no IdP')
 
     await page.goto(TENANT_BASE_URL)
-    await signIn(page, CONTROLLER_EMAIL, CONTROLLER_PASSWORD)
+    await signIn(page, TENANT_USER_EMAIL, TENANT_USER_PASSWORD)
 
     await page.goto(`${TENANT_BASE_URL}/ar`)
     // Race heading-visible against unauthorized redirect to handle the async
