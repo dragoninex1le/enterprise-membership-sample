@@ -152,18 +152,24 @@ const DEFAULT_MAPPING_SOURCE = JSON.stringify(
  */
 async function signIn(page: Page, email: string, password: string) {
   if (!page.url().includes('auth0.com')) {
-    // Race: either the app renders the "Sign in" button (scenario A), or the
-    // Auth0 SDK fires loginWithRedirect() and takes us straight to Auth0 (scenario B).
+    // Race: either the app renders the "Sign in" button (scenario A — unprotected
+    // landing page), or the Auth0 SDK fires loginWithRedirect() automatically
+    // (scenario B — ProtectedRoute). Use a 60s window: CloudFront cold start +
+    // SPA bundle parse + Auth0 SDK init can take 30+ s in CI before the redirect fires.
     const signInButton = page.getByRole('button', { name: 'Sign in' })
     await Promise.race([
-      signInButton.waitFor({ state: 'visible', timeout: 20000 }),
-      page.waitForURL(/auth0\.com|eu\.auth0\.com/, { timeout: 20000 }),
-    ]).catch(() => { /* if neither fires in 20 s we fall through and try anyway */ })
+      signInButton.waitFor({ state: 'visible', timeout: 60000 }),
+      page.waitForURL(/auth0\.com|eu\.auth0\.com/, { timeout: 60000 }),
+    ]).catch(() => { /* both timed out — fall through */ })
 
-    // Only click button if we're still on the app side (not yet at Auth0)
     if (!page.url().includes('auth0.com')) {
-      await signInButton.click()
-      await page.waitForURL(/auth0\.com|eu\.auth0\.com/, { timeout: 15000 })
+      // If the button is actually visible (scenario A), click it.
+      // If it's not visible (timed out before redirect), don't hang on a missing button —
+      // just wait for the auth0.com URL directly.
+      if (await signInButton.isVisible()) {
+        await signInButton.click()
+      }
+      await page.waitForURL(/auth0\.com|eu\.auth0\.com/, { timeout: 30000 })
     }
   }
 
