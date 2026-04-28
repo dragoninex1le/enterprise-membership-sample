@@ -4,6 +4,8 @@ import ProtectedRoute from './components/ProtectedRoute'
 import { useHasRole } from './hooks/useRoles'
 import { PLATFORM_ADMIN, SAMPLE_ROLES } from './constants'
 
+const { TENANT_ADMIN, VIEWER, AR_CLERK, AP_CLERK, CONTROLLER } = SAMPLE_ROLES
+
 /** Redirects the root path based on the caller's highest role.
  *  Platform admins → org management; tenant admins → tenant management;
  *  everyone else → dashboard. */
@@ -36,28 +38,26 @@ export const router = createBrowserRouter([
       { index: true, element: <RootRedirect /> },
 
       // ── Functional areas ──────────────────────────────────────────────────
-      // These routes use tenant-configured role names from claim role mappings.
-      // platform-admin is included so Estyn operators can access the sample app.
       {
-        element: <ProtectedRoute roles={['viewer', 'ar_clerk', 'ap_clerk', 'controller', PLATFORM_ADMIN]} />,
+        element: <ProtectedRoute roles={[VIEWER, AR_CLERK, AP_CLERK, CONTROLLER, TENANT_ADMIN, PLATFORM_ADMIN]} />,
         children: [
           { path: 'dashboard', element: <DashboardPage /> },
         ],
       },
       {
-        element: <ProtectedRoute roles={['ar_clerk', 'controller', PLATFORM_ADMIN]} />,
+        element: <ProtectedRoute roles={[AR_CLERK, CONTROLLER, TENANT_ADMIN, PLATFORM_ADMIN]} />,
         children: [
           { path: 'ar', element: <ARPage /> },
         ],
       },
       {
-        element: <ProtectedRoute roles={['ap_clerk', 'controller', PLATFORM_ADMIN]} />,
+        element: <ProtectedRoute roles={[AP_CLERK, CONTROLLER, TENANT_ADMIN, PLATFORM_ADMIN]} />,
         children: [
           { path: 'ap', element: <APPage /> },
         ],
       },
       {
-        element: <ProtectedRoute roles={['controller', PLATFORM_ADMIN]} />,
+        element: <ProtectedRoute roles={[CONTROLLER, TENANT_ADMIN, PLATFORM_ADMIN]} />,
         children: [
           { path: 'approvals', element: <ApprovalsPage /> },
         ],
