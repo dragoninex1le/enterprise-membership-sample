@@ -1,6 +1,9 @@
 // PORTH-130 — Roles admin screen
 import { useEffect, useState, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import { usePorthContext } from '../context/PorthContext'
+import { useHasRole } from '../hooks/useRoles'
+import { PLATFORM_ADMIN } from '../constants'
 import { rolesApi } from '../api/roles'
 import { permissionsApi } from '../api/permissions'
 import type { Role, Permission, CreateRoleRequest } from '../api/types'
@@ -18,8 +21,12 @@ function groupByCategory(permissions: Permission[]): Record<string, Permission[]
 }
 
 export default function RolesPage() {
+  const { currentUser } = usePorthContext()
+  const isPlatformAdmin = useHasRole(PLATFORM_ADMIN)
   const [searchParams] = useSearchParams()
-  const tenantId = searchParams.get('tenantId') ?? ''
+  const tenantId = isPlatformAdmin
+    ? (searchParams.get('tenantId') ?? '')
+    : (currentUser?.porthUser.tenant_id ?? '')
 
   const [roles, setRoles] = useState<Role[]>([])
   const [loading, setLoading] = useState(true)

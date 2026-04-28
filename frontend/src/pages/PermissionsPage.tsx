@@ -1,6 +1,9 @@
 // PORTH-130 — Permissions read-only listing screen
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import { usePorthContext } from '../context/PorthContext'
+import { useHasRole } from '../hooks/useRoles'
+import { PLATFORM_ADMIN } from '../constants'
 import { permissionsApi } from '../api/permissions'
 import type { Permission } from '../api/types'
 
@@ -14,8 +17,12 @@ function groupByCategory(permissions: Permission[]): Record<string, Permission[]
 }
 
 export default function PermissionsPage() {
+  const { currentUser } = usePorthContext()
+  const isPlatformAdmin = useHasRole(PLATFORM_ADMIN)
   const [searchParams] = useSearchParams()
-  const tenantId = searchParams.get('tenantId') ?? ''
+  const tenantId = isPlatformAdmin
+    ? (searchParams.get('tenantId') ?? '')
+    : (currentUser?.porthUser.tenant_id ?? '')
 
   const [permissions, setPermissions] = useState<Permission[]>([])
   const [loading, setLoading] = useState(true)
