@@ -167,20 +167,21 @@ async function ensureRoleWithSourceKey(
   name: string,
   sourceKey: string,
   description: string,
-) {
+): Promise<string | null> {
   const createResp = await apiCtx.post(`${PORTH_API_URL}/roles/`, {
     headers,
     data: { tenant_id: tenantId, name, source_key: sourceKey, description },
   })
 
   if (createResp.ok()) {
+    const body = (await createResp.json()) as { id: string }
     console.log(`✅ Created role '${name}' with source_key='${sourceKey}'`)
-    return
+    return body.id
   }
 
   if (createResp.status() !== 409) {
     console.warn(`Failed to create role '${name}': HTTP ${createResp.status()} — ${await createResp.text()}`)
-    return
+    return null
   }
 
   // Role already exists — find its ID and PATCH source_key onto it.
@@ -191,13 +192,13 @@ async function ensureRoleWithSourceKey(
   const listResp = await apiCtx.get(`${PORTH_API_URL}/roles/?tenant_id=${tenantId}`, { headers })
   if (!listResp.ok()) {
     console.warn(`Failed to list roles: HTTP ${listResp.status()}`)
-    return
+    return null
   }
   const roles = (await listResp.json()) as Array<{ id: string; name: string }>
   const existing = roles.find(r => r.name === name)
   if (!existing) {
     console.warn(`Role '${name}' not found in list after 409 — cannot patch source_key`)
-    return
+    return null
   }
   const patchResp = await apiCtx.patch(`${PORTH_API_URL}/roles/${tenantId}/${existing.id}`, {
     headers,
@@ -208,13 +209,31 @@ async function ensureRoleWithSourceKey(
   } else {
     console.log(`✅ Patched source_key='${sourceKey}' on existing role '${name}'`)
   }
+  return existing.id
 }
+
+// All sample-app permission keys — assigned in full to tenant-admin.
+// Tenant-admin is the inverse of platform-admin: platform-admin manages
+// cross-tenant infrastructure (orgs, tenants, settings); tenant-admin has
+// full access to everything within their tenant.
+const ALL_SAMPLE_APP_PERMISSION_KEYS = [
+  'dashboard.read',
+  'ar.invoices.read',
+  'ar.invoices.write',
+  'ap.bills.read',
+  'ap.bills.write',
+  'approvals.read',
+  'approvals.write',
+]
 
 /**
  * Seed sample-app permissions + required roles with source_key set.
  *
  * Both tenant-admin and controller need source_key so resolve_roles can
  * match JWT claim values to Porth roles. Idempotent via 409 + PATCH repair.
+ *
+ * tenant-admin receives all sample-app permissions — it is the inverse of
+ * platform-admin (who manages cross-tenant infrastructure, not app data).
  */
 async function seedPermissionsAndRoles(tenantId: string) {
   if (!PORTH_API_URL || !PORTH_AUTH_TEST_TOKEN) {
@@ -250,11 +269,25 @@ async function seedPermissionsAndRoles(tenantId: string) {
   }
 
   // Seed tenant-admin role with source_key (required for claim mapping to resolve it)
-  await ensureRoleWithSourceKey(
+  const tenantAdminRoleId = await ensureRoleWithSourceKey(
     apiCtx, headers, tenantId,
     'tenant-admin', 'tenant-admin',
     'Tenant Administrator — manages roles and claim mapping',
   )
+
+  // Assign all sample-app permissions to tenant-admin. Tenant-admin is the
+  // inverse of platform-admin: full access to all tenant-level app data.
+  if (tenantAdminRoleId) {
+    const assignResp = await apiCtx.put(
+      `${PORTH_API_URL}/roles/${tenantId}/${tenantAdminRoleId}/permissions`,
+      { headers, data: ALL_SAMPLE_APP_PERMISSION_KEYS },
+    )
+    if (!assignResp.ok()) {
+      console.warn(`Failed to assign permissions to tenant-admin: HTTP ${assignResp.status()} — ${await assignResp.text()}`)
+    } else {
+      console.log(`✅ All sample-app permissions assigned to tenant-admin role`)
+    }
+  }
 
   // Seed controller role with source_key. The Roles UI (test 2) will try to
   // create it again — it'll get a 409 and click Cancel, which is fine.
