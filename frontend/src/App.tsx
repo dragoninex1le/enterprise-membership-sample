@@ -3,6 +3,7 @@ import { RouterProvider } from 'react-router-dom'
 import { useEffect } from 'react'
 import { router } from './router'
 import { setTokenProvider } from './api/client'
+import { setSampleTokenProvider } from './api/sampleApp'
 import { useCurrentUser } from './hooks/useCurrentUser'
 import { PorthProvider } from './context/PorthContext'
 import type { TenantIdpConfig } from './hooks/useTenantConfig'
@@ -15,10 +16,11 @@ export default function App({ tenantConfig }: Props) {
   const { isLoading, error, isAuthenticated, getAccessTokenSilently } = useAuth0()
   const { currentUser, loading: userLoading, error: userError } = useCurrentUser(tenantConfig)
 
-  // Wire Auth0 token into the API client so all API calls are authenticated
+  // Wire Auth0 token into both API clients so all API calls are authenticated
   useEffect(() => {
     if (isAuthenticated) {
       setTokenProvider(getAccessTokenSilently)
+      setSampleTokenProvider(getAccessTokenSilently)
     }
   }, [isAuthenticated, getAccessTokenSilently])
 
