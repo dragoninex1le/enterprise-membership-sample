@@ -2,15 +2,17 @@ import { createBrowserRouter, Navigate } from 'react-router-dom'
 import Layout from './components/Layout'
 import ProtectedRoute from './components/ProtectedRoute'
 import { useHasRole } from './hooks/useRoles'
-import { PLATFORM_ADMIN } from './constants'
+import { PLATFORM_ADMIN, SAMPLE_ROLES } from './constants'
 
-/** Redirects the root path based on the caller's role. Platform admins land on
- *  the organisations page; everyone else goes to the dashboard. */
+/** Redirects the root path based on the caller's highest role.
+ *  Platform admins → org management; tenant admins → tenant management;
+ *  everyone else → dashboard. */
 function RootRedirect() {
   const isPlatformAdmin = useHasRole(PLATFORM_ADMIN)
-  return isPlatformAdmin
-    ? <Navigate to="/admin/platform/organizations" replace />
-    : <Navigate to="/dashboard" replace />
+  const isTenantAdmin = useHasRole(SAMPLE_ROLES.TENANT_ADMIN)
+  if (isPlatformAdmin) return <Navigate to="/admin/platform/organizations" replace />
+  if (isTenantAdmin)   return <Navigate to="/admin/tenant/users" replace />
+  return <Navigate to="/dashboard" replace />
 }
 import DashboardPage from './pages/DashboardPage'
 import ARPage from './pages/ARPage'
@@ -75,7 +77,7 @@ export const router = createBrowserRouter([
       // ── Tenant admin (local admin — users, roles, permissions) ────────────
       {
         path: 'admin/tenant',
-        element: <ProtectedRoute roles={[PLATFORM_ADMIN]} />,
+        element: <ProtectedRoute roles={[PLATFORM_ADMIN, SAMPLE_ROLES.TENANT_ADMIN]} />,
         children: [
           { index: true, element: <Navigate to="users" replace /> },
           { path: 'users', element: <UsersPage /> },
