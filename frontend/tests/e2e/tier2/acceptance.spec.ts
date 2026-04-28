@@ -212,28 +212,17 @@ async function ensureRoleWithSourceKey(
   return existing.id
 }
 
-// All sample-app permission keys — assigned in full to tenant-admin.
-// Tenant-admin is the inverse of platform-admin: platform-admin manages
-// cross-tenant infrastructure (orgs, tenants, settings); tenant-admin has
-// full access to everything within their tenant.
-const ALL_SAMPLE_APP_PERMISSION_KEYS = [
-  'dashboard.read',
-  'ar.invoices.read',
-  'ar.invoices.write',
-  'ap.bills.read',
-  'ap.bills.write',
-  'approvals.read',
-  'approvals.write',
-]
-
 /**
  * Seed sample-app permissions + required roles with source_key set.
  *
  * Both tenant-admin and controller need source_key so resolve_roles can
  * match JWT claim values to Porth roles. Idempotent via 409 + PATCH repair.
  *
- * tenant-admin receives all sample-app permissions — it is the inverse of
- * platform-admin (who manages cross-tenant infrastructure, not app data).
+ * tenant-admin receives every permission registered for the tenant. This is
+ * the inverse of platform-admin, whose permissions (platform.orgs.*, platform.tenants.*,
+ * etc.) live in the platform namespace and are never registered against a tenant.
+ * No hardcoded list is needed — we register permissions then immediately fetch
+ * them back and assign the full set.
  */
 async function seedPermissionsAndRoles(tenantId: string) {
   if (!PORTH_API_URL || !PORTH_AUTH_TEST_TOKEN) {
@@ -268,6 +257,14 @@ async function seedPermissionsAndRoles(tenantId: string) {
     console.warn(`Failed to batch-register permissions: HTTP ${permResp.status()} — ${await permResp.text()}`)
   }
 
+  // Fetch all permissions now registered for the tenant. Using this live list
+  // rather than a hardcoded constant means tenant-admin automatically receives
+  // any new permissions added in future without changes to this file.
+  const allPermsResp = await apiCtx.get(`${PORTH_API_URL}/permissions/?tenant_id=${tenantId}`, { headers })
+  const allPermissionKeys: string[] = allPermsResp.ok()
+    ? ((await allPermsResp.json()) as Array<{ key: string }>).map(p => p.key)
+    : []
+
   // Seed tenant-admin role with source_key (required for claim mapping to resolve it)
   const tenantAdminRoleId = await ensureRoleWithSourceKey(
     apiCtx, headers, tenantId,
@@ -275,17 +272,18 @@ async function seedPermissionsAndRoles(tenantId: string) {
     'Tenant Administrator — manages roles and claim mapping',
   )
 
-  // Assign all sample-app permissions to tenant-admin. Tenant-admin is the
-  // inverse of platform-admin: full access to all tenant-level app data.
-  if (tenantAdminRoleId) {
+  // Assign every tenant permission to tenant-admin. Platform-admin permissions
+  // (platform.orgs.*, platform.tenants.*, etc.) are never registered against
+  // a tenant so there is nothing to subtract — tenant-admin gets it all.
+  if (tenantAdminRoleId && allPermissionKeys.length > 0) {
     const assignResp = await apiCtx.put(
       `${PORTH_API_URL}/roles/${tenantId}/${tenantAdminRoleId}/permissions`,
-      { headers, data: ALL_SAMPLE_APP_PERMISSION_KEYS },
+      { headers, data: allPermissionKeys },
     )
     if (!assignResp.ok()) {
       console.warn(`Failed to assign permissions to tenant-admin: HTTP ${assignResp.status()} — ${await assignResp.text()}`)
     } else {
-      console.log(`✅ All sample-app permissions assigned to tenant-admin role`)
+      console.log(`✅ ${allPermissionKeys.length} permissions assigned to tenant-admin role`)
     }
   }
 
