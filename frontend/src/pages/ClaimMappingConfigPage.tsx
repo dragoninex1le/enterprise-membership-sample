@@ -33,14 +33,14 @@ export default function ClaimMappingConfigPage() {
   // Editor state
   const [editorValue, setEditorValue] = useState<string>(DEFAULT_MAPPING)
   const [current, setCurrent] = useState<ClaimMappingConfig | null>(null)
-  const [editorLoading, setEditorLoading] = useState(true)
+  const [editorLoading, setEditorLoading] = useState(false)
   const [editorError, setEditorError] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
   // Version history state
   const [versions, setVersions] = useState<ClaimMappingConfig[]>([])
-  const [versionsLoading, setVersionsLoading] = useState(true)
+  const [versionsLoading, setVersionsLoading] = useState(false)
   const [versionsError, setVersionsError] = useState<string | null>(null)
 
   const loadLatest = () => {
@@ -54,7 +54,6 @@ export default function ClaimMappingConfigPage() {
         setEditorValue(JSON.stringify(config.mapping_source, null, 2))
       })
       .catch((err) => {
-        // 404 or no config yet — keep default seed, no error banner
         const status = err?.response?.status
         if (status !== 404) {
           setEditorError('Failed to load current config.')
@@ -76,12 +75,18 @@ export default function ClaimMappingConfigPage() {
   }
 
   useEffect(() => {
-    loadLatest()
-    loadVersions()
+    if (tenantId) {
+      loadLatest()
+      loadVersions()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId])
 
   const handleSave = async () => {
+    if (!tenantId) {
+      setSaveError('Select a tenant before saving.')
+      return
+    }
     setSaveError(null)
     let parsed: Record<string, unknown>
     try {
@@ -122,6 +127,12 @@ export default function ClaimMappingConfigPage() {
   return (
     <div>
       <h1 className="text-2xl font-bold text-gray-900 mb-6">Claim Mapping Config</h1>
+
+      {!tenantId && (
+        <div className="mb-4 px-4 py-3 bg-yellow-50 border border-yellow-200 text-yellow-800 rounded text-sm">
+          Add <span className="font-mono">?tenantId=your-tenant-id</span> to the URL to load or save a config.
+        </div>
+      )}
 
       <div className="flex gap-6 items-start">
         {/* ── Left: Editor (2/3) ── */}
@@ -195,7 +206,7 @@ export default function ClaimMappingConfigPage() {
               <div className="animate-pulse bg-gray-200 rounded h-6 w-full" />
             </div>
           ) : versions.length === 0 ? (
-            <p className="text-xs text-gray-400">No versions yet.</p>
+            <p className="text-xs text-gray-400">{tenantId ? 'No versions yet.' : 'Select a tenant to view history.'}</p>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-xs text-left border-collapse">

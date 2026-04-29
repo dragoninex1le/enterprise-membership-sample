@@ -1,5 +1,6 @@
-import { NavLink } from 'react-router-dom'
+import { NavLink, useSearchParams } from 'react-router-dom'
 import { useHasRole } from '../hooks/useRoles'
+import { usePorthContext } from '../context/PorthContext'
 import { PLATFORM_ADMIN, SAMPLE_ROLES } from '../constants'
 
 const { TENANT_ADMIN, AR_CLERK, AP_CLERK, CONTROLLER } = SAMPLE_ROLES
@@ -18,6 +19,12 @@ const sectionLabel = (label: string) => (
 export default function Sidebar() {
   const isPlatformAdmin = useHasRole(PLATFORM_ADMIN)
   const isTenantAdmin = useHasRole(TENANT_ADMIN)
+  const { currentUser } = usePorthContext()
+  const [searchParams] = useSearchParams()
+  // Prefer explicit ?tenantId= param (platform admin managing a tenant);
+  // fall back to the signed-in user's own tenant (tenant-admin self-service).
+  const tenantId = searchParams.get('tenantId') ?? currentUser?.porthUser.tenant_id ?? ''
+
   const canSeeAR = useHasRole(AR_CLERK, CONTROLLER, TENANT_ADMIN)
   const canSeeAP = useHasRole(AP_CLERK, CONTROLLER, TENANT_ADMIN)
   const canSeeApprovals = useHasRole(CONTROLLER, TENANT_ADMIN)
@@ -29,12 +36,41 @@ export default function Sidebar() {
         <span className="ml-1 text-xs text-gray-400">Admin</span>
       </div>
       <div className="flex-1 px-2 space-y-1">
-
         {isPlatformAdmin ? (
           <>
             {sectionLabel('Platform Admin')}
-            <NavLink to="/admin/platform/organizations" className={linkClass}>
-              <span>🏢</span>Organizations
+            <NavLink to="/admin/platform/tenants" className={linkClass}>
+              <span>🏢</span>Tenants
+            </NavLink>
+
+            {tenantId && (
+              <>
+                {sectionLabel('Managing Tenant')}
+                <div className="px-3 py-1">
+                  <p className="text-xs text-indigo-600 font-mono truncate" title={tenantId}>{tenantId}</p>
+                </div>
+                <NavLink to={`/admin/tenant/roles?tenantId=${tenantId}`} className={linkClass}>
+                  <span>🎭</span>Roles
+                </NavLink>
+                <NavLink to={`/admin/tenant/claim-config?tenantId=${tenantId}`} className={linkClass}>
+                  <span>🗒️</span>Claim Mapping
+                </NavLink>
+              </>
+            )}
+          </>
+        ) : isTenantAdmin ? (
+          <>
+            {sectionLabel('Tenant Admin')}
+            {tenantId && (
+              <div className="px-3 py-1">
+                <p className="text-xs text-indigo-600 font-mono truncate" title={tenantId}>{tenantId}</p>
+              </div>
+            )}
+            <NavLink to={`/admin/tenant/roles${tenantId ? `?tenantId=${tenantId}` : ''}`} className={linkClass}>
+              <span>🎭</span>Roles
+            </NavLink>
+            <NavLink to={`/admin/tenant/claim-config${tenantId ? `?tenantId=${tenantId}` : ''}`} className={linkClass}>
+              <span>🗒️</span>Claim Mapping
             </NavLink>
           </>
         ) : (
@@ -57,24 +93,6 @@ export default function Sidebar() {
               <NavLink to="/approvals" className={linkClass}>
                 <span>✅</span>Approvals
               </NavLink>
-            )}
-
-            {isTenantAdmin && (
-              <>
-                {sectionLabel('Tenant Admin')}
-                <NavLink to="/admin/tenant/users" className={linkClass}>
-                  <span>👥</span>Users
-                </NavLink>
-                <NavLink to="/admin/tenant/roles" className={linkClass}>
-                  <span>🔑</span>Roles
-                </NavLink>
-                <NavLink to="/admin/tenant/permissions" className={linkClass}>
-                  <span>🛡</span>Permissions
-                </NavLink>
-                <NavLink to="/admin/tenant/claim-config" className={linkClass}>
-                  <span>🗂</span>Claim Mapping
-                </NavLink>
-              </>
             )}
           </>
         )}

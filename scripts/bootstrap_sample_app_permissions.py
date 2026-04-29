@@ -22,10 +22,16 @@ ROLES = [
 ]
 
 DEFAULT_CLAIM_MAPPING = {
-    "schema_version": "1",
-    "fields": {
-        "roles": {"claim_key": "https://porth.io/roles", "ops": [{"op": "resolve_roles"}]}
-    },
+    "schema_version": "2.0",
+    "fields": [
+        {
+            "name": "roles",
+            "source": "https://porth.io/roles",
+            "type": "collection",
+            "required": False,
+            "ops": [{"op": "resolve_roles"}],
+        }
+    ],
     "default_roles": [],
 }
 

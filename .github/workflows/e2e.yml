@@ -52,9 +52,8 @@ jobs:
 
       - name: Tier 2 tests (after successful deploy to main)
         if: |
-          (github.event_name == 'workflow_run' &&
-           github.event.workflow_run.conclusion == 'success') ||
-          github.ref == 'refs/heads/PORTH-133/playwright-e2e'
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.conclusion == 'success'
         run: npx playwright test tests/e2e/tier2/
         working-directory: frontend
         env:
