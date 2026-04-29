@@ -2,19 +2,26 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { usePorthContext } from '../context/PorthContext'
+import { useHasRole } from '../hooks/useRoles'
 import { usersApi } from '../api/users'
 import { rolesApi } from '../api/roles'
 import { tenantsApi } from '../api/tenants'
+import { PLATFORM_ADMIN } from '../constants'
 import type { User, Role, Tenant } from '../api/types'
 
 export default function UsersPage() {
   const { currentUser } = usePorthContext()
+  const isPlatformAdmin = useHasRole(PLATFORM_ADMIN)
   const orgId = currentUser?.porthUser.organization_id ?? ''
+  // Platform admins pick from a tenant selector; tenant admins use their own tenant.
+  const contextTenantId = currentUser?.porthUser.tenant_id ?? ''
 
   const [searchParams, setSearchParams] = useSearchParams()
-  const tenantId = searchParams.get('tenantId') ?? ''
+  const tenantId = isPlatformAdmin
+    ? (searchParams.get('tenantId') ?? '')
+    : contextTenantId
 
-  // Tenant selector
+  // Tenant selector (platform admin only)
   const [tenants, setTenants] = useState<Tenant[]>([])
   const [tenantsLoading, setTenantsLoading] = useState(false)
 
@@ -128,26 +135,28 @@ export default function UsersPage() {
         <h1 className="text-2xl font-bold text-gray-900">Users</h1>
       </div>
 
-      {/* Tenant selector */}
-      <div className="mb-5">
-        <label className="block text-xs font-medium text-gray-500 mb-1">Tenant</label>
-        {tenantsLoading ? (
-          <div className="animate-pulse bg-gray-200 rounded h-9 w-64" />
-        ) : (
-          <select
-            value={tenantId}
-            onChange={handleTenantChange}
-            className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 min-w-[260px]"
-          >
-            <option value="">— Select a tenant —</option>
-            {tenants.map(t => (
-              <option key={t.tenant_id} value={t.tenant_id}>
-                {t.display_name} ({t.environment_type})
-              </option>
-            ))}
-          </select>
-        )}
-      </div>
+      {/* Tenant selector — platform admin only */}
+      {isPlatformAdmin && (
+        <div className="mb-5">
+          <label className="block text-xs font-medium text-gray-500 mb-1">Tenant</label>
+          {tenantsLoading ? (
+            <div className="animate-pulse bg-gray-200 rounded h-9 w-64" />
+          ) : (
+            <select
+              value={tenantId}
+              onChange={handleTenantChange}
+              className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 min-w-[260px]"
+            >
+              <option value="">— Select a tenant —</option>
+              {tenants.map(t => (
+                <option key={t.tenant_id} value={t.tenant_id}>
+                  {t.display_name} ({t.environment_type})
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+      )}
 
       {/* Email filter */}
       {tenantId && (

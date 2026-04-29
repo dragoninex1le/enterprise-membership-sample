@@ -3,6 +3,8 @@ import { useHasRole } from '../hooks/useRoles'
 import { usePorthContext } from '../context/PorthContext'
 import { PLATFORM_ADMIN, SAMPLE_ROLES } from '../constants'
 
+const { TENANT_ADMIN, AR_CLERK, AP_CLERK, CONTROLLER } = SAMPLE_ROLES
+
 const linkClass = ({ isActive }: { isActive: boolean }) =>
   `flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors ${
     isActive ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-100'
@@ -16,16 +18,16 @@ const sectionLabel = (label: string) => (
 
 export default function Sidebar() {
   const isPlatformAdmin = useHasRole(PLATFORM_ADMIN)
-  const isTenantAdmin = useHasRole(SAMPLE_ROLES.TENANT_ADMIN)
+  const isTenantAdmin = useHasRole(TENANT_ADMIN)
   const { currentUser } = usePorthContext()
   const [searchParams] = useSearchParams()
   // Prefer explicit ?tenantId= param (platform admin managing a tenant);
   // fall back to the signed-in user's own tenant (tenant-admin self-service).
   const tenantId = searchParams.get('tenantId') ?? currentUser?.porthUser.tenant_id ?? ''
 
-  const canSeeAR = useHasRole('ar_clerk', 'controller')
-  const canSeeAP = useHasRole('ap_clerk', 'controller')
-  const canSeeApprovals = useHasRole('controller')
+  const canSeeAR = useHasRole(AR_CLERK, CONTROLLER, TENANT_ADMIN)
+  const canSeeAP = useHasRole(AP_CLERK, CONTROLLER, TENANT_ADMIN)
+  const canSeeApprovals = useHasRole(CONTROLLER, TENANT_ADMIN)
 
   return (
     <nav className="w-56 bg-white border-r border-gray-200 flex flex-col py-4 shrink-0">

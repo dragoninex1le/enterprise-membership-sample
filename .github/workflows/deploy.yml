@@ -85,6 +85,15 @@ jobs:
           echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$(get_output ClaimMappingConfigsTableName)"  >> $GITHUB_ENV
           echo "SAM_ARTIFACTS_BUCKET=porth-sam-artifacts-${ACCOUNT_ID}"                       >> $GITHUB_ENV
 
+      - name: Resolve sample app stack outputs
+        run: |
+          STACK=${{ env.SAM_STACK_NAME }}
+          SAMPLE_API_URL=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK" \
+            --query "Stacks[0].Outputs[?OutputKey=='SampleAppApiUrl'].OutputValue" \
+            --output text 2>/dev/null || echo "")
+          echo "SAMPLE_APP_API_URL=${SAMPLE_API_URL}" >> $GITHUB_ENV
+
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
@@ -94,6 +103,7 @@ jobs:
         run: npm run build
         env:
           VITE_API_BASE_URL: ${{ env.PORTH_API_URL }}
+          VITE_SAMPLE_APP_API_URL: ${{ env.SAMPLE_APP_API_URL }}
           VITE_PLATFORM_APEX: porth-sample
 
       # ── Step 1: SAM build + deploy ───────────────────────────────────────────

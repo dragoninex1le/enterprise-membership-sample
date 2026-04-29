@@ -1,6 +1,9 @@
 // PORTH-131 — Claim mapping configuration screen
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import { usePorthContext } from '../context/PorthContext'
+import { useHasRole } from '../hooks/useRoles'
+import { PLATFORM_ADMIN } from '../constants'
 import { claimConfigsApi } from '../api/claimConfigs'
 import type { ClaimMappingConfig } from '../api/types'
 
@@ -20,8 +23,12 @@ const DEFAULT_MAPPING = JSON.stringify(
 )
 
 export default function ClaimMappingConfigPage() {
+  const { currentUser } = usePorthContext()
+  const isPlatformAdmin = useHasRole(PLATFORM_ADMIN)
   const [searchParams] = useSearchParams()
-  const tenantId = searchParams.get('tenantId') ?? ''
+  const tenantId = isPlatformAdmin
+    ? (searchParams.get('tenantId') ?? '')
+    : (currentUser?.porthUser.tenant_id ?? '')
 
   // Editor state
   const [editorValue, setEditorValue] = useState<string>(DEFAULT_MAPPING)
