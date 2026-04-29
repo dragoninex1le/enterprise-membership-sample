@@ -45,24 +45,6 @@ Parameters:
       Environment name passed to Lambda functions as PORTH_ENVIRONMENT.
       Used to resolve DynamoDB table names (e.g. porth-sample-app-dev).
 
-Globals:
-  HttpApi:
-    # Allow the CloudFront-hosted frontend to call the sample app API.
-    # The Porth authorizer Lambda handles auth — these CORS headers let
-    # browsers send the preflight OPTIONS and receive the actual response.
-    CorsConfiguration:
-      AllowOrigins:
-        - !Sub "https://${CloudFrontAlias}"
-        - !Sub "https://${CloudFrontApexAlias}"
-      AllowHeaders:
-        - Authorization
-        - Content-Type
-      AllowMethods:
-        - GET
-        - POST
-        - OPTIONS
-      MaxAge: 600
-
 Resources:
 
   # ── DynamoDB table for sample app data ───────────────────────────────────
