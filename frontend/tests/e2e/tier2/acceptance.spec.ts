@@ -201,14 +201,15 @@ async function seedPermissionsAndTenantAdminRole(tenantId: string) {
     console.warn(`Failed to batch-register permissions: HTTP ${permResp.status()} — ${await permResp.text()}`)
   }
 
-  // Create tenant-admin role. The Porth API auto-sets source_key from name
-  // when not explicitly provided, so resolve_roles can map the JWT claim
-  // value "tenant-admin" → this Porth role without extra config.
+  // Create tenant-admin role with an explicit source_key so that resolve_roles
+  // can map the JWT claim value "tenant-admin" → this Porth role.
+  // source_key must always be set — omitting it leaves it null and breaks role resolution.
   const roleResp = await apiCtx.post(`${PORTH_API_URL}/roles/`, {
     headers,
     data: {
       tenant_id: tenantId,
       name: 'tenant-admin',
+      source_key: 'tenant-admin',
       description: 'Tenant Administrator — manages roles and claim mapping',
     },
   })
