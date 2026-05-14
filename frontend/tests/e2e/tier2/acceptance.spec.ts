@@ -201,6 +201,20 @@ async function seedPermissionsAndTenantAdminRole(tenantId: string) {
     console.warn(`Failed to batch-register permissions: HTTP ${permResp.status()} — ${await permResp.text()}`)
   }
 
+  // All sample-app permission keys — tenant-admin gets all of them.
+  // The platform-admin role covers only platform.* permissions; the tenant-admin
+  // role is the inverse: every tenant-level permission, so it has full access to
+  // the functional app (dashboard, AR, AP, approvals).
+  const ALL_SAMPLE_PERMISSIONS = [
+    'dashboard.read',
+    'ar.invoices.read',
+    'ar.invoices.write',
+    'ap.bills.read',
+    'ap.bills.write',
+    'approvals.read',
+    'approvals.write',
+  ]
+
   // Create tenant-admin role with an explicit source_key so that resolve_roles
   // can map the JWT claim value "tenant-admin" → this Porth role.
   // source_key must always be set — omitting it leaves it null and breaks role resolution.
@@ -215,6 +229,36 @@ async function seedPermissionsAndTenantAdminRole(tenantId: string) {
   })
   if (!roleResp.ok() && roleResp.status() !== 409) {
     console.warn(`Failed to create tenant-admin role: HTTP ${roleResp.status()}`)
+  }
+
+  // Resolve the role_id — from the creation response (201) or by listing roles (409).
+  let roleId: string | null = null
+  if (roleResp.ok()) {
+    const body = await roleResp.json()
+    roleId = body.id ?? null
+  } else if (roleResp.status() === 409) {
+    const listResp = await apiCtx.get(`${PORTH_API_URL}/roles/${tenantId}`, { headers })
+    if (listResp.ok()) {
+      const roles: Array<{ id: string; name: string }> = await listResp.json()
+      roleId = roles.find(r => r.name === 'tenant-admin')?.id ?? null
+    }
+  }
+
+  // Assign all sample-app permissions to the tenant-admin role.
+  // This is the inverse of the platform-admin role: full access to the tenant's
+  // functional app, with no platform-level permissions.
+  if (roleId) {
+    const permAssignResp = await apiCtx.put(
+      `${PORTH_API_URL}/roles/${tenantId}/${roleId}/permissions`,
+      { headers, data: ALL_SAMPLE_PERMISSIONS },
+    )
+    if (!permAssignResp.ok()) {
+      console.warn(`Failed to assign permissions to tenant-admin: HTTP ${permAssignResp.status()} — ${await permAssignResp.text()}`)
+    } else {
+      console.log(`  ✅ Assigned ${ALL_SAMPLE_PERMISSIONS.length} permissions to tenant-admin`)
+    }
+  } else {
+    console.warn('Could not resolve tenant-admin role_id — permissions not assigned')
   }
 
   await apiCtx.dispose()
