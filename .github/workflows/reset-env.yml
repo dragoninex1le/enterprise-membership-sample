@@ -4,6 +4,9 @@ name: Reset Dev Environment
 # and patches the platform IdP config.  Use this to get back to a clean
 # known state before running Tier 2 E2E tests.
 #
+# No porth-common dependency — bootstrap is done with raw boto3 DynamoDB
+# calls so this workflow works without a GH_PAT that can read Components.
+#
 # Trigger:  Actions → Reset Dev Environment → Run workflow
 
 on:
@@ -41,9 +44,6 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-
-      - name: Install porth-common
-        run: pip install "git+https://x-access-token:${{ secrets.GH_PAT }}@github.com/dragoninex1le/Components.git"
 
       - name: Resolve stack outputs
         run: |
@@ -96,13 +96,233 @@ jobs:
           sys.exit(1 if failed else 0)
           EOF
 
-      - name: Bootstrap platform tenant
+      - name: Bootstrap platform tenant (raw boto3 — no porth-common required)
         env:
           PORTH_TENANTS_TABLE: ${{ env.PORTH_TENANTS_TABLE }}
           PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
           PORTH_ROLES_TABLE: ${{ env.PORTH_ROLES_TABLE }}
           PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
-        run: python3 scripts/bootstrap_platform_tenant.py
+        run: |
+          python3 - <<'PYEOF'
+          import boto3, json, os, uuid, hashlib
+          from datetime import datetime, timezone
+          from boto3.dynamodb.conditions import Key
+
+          def utc_now():
+              return datetime.now(timezone.utc).isoformat()
+
+          dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
+
+          TENANTS_TABLE     = os.environ["PORTH_TENANTS_TABLE"]
+          PERMISSIONS_TABLE = os.environ["PORTH_PERMISSIONS_TABLE"]
+          ROLES_TABLE       = os.environ["PORTH_ROLES_TABLE"]
+          CLAIM_TABLE       = os.environ["PORTH_CLAIM_MAPPING_CONFIGS_TABLE"]
+
+          tenants_tbl  = dynamodb.Table(TENANTS_TABLE)
+          perms_tbl    = dynamodb.Table(PERMISSIONS_TABLE)
+          roles_tbl    = dynamodb.Table(ROLES_TABLE)
+          claim_tbl    = dynamodb.Table(CLAIM_TABLE)
+
+          now = utc_now()
+
+          # ── 0. Platform org + tenant ─────────────────────────────────────────
+          print("\n0. Platform org + tenant")
+          existing = tenants_tbl.get_item(Key={"PK": "TENANT#platform", "SK": "METADATA"})
+          if "Item" in existing:
+              org_id = existing["Item"]["org_id"]
+              print(f"    exists   TENANT#platform (org_id={org_id})")
+          else:
+              org_id = str(uuid.uuid4())
+              tenants_tbl.put_item(Item={
+                  "PK": f"ORG#{org_id}", "SK": "METADATA",
+                  "gsi1pk": "ORG_SLUG#platform", "gsi1sk": "METADATA",
+                  "id": org_id, "name": "Platform", "slug": "platform",
+                  "status": "active", "created_at": now, "updated_at": now,
+              })
+              tenants_tbl.put_item(Item={
+                  "PK": "TENANT#platform", "SK": "METADATA",
+                  "gsi1pk": f"ORG#{org_id}", "gsi1sk": "TENANT#platform",
+                  "tenant_id": "platform", "org_id": org_id, "org_name": "Platform",
+                  "display_name": "Platform", "environment_type": "production",
+                  "status": "active", "created_at": now, "updated_at": now,
+              })
+              print(f"    created  ORG#{org_id} + TENANT#platform")
+
+          # ── 1. Platform permissions ──────────────────────────────────────────
+          print("\n1. Permissions")
+          APP_NS = "porth-platform"
+          PERMISSIONS = [
+              {"key": "platform.tenants.read",    "display_name": "View Tenants",           "category": "Tenants",       "sort_order": 10},
+              {"key": "platform.tenants.create",   "display_name": "Create Tenants",         "category": "Tenants",       "sort_order": 20},
+              {"key": "platform.tenants.update",   "display_name": "Update Tenants",         "category": "Tenants",       "sort_order": 30},
+              {"key": "platform.tenants.delete",   "display_name": "Delete Tenants",         "category": "Tenants",       "sort_order": 40},
+              {"key": "platform.orgs.read",        "display_name": "View Organisations",     "category": "Organisations", "sort_order": 10},
+              {"key": "platform.orgs.create",      "display_name": "Create Organisations",   "category": "Organisations", "sort_order": 20},
+              {"key": "platform.orgs.update",      "display_name": "Update Organisations",   "category": "Organisations", "sort_order": 30},
+              {"key": "platform.orgs.delete",      "display_name": "Delete Organisations",   "category": "Organisations", "sort_order": 40},
+              {"key": "platform.settings.read",    "display_name": "View Platform Settings", "category": "Settings",      "sort_order": 10},
+              {"key": "platform.settings.write",   "display_name": "Edit Platform Settings", "category": "Settings",      "sort_order": 20},
+          ]
+          permission_keys = []
+          for p in PERMISSIONS:
+              perms_tbl.put_item(Item={
+                  "pk": f"TENANT#platform#NS#{APP_NS}", "sk": f"PERM#{p['key']}",
+                  "gsi1pk": "TENANT#platform", "gsi1sk": f"CAT#{p['category']}#PERM#{p['key']}",
+                  "id": str(uuid.uuid4()), "key": p["key"], "display_name": p["display_name"],
+                  "category": p["category"], "app_namespace": APP_NS,
+                  "tenant_id": "platform", "sort_order": p["sort_order"],
+                  "created_at": now, "updated_at": now,
+              })
+              permission_keys.append(p["key"])
+              print(f"    registered  {p['key']}")
+
+          # ── 2. platform-admin role ───────────────────────────────────────────
+          print("\n2. platform-admin role")
+          resp = roles_tbl.query(
+              KeyConditionExpression=Key("pk").eq("TENANT#platform") & Key("sk").begins_with("ROLE#")
+          )
+          role_id = None
+          for item in resp.get("Items", []):
+              if item.get("name") == "platform-admin":
+                  role_id = item["id"]
+                  # Ensure source_key is set correctly
+                  if item.get("source_key") != "platform-admin":
+                      roles_tbl.update_item(
+                          Key={"pk": "TENANT#platform", "sk": f"ROLE#{role_id}"},
+                          UpdateExpression="SET source_key = :sk, updated_at = :ua",
+                          ExpressionAttributeValues={":sk": "platform-admin", ":ua": now},
+                      )
+                      print(f"    patched  source_key → platform-admin (id={role_id})")
+                  else:
+                      print(f"    exists   platform-admin (id={role_id})")
+                  break
+
+          if not role_id:
+              role_id = str(uuid.uuid4())
+              roles_tbl.put_item(Item={
+                  "pk": "TENANT#platform", "sk": f"ROLE#{role_id}",
+                  "id": role_id, "tenant_id": "platform", "name": "platform-admin",
+                  "is_system": True, "source_key": "platform-admin",
+                  "description": "System role for platform-level tenant administration",
+                  "created_at": now, "updated_at": now,
+              })
+              print(f"    created  platform-admin (id={role_id})")
+
+          # ── 3. Role–permission links ─────────────────────────────────────────
+          print("\n3. Role–permission links")
+          # Remove old links
+          old = roles_tbl.query(
+              KeyConditionExpression=Key("pk").eq(f"ROLE#{role_id}") & Key("sk").begins_with("PERM#")
+          )
+          for item in old.get("Items", []):
+              roles_tbl.delete_item(Key={"pk": item["pk"], "sk": item["sk"]})
+          # Write new links
+          for pkey in permission_keys:
+              roles_tbl.put_item(Item={
+                  "pk": f"ROLE#{role_id}", "sk": f"PERM#{pkey}",
+                  "role_id": role_id, "permission_key": pkey,
+                  "tenant_id": "platform", "assigned_at": now,
+              })
+          print(f"    set {len(permission_keys)} permissions on platform-admin")
+
+          # ── 4. Claim mapping config ──────────────────────────────────────────
+          print("\n4. Claim mapping config")
+          MAPPING_SOURCE = {
+              "schema_version": "2.0",
+              "fields": [{"name": "roles", "source": "https://porth.io/roles",
+                          "type": "collection", "required": False,
+                          "ops": [{"op": "resolve_roles"}]}],
+              "default_roles": [],
+          }
+          # compiled_source pre-generated by MappingCodegen.generate(MAPPING_SOURCE)
+          COMPILED_SOURCE = (
+              "# AUTO-GENERATED by claim_mapping_codegen — config hash c9845fb83254fbc8\n"
+              "# DO NOT EDIT manually. Re-generate from the mapping config.\n"
+              "from __future__ import annotations\n"
+              "from typing import Any\n"
+              "from porth_common.services.exceptions import MappingError\n"
+              "\n"
+              "def _get_path(obj: dict, path: str) -> Any:\n"
+              '    """OIDC-aware dot-notation path resolver."""\n'
+              "    if not isinstance(obj, dict) or not path:\n"
+              "        return None\n"
+              '    if path.startswith(("http://", "https://")):\n'
+              "        return obj.get(path)\n"
+              '    parts = path.split(".")\n'
+              "    current: Any = obj\n"
+              "    for part in parts:\n"
+              "        if not isinstance(current, dict):\n"
+              "            return None\n"
+              "        current = current.get(part)\n"
+              "        if current is None:\n"
+              "            return None\n"
+              "    return current\n"
+              "\n"
+              "def map_claims(claims: dict, role_registry: dict | None = None) -> dict:\n"
+              '    """Map JWT claims to user model fields.\n'
+              "    \n"
+              "    Args:\n"
+              "        claims: Raw JWT claims dict from identity provider.\n"
+              "        role_registry: Optional dict mapping source_key values to role IDs.\n"
+              "            Required for fields with resolve_roles op.\n"
+              "    Returns:\n"
+              "        Dict of {field_name: transformed_value}.\n"
+              "    Raises:\n"
+              "        MappingError: If a required claim is absent.\n"
+              '    """\n'
+              "    result: dict = {}\n"
+              "\n"
+              "    # field: roles (collection)\n"
+              "    _v = claims.get('https://porth.io/roles')\n"
+              "    if _v is not None:\n"
+              "        if not isinstance(_v, list):\n"
+              "            _v = [_v]\n"
+              "        _collection = []\n"
+              "        for _elem in _v:\n"
+              "            _ev = _elem\n"
+              "            # resolve_roles: match against role registry\n"
+              "            if _ev is not None and role_registry is not None:\n"
+              "                _ev = role_registry.get(str(_ev))\n"
+              "            if _ev is not None:\n"
+              "                _collection.append(_ev)\n"
+              "        result['roles'] = list(dict.fromkeys(_collection))\n"
+              "\n"
+              "    return result\n"
+          )
+          COMPILED_HASH = "55016a468cbb18927879e32725927fc3d501a7887918f05eed50911918fd6855"
+
+          existing_cfg = claim_tbl.query(
+              KeyConditionExpression=Key("PK").eq("TENANT#platform"),
+              ScanIndexForward=False, Limit=1,
+          )
+          if existing_cfg.get("Items"):
+              latest = existing_cfg["Items"][0]
+              if latest.get("compiled_hash") == COMPILED_HASH:
+                  print(f"    exists   claim mapping config v{latest['version']} (no change)")
+              else:
+                  version = latest["version"] + 1
+                  claim_tbl.put_item(Item={
+                      "PK": "TENANT#platform", "SK": f"VERSION#{version:06d}",
+                      "gsi1pk": "TENANT#platform", "gsi1sk": f"VERSION#{version:06d}",
+                      "id": str(uuid.uuid4()), "tenant_id": "platform", "version": version,
+                      "mapping_source": MAPPING_SOURCE, "compiled_source": COMPILED_SOURCE,
+                      "compiled_hash": COMPILED_HASH,
+                      "compiled_at": now, "created_at": now, "updated_at": now,
+                  })
+                  print(f"    saved    claim mapping config v{version}")
+          else:
+              claim_tbl.put_item(Item={
+                  "PK": "TENANT#platform", "SK": "VERSION#000001",
+                  "gsi1pk": "TENANT#platform", "gsi1sk": "VERSION#000001",
+                  "id": str(uuid.uuid4()), "tenant_id": "platform", "version": 1,
+                  "mapping_source": MAPPING_SOURCE, "compiled_source": COMPILED_SOURCE,
+                  "compiled_hash": COMPILED_HASH,
+                  "compiled_at": now, "created_at": now, "updated_at": now,
+              })
+              print("    saved    claim mapping config v1")
+
+          print("\n✅ Platform tenant bootstrap complete")
+          PYEOF
 
       - name: Patch platform tenant IdP config
         env:
