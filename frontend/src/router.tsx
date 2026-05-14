@@ -22,6 +22,9 @@ import UnauthorizedPage from './pages/UnauthorizedPage'
 import OrganizationsPage from './pages/OrganizationsPage'
 import TenantsPage from './pages/TenantsPage'
 import ClaimMappingConfigPage from './pages/ClaimMappingConfigPage'
+import ClaimRoleMappingPage from './pages/ClaimRoleMappingPage'
+import PermissionsPage from './pages/PermissionsPage'
+import UsersPage from './pages/UsersPage'
 import RolesPage from './pages/RolesPage'
 
 export const router = createBrowserRouter([
@@ -78,7 +81,9 @@ export const router = createBrowserRouter([
           { index: true, element: <Navigate to="roles" replace /> },
           { path: 'roles', element: <RolesPage /> },
           { path: 'claim-config', element: <ClaimMappingConfigPage /> },
-          { path: 'claim-mappings', element: <Navigate to="claim-config" replace /> },
+          { path: 'claim-mappings', element: <ClaimRoleMappingPage /> },
+          { path: 'permissions', element: <PermissionsPage /> },
+          { path: 'users', element: <UsersPage /> },
         ],
       },
     ],
