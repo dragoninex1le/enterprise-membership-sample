@@ -58,23 +58,9 @@ export default function Sidebar() {
               </>
             )}
           </>
-        ) : isTenantAdmin ? (
-          <>
-            {sectionLabel('Tenant Admin')}
-            {tenantId && (
-              <div className="px-3 py-1">
-                <p className="text-xs text-indigo-600 font-mono truncate" title={tenantId}>{tenantId}</p>
-              </div>
-            )}
-            <NavLink to={`/admin/tenant/roles${tenantId ? `?tenantId=${tenantId}` : ''}`} className={linkClass}>
-              <span>🎭</span>Roles
-            </NavLink>
-            <NavLink to={`/admin/tenant/claim-config${tenantId ? `?tenantId=${tenantId}` : ''}`} className={linkClass}>
-              <span>🗒️</span>Claim Mapping
-            </NavLink>
-          </>
         ) : (
           <>
+            {/* Functional areas — visible to all non-platform-admin roles that have access */}
             {sectionLabel('Main')}
             <NavLink to="/dashboard" className={linkClass}>
               <span>📊</span>Dashboard
@@ -93,6 +79,24 @@ export default function Sidebar() {
               <NavLink to="/approvals" className={linkClass}>
                 <span>✅</span>Approvals
               </NavLink>
+            )}
+
+            {/* Tenant admin tools — only shown to tenant-admins */}
+            {isTenantAdmin && (
+              <>
+                {sectionLabel('Tenant Admin')}
+                {tenantId && (
+                  <div className="px-3 py-1">
+                    <p className="text-xs text-indigo-600 font-mono truncate" title={tenantId}>{tenantId}</p>
+                  </div>
+                )}
+                <NavLink to={`/admin/tenant/roles${tenantId ? `?tenantId=${tenantId}` : ''}`} className={linkClass}>
+                  <span>🎭</span>Roles
+                </NavLink>
+                <NavLink to={`/admin/tenant/claim-config${tenantId ? `?tenantId=${tenantId}` : ''}`} className={linkClass}>
+                  <span>🗒️</span>Claim Mapping
+                </NavLink>
+              </>
             )}
           </>
         )}
