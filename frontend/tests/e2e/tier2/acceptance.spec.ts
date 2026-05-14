@@ -465,26 +465,22 @@ test.describe.serial('Acceptance', () => {
       await expect(page).toHaveURL(/\/ar/)
       console.log('✅ Controller can see and navigate to AR page')
     } else {
-      // AR sidebar link never appeared. This can mean:
-      // (a) The user has a role (e.g. tenant-admin) whose sidebar branch doesn't
-      //     include an AR link — but the user may still have access to /ar via
-      //     the ProtectedRoute. Navigate directly to confirm.
-      // (b) The controller role was not resolved (claim mapping / source_key issue)
-      //     and the user has no AR-granting role — they will be redirected to /unauthorized.
-      // Both outcomes are acceptable at this assertion tier.
-      console.log('ℹ️ AR link not visible after 30 s — navigating directly to check access state...')
+      // AR sidebar link never appeared within 30 s.
+      //
+      // This is a timing-fallback only — if the sidebar link was missed due to a
+      // slow /users/me response, the user should still be able to reach /ar directly.
+      // The controller role IS expected to grant AR access (ar.invoices.read), so
+      // reaching /unauthorized here means role resolution is broken and the test
+      // MUST fail — /unauthorized is no longer an acceptable outcome since the
+      // source_key and permission seeding fixes landed.
+      console.log('ℹ️ AR link not visible after 30 s — navigating directly to verify access...')
       await page.goto(`${TENANT_BASE_URL}/ar`)
       await page.waitForLoadState('networkidle', { timeout: 30000 })
       const finalUrl = page.url()
-      // Accept /ar (access granted) or /unauthorized (access denied). Either is
-      // a valid product outcome; the test simply confirms the app handled the
-      // navigation correctly without crashing or looping.
-      expect(finalUrl).toMatch(/\/(ar|unauthorized)/)
-      if (finalUrl.includes('/unauthorized')) {
-        console.log('ℹ️ Controller correctly redirected to /unauthorized (role not yet provisioned)')
-      } else {
-        console.log('✅ Controller reached /ar via direct navigation (role resolved without sidebar link)')
-      }
+      // Hard assertion: controller MUST reach /ar. If they land on /unauthorized,
+      // the claim mapping / source_key / permission pipeline is broken.
+      expect(finalUrl).toMatch(/\/ar/)
+      console.log('✅ Controller reached /ar via direct navigation (role resolved without sidebar link)')
     }
   })
 })
