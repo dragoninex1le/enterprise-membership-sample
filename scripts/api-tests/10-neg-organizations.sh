@@ -25,7 +25,7 @@ STATUS=$(api_request "POST" "/organizations" "$RESPONSE_FILE" "$PAYLOAD" | tail 
 if [[ "$STATUS" == "400" || "$STATUS" == "422" ]]; then pass "NEG-O03: missing tenant (HTTP $STATUS)"
 else fail "NEG-O03: missing tenant (expected 400/422, got $STATUS)"; fi
 
-PAYLOAD='{"name": "Dup Slug Org", "slug": "test-org-smoke", "tenant": {"tenant_id": "t-neg-o04", "display_name": "Dup", "environment_type": "development"}}'
+PAYLOAD='{"name": "Dup Slug Org", "slug": "test-org-smoke", "tenant": {"tenant_id": "t-neg-o04", "display_name": "Dup", "environment_type": "development", "admin_role_source_key": "tenant-admin"}}'
 STATUS=$(api_request "POST" "/organizations" "$RESPONSE_FILE" "$PAYLOAD" | tail -1)
 if [[ "$STATUS" == "409" || "$STATUS" == "400" ]]; then pass "NEG-O04: duplicate slug (HTTP $STATUS)"
 else fail "NEG-O04: duplicate slug (expected 409/400, got $STATUS)"; fi

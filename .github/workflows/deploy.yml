@@ -251,7 +251,10 @@ jobs:
           EOF
 
       # ── Step 7: Bootstrap platform tenant (post-test) ────────────────────────────
+      # always() — a failed E2E step above must still re-seed the tables that the
+      # post-test cleanup (also always()) just wiped, or DynamoDB is left empty.
       - name: Bootstrap platform tenant (post-test)
+        if: always() && github.ref == 'refs/heads/main'
         env:
           PORTH_TENANTS_TABLE: ${{ env.PORTH_TENANTS_TABLE }}
           PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
@@ -263,6 +266,7 @@ jobs:
       # Audience is read from PORTH_TENANT_CONFIG (same JSON blob used for E2E IdP
       # setup). PLATFORM_AUTH0_AUDIENCE is used as fallback if not present.
       - name: Patch platform tenant IdP config
+        if: always() && github.ref == 'refs/heads/main'
         env:
           PORTH_TENANT_CONFIG: ${{ secrets.PORTH_TENANT_CONFIG }}
         run: |

@@ -22,7 +22,8 @@ ORG_PAYLOAD=$(cat <<EOF
   "tenant": {
     "tenant_id": "$TENANT_ID",
     "display_name": "Smoke Test Tenant",
-    "environment_type": "development"
+    "environment_type": "development",
+    "admin_role_source_key": "tenant-admin"
   }
 }
 EOF

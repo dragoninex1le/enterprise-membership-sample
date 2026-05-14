@@ -12,14 +12,14 @@ RESPONSE_FILE="/tmp/porth-neg-tenants.json"
 TENANT_ID="t-test-1"
 ORG_ID=$(python3 -c "import json; data = json.load(open('/tmp/porth-test-setup-ids.json')); print(data.get('org_id', ''))" 2>/dev/null || echo "")
 
-STATUS=$(api_request "PUT" "/tenants" "$RESPONSE_FILE" '{"org_id": "nonexistent-org-xyz", "tenant_id": "t-neg-t01", "display_name": "Neg Test", "environment_type": "development"}' | tail -1)
+STATUS=$(api_request "PUT" "/tenants" "$RESPONSE_FILE" '{"org_id": "nonexistent-org-xyz", "tenant_id": "t-neg-t01", "display_name": "Neg Test", "environment_type": "development", "admin_role_source_key": "tenant-admin"}' | tail -1)
 if [[ "$STATUS" == "404" ]]; then pass "NEG-T01: PUT nonexistent org_id (HTTP 404)"
 else fail "NEG-T01: PUT nonexistent org_id (expected 404, got $STATUS)"; fi
 
 echo "NEG-T02: PUT duplicate tenant_id '$TENANT_ID'"
 if [[ -n "$ORG_ID" ]]; then
     PAYLOAD=$(cat <<EOF
-{"org_id": "$ORG_ID", "tenant_id": "$TENANT_ID", "display_name": "Duplicate", "environment_type": "development"}
+{"org_id": "$ORG_ID", "tenant_id": "$TENANT_ID", "display_name": "Duplicate", "environment_type": "development", "admin_role_source_key": "tenant-admin"}
 EOF
 )
     STATUS=$(api_request "PUT" "/tenants" "$RESPONSE_FILE" "$PAYLOAD" | tail -1)
