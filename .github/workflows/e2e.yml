@@ -50,10 +50,11 @@ jobs:
           VITE_API_BASE_URL: 'http://localhost:5173'
           VITE_DEV_TENANT_ID: 'test-tenant'
 
-      - name: Tier 2 tests (after successful deploy to main)
+      - name: Tier 2 tests (after successful deploy to main, or manual dispatch)
         if: |
-          github.event_name == 'workflow_run' &&
-          github.event.workflow_run.conclusion == 'success'
+          (github.event_name == 'workflow_run' &&
+          github.event.workflow_run.conclusion == 'success') ||
+          github.event_name == 'workflow_dispatch'
         run: npx playwright test tests/e2e/tier2/
         working-directory: frontend
         env:

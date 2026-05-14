@@ -1,0 +1,145 @@
+name: Reset Dev Environment
+
+# Clears all tenant data from DynamoDB, re-bootstraps the platform tenant,
+# and patches the platform IdP config.  Use this to get back to a clean
+# known state before running Tier 2 E2E tests.
+#
+# Trigger:  Actions → Reset Dev Environment → Run workflow
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: reset-dev-env
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  reset:
+    name: Reset Dev Environment
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install boto3
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install porth-common
+        run: pip install "git+https://${{ secrets.GH_PAT }}@github.com/dragoninex1le/Components.git"
+
+      - name: Resolve stack outputs
+        run: |
+          get_porth() {
+            aws cloudformation describe-stacks \
+              --stack-name porth-components \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text
+          }
+          CLEANUP_FN=$(aws cloudformation describe-stacks \
+            --stack-name porth-qa-tools \
+            --query "Stacks[0].Outputs[?OutputKey=='QaCleanupFunctionArn'].OutputValue" \
+            --output text)
+          echo "PORTH_API_URL=$(get_porth PorthApiUrl)"                                       >> $GITHUB_ENV
+          echo "PORTH_TENANTS_TABLE=$(get_porth TenantsTableName)"                            >> $GITHUB_ENV
+          echo "PORTH_PERMISSIONS_TABLE=$(get_porth PermissionsTableName)"                    >> $GITHUB_ENV
+          echo "PORTH_ROLES_TABLE=$(get_porth RolesTableName)"                                >> $GITHUB_ENV
+          echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$(get_porth ClaimMappingConfigsTableName)"  >> $GITHUB_ENV
+          echo "CLEANUP_FN=$CLEANUP_FN"                                                        >> $GITHUB_ENV
+
+      - name: Cleanup all tenant data
+        run: |
+          python3 - <<'EOF'
+          import boto3, json, sys, os
+
+          TABLES = [
+              "porth-users-dev",
+              "porth-tenants-dev",
+              "porth-permissions-dev",
+              "porth-roles-dev",
+              "porth-claim-mapping-configs-dev",
+              "porth-org-units-dev",
+          ]
+          fn = os.environ["CLEANUP_FN"]
+          client = boto3.client("lambda", region_name="us-east-1")
+          failed = False
+
+          print("Cleaning all tables...")
+          for table in TABLES:
+              payload = {"body": json.dumps({"table_name": table})}
+              resp = client.invoke(FunctionName=fn, Payload=json.dumps(payload))
+              result = json.loads(resp["Payload"].read())
+              body = json.loads(result.get("body", "{}"))
+              if result.get("statusCode", 200) == 200:
+                  print(f"  ✅ {table}: deleted {body.get('deleted', '?')} items")
+              else:
+                  print(f"  ❌ {table}: {body.get('error', result)}", file=sys.stderr)
+                  failed = True
+
+          sys.exit(1 if failed else 0)
+          EOF
+
+      - name: Bootstrap platform tenant
+        env:
+          PORTH_TENANTS_TABLE: ${{ env.PORTH_TENANTS_TABLE }}
+          PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
+          PORTH_ROLES_TABLE: ${{ env.PORTH_ROLES_TABLE }}
+          PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
+        run: python3 scripts/bootstrap_platform_tenant.py
+
+      - name: Patch platform tenant IdP config
+        env:
+          PORTH_TENANT_CONFIG: ${{ secrets.PORTH_TENANT_CONFIG }}
+        run: |
+          TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
+          RESPONSE_FILE="/tmp/patch-tenant.json"
+
+          AUDIENCE=$(echo "$PORTH_TENANT_CONFIG" | python3 -c \
+            "import json,sys; raw=sys.stdin.read().strip(); d=json.loads(raw); d=d if isinstance(d,dict) else json.loads(d); print(d.get('audience',''),end='')" \
+            2>/dev/null || true)
+          if [ -z "$AUDIENCE" ]; then
+            AUDIENCE="${{ secrets.PLATFORM_AUTH0_AUDIENCE }}"
+          fi
+
+          PAYLOAD="{\"idp_config_override\":{\"domain\":\"${{ secrets.PLATFORM_AUTH0_DOMAIN }}\",\"client_id\":\"${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}\",\"audience\":\"${AUDIENCE}\"}}"
+
+          for attempt in 1 2 3 4 5; do
+            STATUS=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
+              -X PATCH "${{ env.PORTH_API_URL }}/tenants/platform" \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $TEST_TOKEN" \
+              -d "$PAYLOAD")
+            echo "Attempt $attempt: PATCH /tenants/platform → HTTP $STATUS"
+            if [[ "$STATUS" == "200" ]]; then
+              echo "✅ Platform tenant IdP config updated"
+              break
+            fi
+            echo "Response: $(cat $RESPONSE_FILE)"
+            if [[ $attempt -lt 5 ]]; then
+              echo "Retrying in 5s..."
+              sleep 5
+            else
+              echo "❌ Failed to patch platform tenant IdP config after $attempt attempts"
+              exit 1
+            fi
+          done
+
+      - name: Done
+        run: echo "✅ Dev environment reset complete — platform tenant only, ready for E2E tests"
