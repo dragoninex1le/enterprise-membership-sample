@@ -15,6 +15,12 @@ logger = logging.getLogger(__name__)
 
 class PorthContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        # CORS preflight requests must not be intercepted by auth middleware.
+        # PorthContextMiddleware is outermost (added last via add_middleware),
+        # so OPTIONS must be passed through to CORSMiddleware which handles it.
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         event = getattr(request.state, "aws_event", None) or {}
         try:
             auth = parse_auth_context(event)
