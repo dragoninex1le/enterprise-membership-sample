@@ -235,13 +235,22 @@ async function seedPermissionsAndTenantAdminRole(tenantId: string) {
   let roleId: string | null = null
   if (roleResp.ok()) {
     const body = await roleResp.json()
-    roleId = body.id ?? null
+    // API may return id or role_id depending on version
+    roleId = (body.id ?? body.role_id) ?? null
+    console.log(`  Created tenant-admin role — id=${roleId}`)
   } else if (roleResp.status() === 409) {
     const listResp = await apiCtx.get(`${PORTH_API_URL}/roles/${tenantId}`, { headers })
     if (listResp.ok()) {
-      const roles: Array<{ id: string; name: string; source_key?: string | null }> = await listResp.json()
+      const rawBody = await listResp.json()
+      // Handle both a direct array and a wrapped response (e.g. { items: [...] })
+      const roles: Array<Record<string, unknown>> = Array.isArray(rawBody)
+        ? rawBody
+        : (rawBody.items ?? rawBody.roles ?? rawBody.data ?? [])
+      console.log(`  GET /roles/${tenantId} → ${roles.length} role(s): ${roles.map(r => r.name).join(', ')}`)
       const existingRole = roles.find(r => r.name === 'tenant-admin') ?? null
-      roleId = existingRole?.id ?? null
+      // API may expose the role PK as id or role_id
+      roleId = (existingRole?.id ?? existingRole?.role_id ?? null) as string | null
+      console.log(`  Resolved tenant-admin roleId=${roleId}`)
       // Ensure source_key is set — may be null if this role was created before
       // the admin_role_source_key fix landed on the frontend New Organization form.
       if (roleId && !existingRole?.source_key) {
@@ -255,6 +264,8 @@ async function seedPermissionsAndTenantAdminRole(tenantId: string) {
           console.log('  ✅ Patched source_key on existing tenant-admin role')
         }
       }
+    } else {
+      console.warn(`  GET /roles/${tenantId} failed: HTTP ${listResp.status()} — ${await listResp.text()}`)
     }
   }
 
@@ -315,7 +326,10 @@ async function setupE2ETenant(browser: Browser) {
     // heading when the modal is open.
     const modalVisible = await page.getByRole('heading', { name: 'New Organization' }).isVisible()
     if (modalVisible) {
-      await page.keyboard.press('Escape')
+      // The custom React modal has no onKeyDown handler for Escape — pressing Escape
+      // does nothing and the backdrop stays up, blocking all subsequent pointer events.
+      // Click the Cancel button explicitly to invoke setOrgOpen(false).
+      await page.getByRole('button', { name: 'Cancel' }).click()
       // Wait for the modal (and its backdrop overlay) to fully animate out before
       // proceeding — the backdrop intercepts pointer events until it is gone.
       await page.getByRole('heading', { name: 'New Organization' })
