@@ -4,6 +4,11 @@ on:
   push:
     branches: ['**']
   workflow_dispatch:
+    inputs:
+      run_api_tests:
+        description: 'Run API integration tests (wipes all DynamoDB tables before and after — opt-in only)'
+        type: boolean
+        default: false
 
 # Serialise deploy runs per branch — prevents concurrent cleanup/bootstrap
 # steps from racing each other and deleting the platform tenant mid-flight.
@@ -164,8 +169,10 @@ jobs:
             --paths "/*"
 
       # ── Step 3: Cleanup (pre-test) ─────────────────────────────────────────────
+      # Only runs when explicitly opted in via workflow_dispatch run_api_tests:true.
+      # Normal pushes to main never wipe DynamoDB — use reset-env.yml for that.
       - name: Cleanup (pre-test)
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.run_api_tests == true
         run: |
           python3 - <<'EOF'
           import boto3, json, sys
@@ -199,7 +206,7 @@ jobs:
 
       # ── Step 4: Bootstrap platform tenant (pre-test) ────────────────────────────
       - name: Bootstrap platform tenant (pre-test)
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.run_api_tests == true
         env:
           PORTH_TENANTS_TABLE: ${{ env.PORTH_TENANTS_TABLE }}
           PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
@@ -207,9 +214,9 @@ jobs:
           PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
         run: python3 scripts/bootstrap_platform_tenant.py
 
-      # ── Step 5: Run E2E tests ───────────────────────────────────────────────────
-      - name: Run E2E tests
-        if: github.ref == 'refs/heads/main'
+      # ── Step 5: Run API integration tests ──────────────────────────────────────
+      - name: Run API integration tests
+        if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.run_api_tests == true
         env:
           PORTH_AUTH_TEST_TOKEN: ${{ secrets.PORTH_AUTH_TEST_TOKEN }}
         run: |
@@ -218,7 +225,7 @@ jobs:
 
       # ── Step 6: Cleanup (post-test) ──────────────────────────────────────────────
       - name: Cleanup (post-test)
-        if: always() && github.ref == 'refs/heads/main'
+        if: always() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.run_api_tests == true
         run: |
           python3 - <<'EOF'
           import boto3, json, sys
@@ -250,10 +257,11 @@ jobs:
           sys.exit(1 if failed else 0)
           EOF
 
-      # ── Step 7: Bootstrap platform tenant (post-test) ────────────────────────────
-      # always() — a failed E2E step above must still re-seed the tables that the
-      # post-test cleanup (also always()) just wiped, or DynamoDB is left empty.
-      - name: Bootstrap platform tenant (post-test)
+      # ── Step 7: Bootstrap platform tenant ───────────────────────────────────────
+      # Runs on every main deploy (idempotent — safe to run against live data).
+      # also serves as the post-test reseed when run_api_tests is true, so always()
+      # is required to ensure it runs even if the integration tests or cleanup failed.
+      - name: Bootstrap platform tenant
         if: always() && github.ref == 'refs/heads/main'
         env:
           PORTH_TENANTS_TABLE: ${{ env.PORTH_TENANTS_TABLE }}
