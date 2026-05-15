@@ -239,8 +239,22 @@ async function seedPermissionsAndTenantAdminRole(tenantId: string) {
   } else if (roleResp.status() === 409) {
     const listResp = await apiCtx.get(`${PORTH_API_URL}/roles/${tenantId}`, { headers })
     if (listResp.ok()) {
-      const roles: Array<{ id: string; name: string }> = await listResp.json()
-      roleId = roles.find(r => r.name === 'tenant-admin')?.id ?? null
+      const roles: Array<{ id: string; name: string; source_key?: string | null }> = await listResp.json()
+      const existingRole = roles.find(r => r.name === 'tenant-admin') ?? null
+      roleId = existingRole?.id ?? null
+      // Ensure source_key is set — may be null if this role was created before
+      // the admin_role_source_key fix landed on the frontend New Organization form.
+      if (roleId && !existingRole?.source_key) {
+        const patchResp = await apiCtx.patch(`${PORTH_API_URL}/roles/${tenantId}/${roleId}`, {
+          headers,
+          data: { source_key: 'tenant-admin' },
+        })
+        if (!patchResp.ok()) {
+          console.warn(`Failed to patch source_key on tenant-admin role: HTTP ${patchResp.status()} — ${await patchResp.text()}`)
+        } else {
+          console.log('  ✅ Patched source_key on existing tenant-admin role')
+        }
+      }
     }
   }
 

@@ -10,9 +10,10 @@ type EnvType = typeof ENV_TYPES[number]
 
 interface TenantRow extends Tenant { org_name: string }
 
-interface NewOrgForm { name: string; slug: string }
+interface NewOrgForm { name: string; slug: string; admin_role_source_key: string }
 interface NewTenantForm {
   org_id: string; tenant_id: string; display_name: string; environment_type: EnvType
+  admin_role_source_key: string
   idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string
 }
 interface EditTenantForm {
@@ -20,8 +21,8 @@ interface EditTenantForm {
   idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string
 }
 
-const EMPTY_ORG: NewOrgForm = { name: '', slug: '' }
-const EMPTY_TENANT: NewTenantForm = { org_id: '', tenant_id: '', display_name: '', environment_type: 'production', idp_enabled: false, idp_domain: '', idp_client_id: '', idp_audience: '' }
+const EMPTY_ORG: NewOrgForm = { name: '', slug: '', admin_role_source_key: 'tenant-admin' }
+const EMPTY_TENANT: NewTenantForm = { org_id: '', tenant_id: '', display_name: '', environment_type: 'production', admin_role_source_key: 'tenant-admin', idp_enabled: false, idp_domain: '', idp_client_id: '', idp_audience: '' }
 
 function idpFromForm(f: { idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string }): IdpConfig | undefined {
   if (!f.idp_enabled) return undefined
@@ -123,7 +124,7 @@ export default function TenantsPage() {
     setOrgSaving(true); setOrgError(null)
     const body: CreateOrganizationRequest = {
       name: orgForm.name, slug: orgForm.slug,
-      tenant: { tenant_id: orgForm.slug, display_name: orgForm.name, environment_type: 'production' },
+      tenant: { tenant_id: orgForm.slug, display_name: orgForm.name, environment_type: 'production', admin_role_source_key: orgForm.admin_role_source_key },
     }
     try {
       await organizationsApi.create(body)
@@ -138,6 +139,7 @@ export default function TenantsPage() {
     const body: CreateTenantRequest = {
       org_id: tenantForm.org_id, tenant_id: tenantForm.tenant_id,
       display_name: tenantForm.display_name, environment_type: tenantForm.environment_type,
+      admin_role_source_key: tenantForm.admin_role_source_key,
       idp_config_override: idpFromForm(tenantForm),
     }
     try {
@@ -288,6 +290,14 @@ export default function TenantsPage() {
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
                 {orgForm.slug && <p className="mt-1 text-xs text-gray-400">Initial tenant ID: <span className="font-mono">{orgForm.slug}</span></p>}
               </div>
+              <div>
+                <label htmlFor="org-arsk" className="block text-sm font-medium text-gray-700 mb-1">Admin Role Source Key</label>
+                <input id="org-arsk" type="text" required value={orgForm.admin_role_source_key}
+                  onChange={e => setOrgForm(f => ({ ...f, admin_role_source_key: e.target.value }))}
+                  placeholder="e.g. tenant-admin"
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                <p className="mt-1 text-xs text-gray-400">JWT claim value your IdP places in the roles claim for admin users.</p>
+              </div>
               <div className="flex justify-end gap-3 pt-2">
                 <button type="button" onClick={() => setOrgOpen(false)} className="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
                 <button type="submit" disabled={orgSaving} className="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50">
@@ -328,6 +338,14 @@ export default function TenantsPage() {
                 <input id="nt-dn" type="text" required value={tenantForm.display_name}
                   onChange={e => setTenantForm(f => ({ ...f, display_name: e.target.value }))}
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+              </div>
+              <div>
+                <label htmlFor="nt-arsk" className="block text-sm font-medium text-gray-700 mb-1">Admin Role Source Key</label>
+                <input id="nt-arsk" type="text" required value={tenantForm.admin_role_source_key}
+                  onChange={e => setTenantForm(f => ({ ...f, admin_role_source_key: e.target.value }))}
+                  placeholder="e.g. tenant-admin"
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                <p className="mt-1 text-xs text-gray-400">JWT claim value your IdP places in the roles claim for admin users.</p>
               </div>
               <div>
                 <label htmlFor="nt-env" className="block text-sm font-medium text-gray-700 mb-1">Environment Type</label>
