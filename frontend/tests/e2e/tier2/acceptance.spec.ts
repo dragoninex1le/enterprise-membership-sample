@@ -460,9 +460,16 @@ test.describe.serial('Acceptance', () => {
       }
     }
 
-    await page.getByRole('button', { name: 'Save Permissions' }).click()
-    // Allow time for the save to complete before verifying
-    await page.waitForTimeout(1500)
+    // Only click Save if there are changes — the button is disabled when isDirty=false
+    // (i.e. all permissions were already assigned from a previous run).
+    const saveButton = page.getByRole('button', { name: 'Save Permissions' })
+    if (await saveButton.isEnabled()) {
+      await saveButton.click()
+      // Allow time for the save to complete before verifying
+      await page.waitForTimeout(1500)
+    } else {
+      console.log('  ℹ️ Save Permissions skipped — no changes (permissions already assigned)')
+    }
 
     // Confirm no error state is visible
     await expect(page.locator('.bg-red-50').first()).not.toBeVisible()
