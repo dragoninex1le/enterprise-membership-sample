@@ -32,7 +32,13 @@ else:
     _allowed_origins = ["*"]
     _allow_credentials = False
 
-app.add_middleware(
+# Middleware is applied LIFO — last added = outermost = first to process requests.
+# CORSMiddleware must be outermost so it wraps ALL responses, including early-exit
+# error responses (e.g. 401) from inner middleware.  If PorthContextMiddleware were
+# outermost it would return a 401 without CORS headers and the browser would block it.
+app.add_middleware(PorthContextMiddleware)   # added first → innermost
+
+app.add_middleware(                          # added last  → outermost
     CORSMiddleware,
     allow_origins=_allowed_origins,
     allow_origin_regex=_origin_regex,
@@ -41,8 +47,6 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
     max_age=600,
 )
-
-app.add_middleware(PorthContextMiddleware)
 app.include_router(dashboard.router)
 app.include_router(ar.router)
 app.include_router(ap.router)
