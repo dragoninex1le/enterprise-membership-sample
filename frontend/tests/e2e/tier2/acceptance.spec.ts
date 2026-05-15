@@ -421,9 +421,19 @@ test.describe.serial('Acceptance', () => {
     await modalForm.locator('input[type="text"]').first().fill('controller')
     await modalForm.locator('input[type="text"]').nth(1).fill('Controller — full access to AR/AP and approvals')
     await page.getByRole('button', { name: 'Create' }).click()
+    await page.waitForTimeout(1500)
 
-    // Wait for modal to close and new role to appear in the table
-    await expect(page.getByRole('heading', { name: 'New Role' })).not.toBeVisible({ timeout: 5000 })
+    // Dismiss the New Role modal if still open.
+    // A 409 (role already exists on re-runs) leaves the modal open with an error.
+    // Click Cancel explicitly — same pattern as the org modal: no Escape handler.
+    const newRoleModalVisible = await page.getByRole('heading', { name: 'New Role' }).isVisible()
+    if (newRoleModalVisible) {
+      await page.getByRole('button', { name: 'Cancel' }).click()
+      await page.getByRole('heading', { name: 'New Role' })
+        .waitFor({ state: 'hidden', timeout: 5000 })
+        .catch(() => {})
+    }
+
     const controllerRow = page.getByRole('row').filter({ hasText: 'controller' }).first()
     await expect(controllerRow).toBeVisible({ timeout: 10000 })
 
