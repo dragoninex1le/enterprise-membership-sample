@@ -258,8 +258,10 @@ jobs:
           EOF
 
       # ── Step 7: Bootstrap platform tenant ───────────────────────────────────────
-      # Runs on every main deploy (idempotent — safe to run against live data).
-      # also serves as the post-test reseed when run_api_tests is true, so always()
+      # Runs on every main deploy. Applies platform configuration changes
+      # (permissions upserted, role-permission links regenerated, claim mapping
+      # versioned) while leaving user-created tenants, orgs and users untouched.
+      # Also serves as the post-test reseed when run_api_tests is true, so always()
       # is required to ensure it runs even if the integration tests or cleanup failed.
       - name: Bootstrap platform tenant
         if: always() && github.ref == 'refs/heads/main'
