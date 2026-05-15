@@ -5,6 +5,27 @@ Description: >
   Public example demonstrating porth-common portability.
   Deploys a React SPA to S3/CloudFront backed by the Porth API.
 
+Globals:
+  HttpApi:
+    CorsConfiguration:
+      # Allow requests from any porth-sample subdomain (tenant UIs) and the
+      # apex platform URL. Wildcard subdomain patterns are supported by
+      # API Gateway HTTP API CORS.
+      AllowOrigins:
+        - !Sub "https://${CloudFrontApexAlias}"
+        - "https://*.porth-sample.components-dev.estynsoftware.cloud"
+      AllowHeaders:
+        - Content-Type
+        - Authorization
+      AllowMethods:
+        - GET
+        - POST
+        - PUT
+        - PATCH
+        - DELETE
+        - OPTIONS
+      AllowCredentials: false
+
 Parameters:
   Environment:
     Type: String
