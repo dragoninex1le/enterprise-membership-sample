@@ -1,0 +1,110 @@
+name: Porth SAR POC — install + verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'SAR app semantic version to install'
+        required: true
+        default: '0.0.0-poc'
+      stack_name:
+        description: 'CFN stack name'
+        required: true
+        default: 'porth-sar-poc'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  install-and-verify:
+    runs-on: ubuntu-latest
+    environment: porth-install
+    env:
+      STACK: ${{ inputs.stack_name }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Find published SAR app
+        id: find-app
+        run: |
+          set -euo pipefail
+          APP_ARN=$(aws serverlessrepo list-applications \
+            --query "Applications[?Name=='porth-user-management'].ApplicationId | [0]" \
+            --output text)
+          if [ -z "$APP_ARN" ] || [ "$APP_ARN" = "None" ]; then
+            echo "ERROR: porth-user-management not visible from EMS account — check org-share policy on the publish side."
+            exit 1
+          fi
+          echo "app_arn=$APP_ARN" >> "$GITHUB_OUTPUT"
+          echo "Found SAR app: $APP_ARN"
+
+      - name: Create change set
+        id: change-set
+        run: |
+          set -euo pipefail
+          CHANGE_SET=$(aws serverlessrepo create-cloud-formation-change-set \
+            --application-id "${{ steps.find-app.outputs.app_arn }}" \
+            --semantic-version "${{ inputs.version }}" \
+            --stack-name "$STACK" \
+            --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
+            --parameter-overrides 'Name=Environment,Value=ems-verify' \
+            --query 'ChangeSetId' --output text)
+          echo "change_set=$CHANGE_SET" >> "$GITHUB_OUTPUT"
+          aws cloudformation wait change-set-create-complete --change-set-name "$CHANGE_SET"
+
+      - name: Execute change set
+        run: |
+          set -euo pipefail
+          aws cloudformation execute-change-set --change-set-name "${{ steps.change-set.outputs.change_set }}"
+          # serverlessrepo prefixes the actual stack name with `serverlessrepo-`
+          aws cloudformation wait stack-create-complete --stack-name "serverlessrepo-${STACK}"
+
+      - name: Smoke test — Lambda URL + DDB
+        id: smoke
+        run: |
+          set -euo pipefail
+          URL=$(aws cloudformation describe-stacks --stack-name "serverlessrepo-${STACK}" \
+            --query "Stacks[0].Outputs[?OutputKey=='HelloWorldFnUrl'].OutputValue" --output text)
+          echo "Lambda URL: $URL"
+          curl -fsSL "$URL" | tee response.json
+          grep -q '"message": "porth SAR POC alive"' response.json
+          TABLE=$(aws cloudformation describe-stacks --stack-name "serverlessrepo-${STACK}" \
+            --query "Stacks[0].Outputs[?OutputKey=='HelloWorldTableName'].OutputValue" --output text)
+          echo "DDB table: $TABLE"
+          aws dynamodb describe-table --table-name "$TABLE" >/dev/null
+          {
+            echo "## Porth SAR POC install — smoke test PASS"
+            echo "- **Stack:** \`serverlessrepo-${STACK}\`"
+            echo "- **Lambda URL:** $URL"
+            echo "- **DDB table:** \`$TABLE\`"
+            echo ""
+            echo "### Response body"
+            echo '```json'
+            cat response.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Teardown — stack
+        if: always()
+        run: |
+          set -euo pipefail
+          aws cloudformation delete-stack --stack-name "serverlessrepo-${STACK}" || true
+          aws cloudformation wait stack-delete-complete --stack-name "serverlessrepo-${STACK}" || true
+
+      - name: Teardown — orphaned Retain DDB table (POC only)
+        if: always()
+        # DDB is `Retain` per ADR-Z2. For real Porth installs we *want* this.
+        # For the POC tracer we don't, so explicitly delete it after stack tear-down.
+        run: |
+          set -euo pipefail
+          TABLE_NAME="porth-ems-verify-hello-world"
+          if aws dynamodb describe-table --table-name "$TABLE_NAME" >/dev/null 2>&1; then
+            echo "Deleting retained POC table: $TABLE_NAME"
+            aws dynamodb delete-table --table-name "$TABLE_NAME"
+          else
+            echo "POC table $TABLE_NAME not present — nothing to clean up."
+          fi
