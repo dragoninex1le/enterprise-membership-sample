@@ -11,6 +11,10 @@ on:
         description: 'CFN stack name (must match ^serverlessrepo-porth-sar-[a-zA-Z0-9-]+$)'
         required: true
         default: 'serverlessrepo-porth-sar-poc'
+      application_arn:
+        description: 'SAR app ARN (out-of-band from publisher). Cross-account-shared SAR apps cannot be discovered via list-applications — that API only returns apps owned by the calling account.'
+        required: true
+        default: 'arn:aws:serverlessrepo:us-east-1:084847995635:applications/porth-user-management-poc'
 
 permissions:
   id-token: write
@@ -33,6 +37,11 @@ jobs:
           STACK_INPUT="${{ inputs.stack_name }}"
           if [[ ! "$STACK_INPUT" =~ ^serverlessrepo-porth-sar-[a-zA-Z0-9-]+$ ]]; then
             echo "::error::Invalid stack_name input: $STACK_INPUT — must match ^serverlessrepo-porth-sar-[a-zA-Z0-9-]+$"
+            exit 1
+          fi
+          APP_ARN_INPUT="${{ inputs.application_arn }}"
+          if [[ ! "$APP_ARN_INPUT" =~ ^arn:aws:serverlessrepo:[a-z0-9-]+:[0-9]+:applications/[a-zA-Z0-9_-]+$ ]]; then
+            echo "::error::Invalid application_arn input: $APP_ARN_INPUT — must be a SAR application ARN"
             exit 1
           fi
 
@@ -80,22 +89,13 @@ jobs:
               ;;
           esac
 
-      - name: Find published SAR app
-        id: find-app
-        run: |
-          set -euo pipefail
-          APP_ARN=$(aws serverlessrepo list-applications \
-            --query "Applications[?Name=='porth-user-management-poc'].ApplicationId | [0]" \
-            --output text)
-          if [ -z "$APP_ARN" ] || [ "$APP_ARN" = "None" ]; then
-            echo "ERROR: porth-user-management-poc not visible from EMS account — check org-share policy on the publish side."
-            exit 1
-          fi
-          echo "app_arn=$APP_ARN" >> "$GITHUB_OUTPUT"
-          echo "Found SAR app: $APP_ARN"
-
       - name: Create change set
         id: change-set
+        # Use the operator-supplied SAR app ARN directly. Org-shared SAR apps
+        # cannot be discovered via list-applications (that only returns apps
+        # owned by the caller). The publisher must communicate the ARN out-of-band
+        # (release notes, doc, etc.); for real Porth installs the ARN goes into
+        # the receiving product's release-config.
         run: |
           set -euo pipefail
           # serverlessrepo create-cloud-formation-change-set takes the
@@ -104,7 +104,7 @@ jobs:
           # strip the prefix for the SAR call.
           SAR_STACK_NAME="${STACK#serverlessrepo-}"
           CHANGE_SET=$(aws serverlessrepo create-cloud-formation-change-set \
-            --application-id "${{ steps.find-app.outputs.app_arn }}" \
+            --application-id "${{ inputs.application_arn }}" \
             --semantic-version "${{ inputs.version }}" \
             --stack-name "$SAR_STACK_NAME" \
             --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
