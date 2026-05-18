@@ -15,10 +15,6 @@ on:
         description: 'SAR app ARN (out-of-band from publisher). Cross-account-shared SAR apps cannot be discovered via list-applications — that API only returns apps owned by the calling account.'
         required: true
         default: 'arn:aws:serverlessrepo:us-east-1:084847995635:applications/porth-user-management-poc'
-      cfn_execution_role_arn:
-        description: 'CFN service role ARN that the change set will execute under. Holds resource-creation perms (Lambda/DDB/IAM) via the porth-resource-management policy. porth-install-role only needs iam:PassRole on this.'
-        required: true
-        default: 'arn:aws:iam::195950944420:role/porth-cfn-execution-role'
 
 permissions:
   id-token: write
@@ -46,11 +42,6 @@ jobs:
           APP_ARN_INPUT="${{ inputs.application_arn }}"
           if [[ ! "$APP_ARN_INPUT" =~ ^arn:aws:serverlessrepo:[a-z0-9-]+:[0-9]+:applications/[a-zA-Z0-9_-]+$ ]]; then
             echo "::error::Invalid application_arn input: $APP_ARN_INPUT — must be a SAR application ARN"
-            exit 1
-          fi
-          CFN_ROLE_INPUT="${{ inputs.cfn_execution_role_arn }}"
-          if [[ ! "$CFN_ROLE_INPUT" =~ ^arn:aws:iam::[0-9]+:role/porth-cfn-execution-role$ ]]; then
-            echo "::error::Invalid cfn_execution_role_arn input: $CFN_ROLE_INPUT — must match ^arn:aws:iam::[0-9]+:role/porth-cfn-execution-role$"
             exit 1
           fi
 
@@ -152,9 +143,10 @@ jobs:
         # before propagating the failure. Without this, the always-on teardown
         # step deletes the stack and takes the change-set evidence with it.
         # PORTH-459 architecture: --role-arn passes the CFN service role
-        # (porth-cfn-execution-role) so CFN executes the change set under
-        # that role's permissions, not the calling porth-install-role's.
-        # porth-install-role needs iam:PassRole on this target ARN (delta #22).
+        # (porth-cfn-execution-role via env var AWS_CFN_EXECUTION_ROLE_ARN) so
+        # CFN executes the change set under that role's resource-creation
+        # permissions, not the calling porth-install-role's. porth-install-role
+        # needs iam:PassRole on this target ARN (delta #22).
         run: |
           set -euo pipefail
           # serverlessrepo create-cloud-formation-change-set takes the
@@ -168,7 +160,7 @@ jobs:
             --stack-name "$SAR_STACK_NAME" \
             --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
             --parameter-overrides 'Name=Environment,Value=ems-verify' \
-            --role-arn "${{ inputs.cfn_execution_role_arn }}" \
+            --role-arn "${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}" \
             --query 'ChangeSetId' --output text)
           echo "change_set=$CHANGE_SET" >> "$GITHUB_OUTPUT"
           echo "Created change set: $CHANGE_SET"
