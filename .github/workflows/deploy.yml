@@ -57,7 +57,7 @@ jobs:
           MISSING=()
           [ -z "${{ secrets.ACM_CERTIFICATE_ARN }}" ]        && MISSING+=("ACM_CERTIFICATE_ARN")
           [ -z "${{ secrets.GH_PAT }}" ]                    && MISSING+=("GH_PAT")
-          [ -z "${{ secrets.AWS_ROLE_ARN }}" ]              && MISSING+=("AWS_ROLE_ARN")
+          [ -z "${{ vars.AWS_ROLE_ARN }}" ]                && MISSING+=("AWS_ROLE_ARN")
           [ -z "${{ secrets.PLATFORM_AUTH0_DOMAIN }}" ]     && MISSING+=("PLATFORM_AUTH0_DOMAIN")
           [ -z "${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}" ]  && MISSING+=("PLATFORM_AUTH0_CLIENT_ID")
           [ -z "${{ secrets.PORTH_AUTH_TEST_TOKEN }}" ]     && MISSING+=("PORTH_AUTH_TEST_TOKEN")
@@ -70,7 +70,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Resolve porth-components stack outputs
@@ -88,6 +88,7 @@ jobs:
           echo "PORTH_PERMISSIONS_TABLE=$(get_output PermissionsTableName)"                    >> $GITHUB_ENV
           echo "PORTH_ROLES_TABLE=$(get_output RolesTableName)"                                >> $GITHUB_ENV
           echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$(get_output ClaimMappingConfigsTableName)"  >> $GITHUB_ENV
+          echo "PORTH_AUTHORIZER_ARN=$(get_output AuthorizerFunctionArn)"                      >> $GITHUB_ENV
           echo "SAM_ARTIFACTS_BUCKET=porth-sam-artifacts-${ACCOUNT_ID}"                       >> $GITHUB_ENV
 
       - name: Resolve sample app stack outputs
@@ -128,6 +129,7 @@ jobs:
               PorthApiUrl=${{ env.PORTH_API_URL }} \
               AcmCertificateArn=${{ secrets.ACM_CERTIFICATE_ARN }} \
               PorthEnvironment=dev \
+              PorthAuthorizerArn=${{ env.PORTH_AUTHORIZER_ARN }} \
             --no-fail-on-empty-changeset
 
       - name: Resolve stack outputs
