@@ -142,6 +142,11 @@ jobs:
         # describe-change-set and print Status+StatusReason+ExecutionStatus
         # before propagating the failure. Without this, the always-on teardown
         # step deletes the stack and takes the change-set evidence with it.
+        # PORTH-459 architecture: --role-arn passes the CFN service role
+        # (porth-cfn-execution-role via env var AWS_CFN_EXECUTION_ROLE_ARN) so
+        # CFN executes the change set under that role's resource-creation
+        # permissions, not the calling porth-install-role's. porth-install-role
+        # needs iam:PassRole on this target ARN (delta #22).
         run: |
           set -euo pipefail
           # serverlessrepo create-cloud-formation-change-set takes the
@@ -155,6 +160,7 @@ jobs:
             --stack-name "$SAR_STACK_NAME" \
             --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
             --parameter-overrides 'Name=Environment,Value=ems-verify' \
+            --role-arn "${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}" \
             --query 'ChangeSetId' --output text)
           echo "change_set=$CHANGE_SET" >> "$GITHUB_OUTPUT"
           echo "Created change set: $CHANGE_SET"
