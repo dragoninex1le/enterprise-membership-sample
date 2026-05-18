@@ -56,7 +56,7 @@ jobs:
       - name: Validate required secrets
         run: |
           MISSING=()
-          [ -z "${{ secrets.ACM_CERTIFICATE_ARN }}" ]        && MISSING+=("ACM_CERTIFICATE_ARN")
+          [ -z "${{ vars.ACM_CERTIFICATE_ARN }}" ]            && MISSING+=("ACM_CERTIFICATE_ARN")
           [ -z "${{ secrets.GH_PAT }}" ]                    && MISSING+=("GH_PAT")
           [ -z "${{ vars.AWS_ROLE_ARN }}" ]                && MISSING+=("AWS_ROLE_ARN")
           [ -z "${{ secrets.PLATFORM_AUTH0_DOMAIN }}" ]     && MISSING+=("PLATFORM_AUTH0_DOMAIN")
@@ -128,7 +128,7 @@ jobs:
             --parameter-overrides \
               Environment=dev \
               PorthApiUrl=${{ env.PORTH_API_URL }} \
-              AcmCertificateArn=${{ secrets.ACM_CERTIFICATE_ARN }} \
+              AcmCertificateArn=${{ vars.ACM_CERTIFICATE_ARN }} \
               PorthEnvironment=dev \
               PorthAuthorizerArn=${{ env.PORTH_AUTHORIZER_ARN }} \
             --no-fail-on-empty-changeset
