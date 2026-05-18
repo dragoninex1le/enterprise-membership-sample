@@ -50,6 +50,48 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
+      - name: Diagnostic — caller identity (PORTH-459 SAR debug)
+        # Confirms which account context this job is actually running under.
+        run: |
+          set -euo pipefail
+          aws sts get-caller-identity
+
+      - name: Diagnostic — SAR get-application (PORTH-459 SAR debug)
+        # Confirms the SAR app is visible to this consumer account and exposes
+        # the TemplateUrl that SAR has cached. If this fails with AccessDenied,
+        # the issue is at the SAR application-policy level, not S3.
+        id: sar-diag
+        run: |
+          set -euo pipefail
+          echo "Calling serverlessrepo get-application..."
+          GET_OUT=$(aws serverlessrepo get-application \
+            --application-id "${{ inputs.application_arn }}" \
+            --semantic-version "${{ inputs.version }}" \
+            --output json) || { echo "::error::get-application FAILED"; exit 1; }
+          echo "$GET_OUT" | jq '.'
+          TEMPLATE_URL=$(echo "$GET_OUT" | jq -r '.Version.TemplateUrl // empty')
+          echo "TemplateUrl: $TEMPLATE_URL"
+          echo "template_url=$TEMPLATE_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Diagnostic — probe TemplateUrl (PORTH-459 SAR debug)
+        # If the TemplateUrl is an S3 URL, try to HEAD it. If it's an HTTPS
+        # presigned URL, curl it. Whatever comes back will tell us whether
+        # the URL is reachable from the consumer role context.
+        if: steps.sar-diag.outputs.template_url != ''
+        run: |
+          set -euo pipefail
+          URL="${{ steps.sar-diag.outputs.template_url }}"
+          echo "Probing: $URL"
+          if [[ "$URL" =~ ^s3:// ]]; then
+            BUCKET=$(echo "$URL" | sed -E 's|^s3://([^/]+)/.*|\1|')
+            KEY=$(echo "$URL" | sed -E 's|^s3://[^/]+/(.+)|\1|')
+            echo "S3 URL: bucket=$BUCKET key=$KEY"
+            aws s3api head-object --bucket "$BUCKET" --key "$KEY" || echo "::warning::head-object failed"
+          elif [[ "$URL" =~ ^https?:// ]]; then
+            echo "HTTPS URL — trying curl HEAD"
+            curl -sIv -o /dev/null "$URL" 2>&1 | head -20 || true
+          fi
+
       - name: Pre-flight stack-state recovery
         # MF7: ported from X-01's porth-pr-stack-provision.yml settle-wait pattern
         # plus the X-01.1 follow-up — delete-and-recreate on recoverable-failure
