@@ -119,18 +119,23 @@ jobs:
 
       - name: SAM deploy (infrastructure)
         run: |
+          PARAM_OVERRIDES=(
+            "Environment=dev"
+            "PorthApiUrl=${{ env.PORTH_API_URL }}"
+            "AcmCertificateArn=${{ vars.ACM_CERTIFICATE_ARN }}"
+            "PorthEnvironment=dev"
+          )
+          # Only pass PorthAuthorizerArn when non-empty — SAM CLI rejects blank Key= values
+          if [ -n "${{ env.PORTH_AUTHORIZER_ARN }}" ]; then
+            PARAM_OVERRIDES+=("PorthAuthorizerArn=${{ env.PORTH_AUTHORIZER_ARN }}")
+          fi
           sam deploy \
             --stack-name ${{ env.SAM_STACK_NAME }} \
             --region ${{ env.AWS_REGION }} \
             --capabilities CAPABILITY_IAM \
             --s3-bucket ${{ env.SAM_ARTIFACTS_BUCKET }} \
             --s3-prefix ${{ env.SAM_STACK_NAME }} \
-            --parameter-overrides \
-              Environment=dev \
-              PorthApiUrl=${{ env.PORTH_API_URL }} \
-              AcmCertificateArn=${{ vars.ACM_CERTIFICATE_ARN }} \
-              PorthEnvironment=dev \
-              PorthAuthorizerArn=${{ env.PORTH_AUTHORIZER_ARN }} \
+            --parameter-overrides "${PARAM_OVERRIDES[@]}" \
             --no-fail-on-empty-changeset
 
       - name: Resolve stack outputs
