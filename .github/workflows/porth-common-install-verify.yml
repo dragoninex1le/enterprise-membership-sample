@@ -1,0 +1,79 @@
+name: porth-common — install + verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'porth_common version to verify'
+        required: true
+        default: '0.0.1'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  install-and-verify:
+    runs-on: ubuntu-latest
+    environment: porth-install
+
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install porth_common from CodeArtifact
+        run: |
+          set -euo pipefail
+          ENDPOINT=$(aws codeartifact get-repository-endpoint \
+            --domain porth \
+            --domain-owner 084847995635 \
+            --repository porth-py \
+            --format pypi \
+            --query repositoryEndpoint \
+            --output text)
+          TOKEN=$(aws codeartifact get-authorization-token \
+            --domain porth \
+            --domain-owner 084847995635 \
+            --query authorizationToken \
+            --output text)
+          # CodeArtifact as extra-index so transitive deps still resolve from PyPI
+          pip install \
+            --extra-index-url "https://aws:${TOKEN}@${ENDPOINT#https://}simple/" \
+            "porth_common==${{ inputs.version }}"
+
+      - name: Smoke test — verify public API surface
+        run: |
+          python - <<'PYEOF'
+          import porth_common
+          expected = "${{ inputs.version }}"
+          assert porth_common.__version__ == expected, \
+              f"Version mismatch: got {porth_common.__version__}, expected {expected}"
+          from porth_common import Tenant, Role, Permission, User
+          from porth_common import RequestAuthContext, parse_auth_context
+          print(f"porth_common=={porth_common.__version__} — all exports verified")
+          for name, obj in [
+              ("Tenant", Tenant), ("Role", Role), ("Permission", Permission),
+              ("User", User), ("RequestAuthContext", RequestAuthContext),
+              ("parse_auth_context", parse_auth_context),
+          ]:
+              print(f"  {name}: {obj}")
+          PYEOF
+
+      - name: Summary
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          ICON="✅"
+          [ "$STATUS" != "success" ] && ICON="❌"
+          {
+            echo "## ${ICON} porth-common install verify — ${STATUS^^}"
+            echo "- **Version:** \`${{ inputs.version }}\`"
+            echo "- **Repository:** \`porth-py\` (domain: \`porth\`, account: \`084847995635\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
