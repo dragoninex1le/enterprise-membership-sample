@@ -131,37 +131,70 @@ jobs:
               ;;
           esac
 
-      - name: Create change set
-        id: change-set
-        # Use the operator-supplied SAR app ARN directly. Org-shared SAR apps
-        # cannot be discovered via list-applications (that only returns apps
-        # owned by the caller). The publisher must communicate the ARN out-of-band
-        # (release notes, doc, etc.); for real Porth installs the ARN goes into
-        # the receiving product's release-config.
-        # PORTH-459 hardening: if the waiter exits non-zero, immediately
-        # describe-change-set and print Status+StatusReason+ExecutionStatus
-        # before propagating the failure. Without this, the always-on teardown
-        # step deletes the stack and takes the change-set evidence with it.
-        # PORTH-459 architecture: --role-arn passes the CFN service role
-        # (porth-cfn-execution-role via env var AWS_CFN_EXECUTION_ROLE_ARN) so
-        # CFN executes the change set under that role's resource-creation
-        # permissions, not the calling porth-install-role's. porth-install-role
-        # needs iam:PassRole on this target ARN (delta #22).
+      - name: Render SAR template (step 1 of 2)
+        id: render-template
+        # PORTH-459: SAR's create-cloud-formation-change-set does NOT accept
+        # --role-arn (CLI rejects it as Unknown option — confirmed in run
+        # 26009251590). The documented pattern for SAR consumers that need a
+        # CFN service role:
+        #   1. serverlessrepo create-cloud-formation-template → TemplateUrl
+        #   2. cloudformation create-change-set --template-url <that> --role-arn
+        #
+        # create-cloud-formation-template is async: TemplateUrl is empty until
+        # Status transitions from PREPARING → ACTIVE. Poll until ACTIVE.
         run: |
           set -euo pipefail
-          # serverlessrepo create-cloud-formation-change-set takes the
-          # *unprefixed* stack name; SAR adds the `serverlessrepo-` prefix
-          # itself. Operator-supplied STACK is the full prefixed name, so
-          # strip the prefix for the SAR call.
           SAR_STACK_NAME="${STACK#serverlessrepo-}"
-          CHANGE_SET=$(aws serverlessrepo create-cloud-formation-change-set \
+          echo "Calling serverlessrepo create-cloud-formation-template..."
+          CREATE_OUT=$(aws serverlessrepo create-cloud-formation-template \
             --application-id "${{ inputs.application_arn }}" \
             --semantic-version "${{ inputs.version }}" \
-            --stack-name "$SAR_STACK_NAME" \
+            --output json)
+          TEMPLATE_ID=$(echo "$CREATE_OUT" | jq -r '.TemplateId')
+          echo "TemplateId: $TEMPLATE_ID"
+
+          # Poll until ACTIVE (max ~60s; typical < 5s)
+          for i in $(seq 1 30); do
+            GET_OUT=$(aws serverlessrepo get-cloud-formation-template \
+              --application-id "${{ inputs.application_arn }}" \
+              --template-id "$TEMPLATE_ID" \
+              --output json)
+            STATUS=$(echo "$GET_OUT" | jq -r '.Status')
+            if [ "$STATUS" = "ACTIVE" ]; then
+              TEMPLATE_URL=$(echo "$GET_OUT" | jq -r '.TemplateUrl')
+              echo "Template ACTIVE after ${i}s. TemplateUrl: $TEMPLATE_URL"
+              echo "template_url=$TEMPLATE_URL" >> "$GITHUB_OUTPUT"
+              exit 0
+            elif [ "$STATUS" = "EXPIRED" ]; then
+              echo "::error::Template EXPIRED before becoming ACTIVE"
+              exit 1
+            fi
+            echo "  (attempt $i) Status=$STATUS — sleeping 2s"
+            sleep 2
+          done
+          echo "::error::Template did not become ACTIVE within 60s"
+          exit 1
+
+      - name: Create change set (step 2 of 2)
+        id: change-set
+        # Use cloudformation create-change-set directly (not SAR's wrapper)
+        # so we can pass --role-arn for the CFN service role.
+        # PORTH-459 hardening: waiter+diagnose pattern preserves StatusReason
+        # capture from PR #40 — needed because the always-on teardown wipes
+        # change-set evidence otherwise.
+        run: |
+          set -euo pipefail
+          ACTION="${{ steps.preflight.outputs.stack_action }}"
+          CHANGE_SET_NAME="porth-sar-poc-$(date -u +%Y%m%d-%H%M%S)"
+          CHANGE_SET=$(aws cloudformation create-change-set \
+            --stack-name "$STACK" \
+            --change-set-name "$CHANGE_SET_NAME" \
+            --change-set-type "$ACTION" \
+            --template-url "${{ steps.render-template.outputs.template_url }}" \
             --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
-            --parameter-overrides 'Name=Environment,Value=ems-verify' \
+            --parameters 'ParameterKey=Environment,ParameterValue=ems-verify' \
             --role-arn "${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}" \
-            --query 'ChangeSetId' --output text)
+            --query 'Id' --output text)
           echo "change_set=$CHANGE_SET" >> "$GITHUB_OUTPUT"
           echo "Created change set: $CHANGE_SET"
 
