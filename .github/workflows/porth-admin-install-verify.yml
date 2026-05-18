@@ -1,0 +1,84 @@
+name: porth-admin — install + verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '@estyn/porth-admin version to verify'
+        required: true
+        default: '0.0.1'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  install-and-verify:
+    runs-on: ubuntu-latest
+    environment: porth-install
+
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Configure npm — @estyn scope → CodeArtifact, public deps → npmjs
+        run: |
+          set -euo pipefail
+          ENDPOINT=$(aws codeartifact get-repository-endpoint \
+            --domain porth \
+            --domain-owner 084847995635 \
+            --repository porth-npm \
+            --format npm \
+            --query repositoryEndpoint \
+            --output text)
+          TOKEN=$(aws codeartifact get-authorization-token \
+            --domain porth \
+            --domain-owner 084847995635 \
+            --query authorizationToken \
+            --output text)
+          # Scope-only registry: @estyn/* via CodeArtifact, everything else via public npmjs
+          npm config set "@estyn:registry" "$ENDPOINT"
+          npm config set "${ENDPOINT#https:}:_authToken" "$TOKEN"
+
+      - name: Install @estyn/porth-admin
+        run: npm install "@estyn/porth-admin@${{ inputs.version }}"
+
+      - name: Smoke test — verify subpath exports
+        run: |
+          node --input-type=module <<'JSEOF'
+          const { PorthProvider, useClient } = await import('@estyn/porth-admin/client');
+          const { useTenants, useCreateTenant } = await import('@estyn/porth-admin/tenants');
+          const { useRoles, useCreateRole } = await import('@estyn/porth-admin/roles');
+          const { usePermissions } = await import('@estyn/porth-admin/permissions');
+
+          const checks = {
+            PorthProvider, useClient,
+            useTenants, useCreateTenant,
+            useRoles, useCreateRole,
+            usePermissions,
+          };
+          for (const [name, val] of Object.entries(checks)) {
+            if (val === undefined || val === null) throw new Error(`${name} is undefined`);
+            console.log(`  ${name}: OK (${typeof val})`);
+          }
+          console.log('\n@estyn/porth-admin subpath exports — all verified');
+          JSEOF
+
+      - name: Summary
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          ICON="✅"
+          [ "$STATUS" != "success" ] && ICON="❌"
+          {
+            echo "## ${ICON} porth-admin install verify — ${STATUS^^}"
+            echo "- **Version:** \`${{ inputs.version }}\`"
+            echo "- **Registry:** \`porth-npm\` (domain: \`porth\`, account: \`084847995635\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
