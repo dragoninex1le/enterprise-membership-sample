@@ -180,14 +180,34 @@ jobs:
         # MF8: select the right terminal-state waiter based on the pre-flight
         # action. `wait stack-create-complete` hangs forever on UPDATE re-runs
         # because UPDATE never reaches CREATE_COMPLETE.
+        # PORTH-459 hardening: same waiter+diagnose pattern as Create change set.
+        # On waiter failure, print the most-recent FAILED stack events
+        # (LogicalResourceId, ResourceStatus, ResourceStatusReason) before the
+        # always-on teardown wipes them. Without this we just see a generic
+        # "ROLLBACK_COMPLETE" with no clue which resource failed or why.
         run: |
           set -euo pipefail
           aws cloudformation execute-change-set --change-set-name "${{ steps.change-set.outputs.change_set }}"
           ACTION="${{ steps.preflight.outputs.stack_action }}"
+
+          set +e
           if [ "$ACTION" = "CREATE" ]; then
             aws cloudformation wait stack-create-complete --stack-name "$STACK"
           else
             aws cloudformation wait stack-update-complete --stack-name "$STACK"
+          fi
+          WAIT_RC=$?
+          set -e
+
+          if [ "$WAIT_RC" -ne 0 ]; then
+            echo "::warning::Stack waiter failed (rc=$WAIT_RC) — capturing failed stack events before teardown"
+            echo "----- describe-stack-events (FAILED only, most-recent 20) -----"
+            aws cloudformation describe-stack-events \
+              --stack-name "$STACK" \
+              --query 'StackEvents[?contains(ResourceStatus, `FAILED`)] | [:20].{Time:Timestamp,LogicalId:LogicalResourceId,Type:ResourceType,Status:ResourceStatus,Reason:ResourceStatusReason}' \
+              --output json || echo "describe-stack-events itself failed"
+            echo "----- end describe-stack-events -----"
+            exit "$WAIT_RC"
           fi
 
       - name: Smoke test — Lambda URL + DDB
