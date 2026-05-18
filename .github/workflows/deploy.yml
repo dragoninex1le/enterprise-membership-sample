@@ -30,6 +30,7 @@ jobs:
   deploy:
     name: Build and Deploy
     runs-on: ubuntu-latest
+    environment: porth-install
 
     steps:
       - uses: actions/checkout@v4
@@ -83,7 +84,7 @@ jobs:
               --output text
           }
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          echo "PORTH_API_URL=$(get_output PorthApiUrl)"                                       >> $GITHUB_ENV
+          echo "PORTH_API_URL=${{ vars.PORTH_API_URL }}"                                        >> $GITHUB_ENV
           echo "PORTH_TENANTS_TABLE=$(get_output TenantsTableName)"                            >> $GITHUB_ENV
           echo "PORTH_PERMISSIONS_TABLE=$(get_output PermissionsTableName)"                    >> $GITHUB_ENV
           echo "PORTH_ROLES_TABLE=$(get_output RolesTableName)"                                >> $GITHUB_ENV

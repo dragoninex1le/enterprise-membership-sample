@@ -18,6 +18,7 @@ permissions:
 jobs:
   e2e:
     runs-on: ubuntu-latest
+    environment: porth-install
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,9 +59,9 @@ jobs:
         run: npx playwright test tests/e2e/tier2/
         working-directory: frontend
         env:
-          PLAYWRIGHT_BASE_URL: ${{ secrets.PLAYWRIGHT_BASE_URL }}
-          PORTH_PLATFORM_BASE_URL: ${{ secrets.PORTH_PLATFORM_BASE_URL }}
-          PORTH_API_URL: ${{ secrets.PORTH_API_URL }}
+          PLAYWRIGHT_BASE_URL: ${{ vars.PLAYWRIGHT_BASE_URL }}
+          PORTH_PLATFORM_BASE_URL: ${{ vars.PORTH_PLATFORM_BASE_URL }}
+          PORTH_API_URL: ${{ vars.PORTH_API_URL }}
           PORTH_AUTH_TEST_TOKEN: ${{ secrets.PORTH_AUTH_TEST_TOKEN }}
           PORTH_PLATFORM_ADMIN_EMAIL: ${{ secrets.PORTH_PLATFORM_ADMIN_EMAIL }}
           PORTH_PLATFORM_ADMIN_PASSWORD: ${{ secrets.PORTH_PLATFORM_ADMIN_PASSWORD }}
