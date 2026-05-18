@@ -138,6 +138,10 @@ jobs:
         # owned by the caller). The publisher must communicate the ARN out-of-band
         # (release notes, doc, etc.); for real Porth installs the ARN goes into
         # the receiving product's release-config.
+        # PORTH-459 hardening: if the waiter exits non-zero, immediately
+        # describe-change-set and print Status+StatusReason+ExecutionStatus
+        # before propagating the failure. Without this, the always-on teardown
+        # step deletes the stack and takes the change-set evidence with it.
         run: |
           set -euo pipefail
           # serverlessrepo create-cloud-formation-change-set takes the
@@ -153,7 +157,24 @@ jobs:
             --parameter-overrides 'Name=Environment,Value=ems-verify' \
             --query 'ChangeSetId' --output text)
           echo "change_set=$CHANGE_SET" >> "$GITHUB_OUTPUT"
+          echo "Created change set: $CHANGE_SET"
+
+          # Wait, but capture exit code so we can diagnose on failure.
+          set +e
           aws cloudformation wait change-set-create-complete --change-set-name "$CHANGE_SET"
+          WAIT_RC=$?
+          set -e
+
+          if [ "$WAIT_RC" -ne 0 ]; then
+            echo "::warning::Waiter failed (rc=$WAIT_RC) — capturing change-set details before teardown"
+            echo "----- describe-change-set output -----"
+            aws cloudformation describe-change-set \
+              --change-set-name "$CHANGE_SET" \
+              --query '{Status:Status,StatusReason:StatusReason,ExecutionStatus:ExecutionStatus}' \
+              --output json || echo "describe-change-set itself failed"
+            echo "----- end describe-change-set -----"
+            exit "$WAIT_RC"
+          fi
 
       - name: Execute change set
         # MF8: select the right terminal-state waiter based on the pre-flight
