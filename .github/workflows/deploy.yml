@@ -30,6 +30,7 @@ jobs:
   deploy:
     name: Build and Deploy
     runs-on: ubuntu-latest
+    environment: porth-install
 
     steps:
       - uses: actions/checkout@v4
@@ -55,9 +56,9 @@ jobs:
       - name: Validate required secrets
         run: |
           MISSING=()
-          [ -z "${{ secrets.ACM_CERTIFICATE_ARN }}" ]        && MISSING+=("ACM_CERTIFICATE_ARN")
+          [ -z "${{ vars.ACM_CERTIFICATE_ARN }}" ]            && MISSING+=("ACM_CERTIFICATE_ARN")
           [ -z "${{ secrets.GH_PAT }}" ]                    && MISSING+=("GH_PAT")
-          [ -z "${{ secrets.AWS_ROLE_ARN }}" ]              && MISSING+=("AWS_ROLE_ARN")
+          [ -z "${{ vars.AWS_ROLE_ARN }}" ]                && MISSING+=("AWS_ROLE_ARN")
           [ -z "${{ secrets.PLATFORM_AUTH0_DOMAIN }}" ]     && MISSING+=("PLATFORM_AUTH0_DOMAIN")
           [ -z "${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}" ]  && MISSING+=("PLATFORM_AUTH0_CLIENT_ID")
           [ -z "${{ secrets.PORTH_AUTH_TEST_TOKEN }}" ]     && MISSING+=("PORTH_AUTH_TEST_TOKEN")
@@ -70,7 +71,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Resolve porth-components stack outputs
@@ -82,13 +83,12 @@ jobs:
               --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
               --output text
           }
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          echo "PORTH_API_URL=$(get_output PorthApiUrl)"                                       >> $GITHUB_ENV
+          echo "PORTH_API_URL=${{ vars.PORTH_API_URL }}"                                        >> $GITHUB_ENV
           echo "PORTH_TENANTS_TABLE=$(get_output TenantsTableName)"                            >> $GITHUB_ENV
           echo "PORTH_PERMISSIONS_TABLE=$(get_output PermissionsTableName)"                    >> $GITHUB_ENV
           echo "PORTH_ROLES_TABLE=$(get_output RolesTableName)"                                >> $GITHUB_ENV
           echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$(get_output ClaimMappingConfigsTableName)"  >> $GITHUB_ENV
-          echo "SAM_ARTIFACTS_BUCKET=porth-sam-artifacts-${ACCOUNT_ID}"                       >> $GITHUB_ENV
+          echo "PORTH_AUTHORIZER_ARN=$(get_output AuthorizerFunctionArn)"                      >> $GITHUB_ENV
 
       - name: Resolve sample app stack outputs
         run: |
@@ -117,17 +117,22 @@ jobs:
 
       - name: SAM deploy (infrastructure)
         run: |
+          PARAM_OVERRIDES=(
+            "Environment=dev"
+            "PorthApiUrl=${{ env.PORTH_API_URL }}"
+            "AcmCertificateArn=${{ vars.ACM_CERTIFICATE_ARN }}"
+            "PorthEnvironment=dev"
+          )
+          # Only pass PorthAuthorizerArn when non-empty — SAM CLI rejects blank Key= values
+          if [ -n "${{ env.PORTH_AUTHORIZER_ARN }}" ]; then
+            PARAM_OVERRIDES+=("PorthAuthorizerArn=${{ env.PORTH_AUTHORIZER_ARN }}")
+          fi
           sam deploy \
             --stack-name ${{ env.SAM_STACK_NAME }} \
             --region ${{ env.AWS_REGION }} \
             --capabilities CAPABILITY_IAM \
-            --s3-bucket ${{ env.SAM_ARTIFACTS_BUCKET }} \
-            --s3-prefix ${{ env.SAM_STACK_NAME }} \
-            --parameter-overrides \
-              Environment=dev \
-              PorthApiUrl=${{ env.PORTH_API_URL }} \
-              AcmCertificateArn=${{ secrets.ACM_CERTIFICATE_ARN }} \
-              PorthEnvironment=dev \
+            --resolve-s3 \
+            --parameter-overrides "${PARAM_OVERRIDES[@]}" \
             --no-fail-on-empty-changeset
 
       - name: Resolve stack outputs

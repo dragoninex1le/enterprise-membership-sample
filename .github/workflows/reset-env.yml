@@ -27,6 +27,7 @@ jobs:
   reset:
     name: Reset Dev Environment
     runs-on: ubuntu-latest
+    environment: porth-install
 
     steps:
       - uses: actions/checkout@v4
@@ -57,7 +58,7 @@ jobs:
             --stack-name porth-qa-tools \
             --query "Stacks[0].Outputs[?OutputKey=='QaCleanupFunctionArn'].OutputValue" \
             --output text)
-          echo "PORTH_API_URL=$(get_porth PorthApiUrl)"                                       >> $GITHUB_ENV
+          echo "PORTH_API_URL=${{ vars.PORTH_API_URL }}"                                        >> $GITHUB_ENV
           echo "PORTH_TENANTS_TABLE=$(get_porth TenantsTableName)"                            >> $GITHUB_ENV
           echo "PORTH_PERMISSIONS_TABLE=$(get_porth PermissionsTableName)"                    >> $GITHUB_ENV
           echo "PORTH_ROLES_TABLE=$(get_porth RolesTableName)"                                >> $GITHUB_ENV

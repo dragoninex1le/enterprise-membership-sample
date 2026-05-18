@@ -16,6 +16,7 @@ jobs:
   bootstrap:
     name: Seed platform org, tenant, roles and permissions
     runs-on: ubuntu-latest
+    environment: porth-install
 
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +41,7 @@ jobs:
               --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
               --output text
           }
-          echo "PORTH_API_URL=$(get_output PorthApiUrl)"                                       >> $GITHUB_ENV
+          echo "PORTH_API_URL=${{ vars.PORTH_API_URL }}"                                        >> $GITHUB_ENV
           echo "PORTH_PERMISSIONS_TABLE=$(get_output PermissionsTableName)"                    >> $GITHUB_ENV
           echo "PORTH_ROLES_TABLE=$(get_output RolesTableName)"                                >> $GITHUB_ENV
           echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$(get_output ClaimMappingConfigsTableName)"  >> $GITHUB_ENV
