@@ -30,6 +30,7 @@ jobs:
   deploy:
     name: Build and Deploy
     runs-on: ubuntu-latest
+    environment: porth-install
 
     steps:
       - uses: actions/checkout@v4
@@ -75,20 +76,33 @@ jobs:
 
       - name: Resolve porth-components stack outputs
         run: |
+          # Attempt to resolve from porth-components stack in current account.
+          # In EMS account, porth-components stack is not present — fall back to
+          # the PORTH_API_URL env var set in the GitHub environment.
           STACK=porth-components
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
           get_output() {
             aws cloudformation describe-stacks \
               --stack-name "$STACK" \
               --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
-              --output text
+              --output text 2>/dev/null || echo ""
           }
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          echo "PORTH_API_URL=$(get_output PorthApiUrl)"                                       >> $GITHUB_ENV
-          echo "PORTH_TENANTS_TABLE=$(get_output TenantsTableName)"                            >> $GITHUB_ENV
-          echo "PORTH_PERMISSIONS_TABLE=$(get_output PermissionsTableName)"                    >> $GITHUB_ENV
-          echo "PORTH_ROLES_TABLE=$(get_output RolesTableName)"                                >> $GITHUB_ENV
-          echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$(get_output ClaimMappingConfigsTableName)"  >> $GITHUB_ENV
-          echo "SAM_ARTIFACTS_BUCKET=porth-sam-artifacts-${ACCOUNT_ID}"                       >> $GITHUB_ENV
+
+          RESOLVED_PORTH_API_URL=$(get_output PorthApiUrl)
+          if [ -z "$RESOLVED_PORTH_API_URL" ] || [ "$RESOLVED_PORTH_API_URL" = "None" ]; then
+            # EMS deploy path: porth-components is in the components account.
+            # Use the stable URL stored in the porth-install environment variable.
+            RESOLVED_PORTH_API_URL="${{ vars.PORTH_API_URL }}"
+            echo "porth-components stack not in this account — using PORTH_API_URL env var: $RESOLVED_PORTH_API_URL"
+          fi
+
+          echo "PORTH_API_URL=${RESOLVED_PORTH_API_URL}"                                        >> $GITHUB_ENV
+          echo "PORTH_TENANTS_TABLE=$(get_output TenantsTableName)"                             >> $GITHUB_ENV
+          echo "PORTH_PERMISSIONS_TABLE=$(get_output PermissionsTableName)"                     >> $GITHUB_ENV
+          echo "PORTH_ROLES_TABLE=$(get_output RolesTableName)"                                 >> $GITHUB_ENV
+          echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$(get_output ClaimMappingConfigsTableName)"   >> $GITHUB_ENV
+          echo "SAM_ARTIFACTS_BUCKET=porth-sam-artifacts-${ACCOUNT_ID}"                        >> $GITHUB_ENV
 
       - name: Resolve sample app stack outputs
         run: |
@@ -127,8 +141,34 @@ jobs:
               Environment=dev \
               PorthApiUrl=${{ env.PORTH_API_URL }} \
               AcmCertificateArn=${{ secrets.ACM_CERTIFICATE_ARN }} \
+              CloudFrontAlias='*.porth-sample.ems.estynsoftware.cloud' \
+              CloudFrontApexAlias='porth-sample.ems.estynsoftware.cloud' \
               PorthEnvironment=dev \
             --no-fail-on-empty-changeset
+
+      - name: Capture CloudFront distribution outputs
+        if: success()
+        run: |
+          set -euo pipefail
+          CF_DOMAIN=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.SAM_STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].Outputs[?OutputKey=='CloudFrontUrl'].OutputValue" \
+            --output text 2>/dev/null || echo "")
+          CF_DIST_ID=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.SAM_STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" \
+            --output text 2>/dev/null || echo "")
+          echo "CloudFront domain: $CF_DOMAIN"
+          echo "CloudFront distribution ID: $CF_DIST_ID"
+          {
+            echo "## CloudFront Distribution"
+            echo "- **Domain:** $CF_DOMAIN"
+            echo "- **Distribution ID:** $CF_DIST_ID"
+            echo "- **Alias record needed:** porth-sample.ems.estynsoftware.cloud → $CF_DOMAIN"
+            echo "- **CloudFront Hosted Zone ID for Alias:** Z2FDTNDATAQYW2"
+          } >> $GITHUB_STEP_SUMMARY
 
       - name: Resolve stack outputs
         id: outputs
