@@ -29,12 +29,12 @@ Parameters:
 
   CloudFrontAlias:
     Type: String
-    Default: '*.porth-sample.components-dev.estynsoftware.cloud'
+    Default: '*.porth-sample.ems.estynsoftware.cloud'
     Description: Wildcard alternate domain name for tenant subdomains.
 
   CloudFrontApexAlias:
     Type: String
-    Default: 'porth-sample.components-dev.estynsoftware.cloud'
+    Default: 'porth-sample.ems.estynsoftware.cloud'
     Description: Apex alternate domain name — used as the platform admin entry point.
 
   PorthEnvironment:
