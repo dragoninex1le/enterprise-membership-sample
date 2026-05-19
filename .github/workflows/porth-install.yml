@@ -7,8 +7,9 @@ on:
         description: 'Porth SAR app semantic version to install (e.g. 0.0.1)'
         required: true
       application_arn:
-        description: 'Porth SAR application ARN (provided by Porth publisher)'
-        required: true
+        description: 'Porth SAR application ARN'
+        required: false
+        default: 'arn:aws:serverlessrepo:us-east-1:084847995635:applications/porth-user-management'
       repo_owner:
         description: 'GitHub repo owner for porth-deploy-role OIDC trust (default: this repo owner)'
         required: false
@@ -21,6 +22,14 @@ on:
         description: 'GitHub environment name for porth-deploy-role OIDC trust (default: porth-bootstrap)'
         required: false
         default: 'porth-bootstrap'
+      api_domain_name:
+        description: 'API Gateway custom domain FQDN (e.g. porth-api.ems.estynsoftware.cloud). Leave blank to use the execute-api URL.'
+        required: false
+        default: ''
+      acm_certificate_arn:
+        description: 'ACM certificate ARN for the custom domain (must be in the same region). Required when api_domain_name is set.'
+        required: false
+        default: ''
 
 permissions:
   id-token: write
@@ -57,6 +66,17 @@ jobs:
           echo "repo=$REPO"   >> "$GITHUB_OUTPUT"
           echo "env=$ENV"     >> "$GITHUB_OUTPUT"
           echo "Porth deploy-role will be trusted for repo:${OWNER}/${REPO}:environment:${ENV}"
+
+      - name: Resolve domain parameters
+        id: domain
+        run: |
+          DOMAIN="${{ inputs.api_domain_name }}"
+          CERT="${{ inputs.acm_certificate_arn }}"
+          [ -z "$DOMAIN" ] && DOMAIN="${{ vars.PORTH_API_DOMAIN_NAME }}"
+          [ -z "$CERT"   ] && CERT="${{ vars.ACM_CERTIFICATE_ARN }}"
+          echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
+          echo "cert=$CERT"     >> "$GITHUB_OUTPUT"
+          echo "Resolved: domain='$DOMAIN' cert='${CERT:0:30}...'"
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -151,6 +171,8 @@ jobs:
               "ParameterKey=GitHubRepoOwner,ParameterValue=${{ steps.trust.outputs.owner }}" \
               "ParameterKey=GitHubRepoName,ParameterValue=${{ steps.trust.outputs.repo }}" \
               "ParameterKey=DeployEnvironment,ParameterValue=${{ steps.trust.outputs.env }}" \
+              "ParameterKey=ApiDomainName,ParameterValue=${{ steps.domain.outputs.domain }}" \
+              "ParameterKey=AcmCertificateArn,ParameterValue=${{ steps.domain.outputs.cert }}" \
             --role-arn "${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}" \
             --query 'Id' --output text)
           echo "change_set=$CHANGE_SET" >> "$GITHUB_OUTPUT"
@@ -162,17 +184,28 @@ jobs:
           set -e
 
           if [ "$WAIT_RC" -ne 0 ]; then
-            echo "::warning::Waiter failed (rc=$WAIT_RC) — capturing change-set details before teardown"
-            aws cloudformation describe-change-set \
+            DESCRIBE=$(aws cloudformation describe-change-set \
               --change-set-name "$CHANGE_SET" \
               --query '{Status:Status,StatusReason:StatusReason,ExecutionStatus:ExecutionStatus}' \
-              --output json || true
-            exit "$WAIT_RC"
+              --output json 2>/dev/null || echo '{}')
+            echo "$DESCRIBE"
+            STATUS_REASON=$(echo "$DESCRIBE" | jq -r '.StatusReason // ""')
+            if echo "$STATUS_REASON" | grep -qi "didn't contain changes\|no changes"; then
+              echo "::notice::No changes to apply — stack is already up to date."
+              echo "no_changes=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::Change set creation failed"
+              exit "$WAIT_RC"
+            fi
           fi
 
       - name: Execute change set
         run: |
           set -euo pipefail
+          if [ "${{ steps.change-set.outputs.no_changes }}" = "true" ]; then
+            echo "No changes — skipping execute."
+            exit 0
+          fi
           aws cloudformation execute-change-set --change-set-name "${{ steps.change-set.outputs.change_set }}"
           ACTION="${{ steps.preflight.outputs.stack_action }}"
 
