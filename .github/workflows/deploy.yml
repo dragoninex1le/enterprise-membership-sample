@@ -74,6 +74,14 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Verify Porth is deployed
+        run: |
+          if ! aws cloudformation describe-stacks --stack-name porth-components >/dev/null 2>&1; then
+            echo "❌ porth-components stack not found in EMS. Run porth-install.yml first."
+            exit 1
+          fi
+          echo "✅ porth-components present"
+
       - name: Resolve porth-components stack outputs
         run: |
           STACK=porth-components
@@ -146,13 +154,8 @@ jobs:
             --stack-name ${{ env.SAM_STACK_NAME }} \
             --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" \
             --output text)
-          CLEANUP_FN=$(aws cloudformation describe-stacks \
-            --stack-name porth-qa-tools \
-            --query "Stacks[0].Outputs[?OutputKey=='QaCleanupFunctionArn'].OutputValue" \
-            --output text)
-          echo "bucket=$BUCKET"         >> $GITHUB_OUTPUT
-          echo "cf_id=$CF_ID"           >> $GITHUB_OUTPUT
-          echo "cleanup_fn=$CLEANUP_FN" >> $GITHUB_OUTPUT
+          echo "bucket=$BUCKET" >> $GITHUB_OUTPUT
+          echo "cf_id=$CF_ID"   >> $GITHUB_OUTPUT
 
       # ── Step 2: Sync frontend assets to S3 + invalidate CDN ─────────────────────
       # Done immediately after infrastructure deploy so the live site is always
@@ -173,151 +176,4 @@ jobs:
             --distribution-id ${{ steps.outputs.outputs.cf_id }} \
             --paths "/*"
 
-      # ── Step 3: Cleanup (pre-test) ─────────────────────────────────────────────
-      # Only runs when explicitly opted in via workflow_dispatch run_api_tests:true.
-      # Normal pushes to main never wipe DynamoDB — use reset-env.yml for that.
-      - name: Cleanup (pre-test)
-        if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.run_api_tests == true
-        run: |
-          python3 - <<'EOF'
-          import boto3, json, sys
 
-          TABLES = [
-              "porth-users-dev",
-              "porth-tenants-dev",
-              "porth-permissions-dev",
-              "porth-roles-dev",
-              "porth-claim-mapping-configs-dev",
-              "porth-org-units-dev",
-          ]
-          fn = "${{ steps.outputs.outputs.cleanup_fn }}"
-          client = boto3.client("lambda", region_name="us-east-1")
-          failed = False
-
-          print("Pre-test cleanup")
-          for table in TABLES:
-              payload = {"body": json.dumps({"table_name": table})}
-              resp = client.invoke(FunctionName=fn, Payload=json.dumps(payload))
-              result = json.loads(resp["Payload"].read())
-              body = json.loads(result.get("body", "{}"))
-              if result.get("statusCode", 200) == 200:
-                  print(f"  ✅ {table}: deleted {body.get('deleted', '?')} items")
-              else:
-                  print(f"  ❌ {table}: {body.get('error', result)}", file=sys.stderr)
-                  failed = True
-
-          sys.exit(1 if failed else 0)
-          EOF
-
-      # ── Step 4: Bootstrap platform tenant (pre-test) ────────────────────────────
-      - name: Bootstrap platform tenant (pre-test)
-        if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.run_api_tests == true
-        env:
-          PORTH_TENANTS_TABLE: ${{ env.PORTH_TENANTS_TABLE }}
-          PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
-          PORTH_ROLES_TABLE: ${{ env.PORTH_ROLES_TABLE }}
-          PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
-        run: python3 scripts/bootstrap_platform_tenant.py
-
-      # ── Step 5: Run API integration tests ──────────────────────────────────────
-      - name: Run API integration tests
-        if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.run_api_tests == true
-        env:
-          PORTH_AUTH_TEST_TOKEN: ${{ secrets.PORTH_AUTH_TEST_TOKEN }}
-        run: |
-          PORTH_API_URL="${{ env.PORTH_API_URL }}" \
-            bash scripts/api-tests/run-all.sh
-
-      # ── Step 6: Cleanup (post-test) ──────────────────────────────────────────────
-      - name: Cleanup (post-test)
-        if: always() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.run_api_tests == true
-        run: |
-          python3 - <<'EOF'
-          import boto3, json, sys
-
-          TABLES = [
-              "porth-users-dev",
-              "porth-tenants-dev",
-              "porth-permissions-dev",
-              "porth-roles-dev",
-              "porth-claim-mapping-configs-dev",
-              "porth-org-units-dev",
-          ]
-          fn = "${{ steps.outputs.outputs.cleanup_fn }}"
-          client = boto3.client("lambda", region_name="us-east-1")
-          failed = False
-
-          print("Post-test cleanup")
-          for table in TABLES:
-              payload = {"body": json.dumps({"table_name": table})}
-              resp = client.invoke(FunctionName=fn, Payload=json.dumps(payload))
-              result = json.loads(resp["Payload"].read())
-              body = json.loads(result.get("body", "{}"))
-              if result.get("statusCode", 200) == 200:
-                  print(f"  ✅ {table}: deleted {body.get('deleted', '?')} items")
-              else:
-                  print(f"  ❌ {table}: {body.get('error', result)}", file=sys.stderr)
-                  failed = True
-
-          sys.exit(1 if failed else 0)
-          EOF
-
-      # ── Step 7: Bootstrap platform tenant ───────────────────────────────────────
-      # Runs on every main deploy. Applies platform configuration changes
-      # (permissions upserted, role-permission links regenerated, claim mapping
-      # versioned) while leaving user-created tenants, orgs and users untouched.
-      # Also serves as the post-test reseed when run_api_tests is true, so always()
-      # is required to ensure it runs even if the integration tests or cleanup failed.
-      - name: Bootstrap platform tenant
-        if: always() && github.ref == 'refs/heads/main'
-        env:
-          PORTH_TENANTS_TABLE: ${{ env.PORTH_TENANTS_TABLE }}
-          PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
-          PORTH_ROLES_TABLE: ${{ env.PORTH_ROLES_TABLE }}
-          PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
-        run: python3 scripts/bootstrap_platform_tenant.py
-
-      # ── Step 8: Patch platform tenant IdP config ─────────────────────────────────
-      # Audience is read from PORTH_TENANT_CONFIG (same JSON blob used for E2E IdP
-      # setup). PLATFORM_AUTH0_AUDIENCE is used as fallback if not present.
-      - name: Patch platform tenant IdP config
-        if: always() && github.ref == 'refs/heads/main'
-        env:
-          PORTH_TENANT_CONFIG: ${{ secrets.PORTH_TENANT_CONFIG }}
-        run: |
-          TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
-          RESPONSE_FILE="/tmp/patch-tenant.json"
-
-          # Extract audience from PORTH_TENANT_CONFIG.
-          # Use || true so bash -e doesn't exit if PORTH_TENANT_CONFIG is not
-          # valid JSON. Also try double-decode for JSON-encoded-JSON secrets.
-          AUDIENCE=$(echo "$PORTH_TENANT_CONFIG" | python3 -c \
-            "import json,sys; raw=sys.stdin.read().strip(); d=json.loads(raw); d=d if isinstance(d,dict) else json.loads(d); print(d.get('audience',''),end='')" \
-            2>/dev/null || true)
-          if [ -z "$AUDIENCE" ]; then
-            AUDIENCE="${{ secrets.PLATFORM_AUTH0_AUDIENCE }}"
-          fi
-          echo "Resolved audience (length=${#AUDIENCE})"
-
-          PAYLOAD="{\"idp_config_override\":{\"domain\":\"${{ secrets.PLATFORM_AUTH0_DOMAIN }}\",\"client_id\":\"${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}\",\"audience\":\"${AUDIENCE}\"}}"
-
-          for attempt in 1 2 3 4 5; do
-            STATUS=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
-              -X PATCH "${{ env.PORTH_API_URL }}/tenants/platform" \
-              -H "Content-Type: application/json" \
-              -H "Authorization: Bearer $TEST_TOKEN" \
-              -d "$PAYLOAD")
-            echo "Attempt $attempt: PATCH /tenants/platform → HTTP $STATUS"
-            if [[ "$STATUS" == "200" ]]; then
-              echo "✅ Platform tenant IdP config updated"
-              break
-            fi
-            echo "Response: $(cat $RESPONSE_FILE)"
-            if [[ $attempt -lt 5 ]]; then
-              echo "Retrying in 5s..."
-              sleep 5
-            else
-              echo "❌ Failed to patch tenant IdP config after $attempt attempts"
-              exit 1
-            fi
-          done

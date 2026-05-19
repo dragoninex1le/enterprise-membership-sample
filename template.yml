@@ -45,6 +45,13 @@ Parameters:
       Environment name passed to Lambda functions as PORTH_ENVIRONMENT.
       Used to resolve DynamoDB table names (e.g. porth-sample-app-dev).
 
+  PorthAuthorizerArn:
+    Type: String
+    Description: >
+      ARN of the Porth Lambda Authorizer function from the porth-components stack
+      (output AuthorizerFunctionArn). The authorizer validates JWTs and injects
+      tenant_id, user_id, roles and permissions into requestContext.authorizer.lambda.
+
 Resources:
 
   # ── DynamoDB table for sample app data ───────────────────────────────────
@@ -64,6 +71,39 @@ Resources:
           KeyType: HASH
         - AttributeName: sk
           KeyType: RANGE
+
+  # ── Sample app HTTP API with Porth Lambda Authorizer ─────────────────────
+  # The authorizer validates the bearer JWT, resolves tenant/user/roles/
+  # permissions, and injects them into requestContext.authorizer.lambda so the
+  # DirectorMiddleware (parse_auth_context) can read them without re-validating.
+
+  SampleAppHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: $default
+      Auth:
+        DefaultAuthorizer: PorthAuthorizer
+        Authorizers:
+          PorthAuthorizer:
+            # Must match the Components authorizer — payload v2, full IAM policy.
+            AuthorizerPayloadFormatVersion: "2.0"
+            EnableSimpleResponses: false
+            FunctionArn: !Ref PorthAuthorizerArn
+            Identity:
+              ReauthorizeEvery: 300
+              Headers:
+                - Authorization
+
+  # Grant API Gateway permission to invoke the external authorizer Lambda.
+  # SAM auto-creates this permission for same-template functions; for an ARN
+  # provided via parameter we must add it explicitly.
+  PorthAuthorizerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PorthAuthorizerArn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${SampleAppHttpApi}/*
 
   # ── Sample app API Lambda ─────────────────────────────────────────────────
 
@@ -88,6 +128,7 @@ Resources:
         ApiProxy:
           Type: HttpApi
           Properties:
+            ApiId: !Ref SampleAppHttpApi
             Path: /sample/{proxy+}
             Method: ANY
 
@@ -217,6 +258,6 @@ Outputs:
 
   SampleAppApiUrl:
     Description: Sample app API Gateway URL
-    Value: !Sub https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com
+    Value: !Sub https://${SampleAppHttpApi}.execute-api.${AWS::Region}.amazonaws.com
     Export:
       Name: !Sub ${AWS::StackName}-SampleAppApiUrl

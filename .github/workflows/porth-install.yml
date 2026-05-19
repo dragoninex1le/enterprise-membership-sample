@@ -1,0 +1,195 @@
+name: Porth — install
+
+on:
+  workflow_dispatch:
+    inputs:
+      sar_version:
+        description: 'Porth SAR app semantic version to install (e.g. 0.0.1)'
+        required: true
+      application_arn:
+        description: 'Porth SAR application ARN (provided by Porth publisher)'
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  STACK: porth-components
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    environment: porth-install
+
+    steps:
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          APP_ARN_INPUT="${{ inputs.application_arn }}"
+          if [[ ! "$APP_ARN_INPUT" =~ ^arn:aws:serverlessrepo:[a-z0-9-]+:[0-9]+:applications/[a-zA-Z0-9_-]+$ ]]; then
+            echo "::error::Invalid application_arn: $APP_ARN_INPUT"
+            exit 1
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Caller identity
+        run: aws sts get-caller-identity
+
+      - name: Pre-flight stack-state recovery
+        id: preflight
+        run: |
+          set -euo pipefail
+          STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK" \
+            --region "${{ vars.AWS_REGION }}" \
+            --query "Stacks[0].StackStatus" \
+            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          echo "Pre-flight stack status: $STATUS"
+          case "$STATUS" in
+            DOES_NOT_EXIST)
+              echo "Stack does not exist — changeset will CREATE."
+              echo "stack_action=CREATE" >> "$GITHUB_OUTPUT"
+              ;;
+            CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE)
+              echo "Stack in clean state ($STATUS) — changeset will UPDATE."
+              echo "stack_action=UPDATE" >> "$GITHUB_OUTPUT"
+              ;;
+            REVIEW_IN_PROGRESS|ROLLBACK_COMPLETE|CREATE_FAILED|DELETE_FAILED)
+              echo "::warning::Stack in recoverable-failure state ($STATUS) — deleting and recreating"
+              aws cloudformation delete-stack --stack-name "$STACK" --region "${{ vars.AWS_REGION }}"
+              aws cloudformation wait stack-delete-complete --stack-name "$STACK" --region "${{ vars.AWS_REGION }}"
+              echo "stack_action=CREATE" >> "$GITHUB_OUTPUT"
+              ;;
+            *_IN_PROGRESS)
+              echo "::error::Stack in non-terminal state ($STATUS) — investigate manually before re-running"
+              exit 1
+              ;;
+            *)
+              echo "::error::Stack in unexpected state ($STATUS)"
+              exit 1
+              ;;
+          esac
+
+      - name: Render SAR template
+        id: render-template
+        run: |
+          set -euo pipefail
+          echo "Calling serverlessrepo create-cloud-formation-template..."
+          CREATE_OUT=$(aws serverlessrepo create-cloud-formation-template \
+            --application-id "${{ inputs.application_arn }}" \
+            --semantic-version "${{ inputs.sar_version }}" \
+            --output json)
+          TEMPLATE_ID=$(echo "$CREATE_OUT" | jq -r '.TemplateId')
+          echo "TemplateId: $TEMPLATE_ID"
+
+          for i in $(seq 1 30); do
+            GET_OUT=$(aws serverlessrepo get-cloud-formation-template \
+              --application-id "${{ inputs.application_arn }}" \
+              --template-id "$TEMPLATE_ID" \
+              --output json)
+            STATUS=$(echo "$GET_OUT" | jq -r '.Status')
+            if [ "$STATUS" = "ACTIVE" ]; then
+              TEMPLATE_URL=$(echo "$GET_OUT" | jq -r '.TemplateUrl')
+              echo "Template ACTIVE after ${i}s. TemplateUrl: $TEMPLATE_URL"
+              echo "template_url=$TEMPLATE_URL" >> "$GITHUB_OUTPUT"
+              exit 0
+            elif [ "$STATUS" = "EXPIRED" ]; then
+              echo "::error::Template EXPIRED before becoming ACTIVE"
+              exit 1
+            fi
+            echo "  (attempt $i) Status=$STATUS — sleeping 2s"
+            sleep 2
+          done
+          echo "::error::Template did not become ACTIVE within 60s"
+          exit 1
+
+      - name: Create change set
+        id: change-set
+        run: |
+          set -euo pipefail
+          ACTION="${{ steps.preflight.outputs.stack_action }}"
+          CHANGE_SET_NAME="porth-install-$(date -u +%Y%m%d-%H%M%S)"
+          CHANGE_SET=$(aws cloudformation create-change-set \
+            --stack-name "$STACK" \
+            --change-set-name "$CHANGE_SET_NAME" \
+            --change-set-type "$ACTION" \
+            --template-url "${{ steps.render-template.outputs.template_url }}" \
+            --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
+            --parameters 'ParameterKey=Environment,ParameterValue=dev' \
+            --role-arn "${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}" \
+            --query 'Id' --output text)
+          echo "change_set=$CHANGE_SET" >> "$GITHUB_OUTPUT"
+          echo "Created change set: $CHANGE_SET"
+
+          set +e
+          aws cloudformation wait change-set-create-complete --change-set-name "$CHANGE_SET"
+          WAIT_RC=$?
+          set -e
+
+          if [ "$WAIT_RC" -ne 0 ]; then
+            echo "::warning::Waiter failed (rc=$WAIT_RC) — capturing change-set details before teardown"
+            aws cloudformation describe-change-set \
+              --change-set-name "$CHANGE_SET" \
+              --query '{Status:Status,StatusReason:StatusReason,ExecutionStatus:ExecutionStatus}' \
+              --output json || true
+            exit "$WAIT_RC"
+          fi
+
+      - name: Execute change set
+        run: |
+          set -euo pipefail
+          aws cloudformation execute-change-set --change-set-name "${{ steps.change-set.outputs.change_set }}"
+          ACTION="${{ steps.preflight.outputs.stack_action }}"
+
+          set +e
+          if [ "$ACTION" = "CREATE" ]; then
+            aws cloudformation wait stack-create-complete --stack-name "$STACK"
+          else
+            aws cloudformation wait stack-update-complete --stack-name "$STACK"
+          fi
+          WAIT_RC=$?
+          set -e
+
+          if [ "$WAIT_RC" -ne 0 ]; then
+            echo "::warning::Stack waiter failed (rc=$WAIT_RC) — capturing failed stack events"
+            aws cloudformation describe-stack-events \
+              --stack-name "$STACK" \
+              --query 'StackEvents[?contains(ResourceStatus, `FAILED`)] | [:20].{Time:Timestamp,LogicalId:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
+              --output json || true
+            exit "$WAIT_RC"
+          fi
+
+      - name: Verify porth-components outputs
+        run: |
+          set -euo pipefail
+          get_output() {
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text
+          }
+          AUTHORIZER_ARN=$(get_output AuthorizerFunctionArn)
+          TENANTS_TABLE=$(get_output TenantsTableName)
+          if [ -z "$AUTHORIZER_ARN" ] || [ "$AUTHORIZER_ARN" = "None" ]; then
+            echo "::error::porth-components missing AuthorizerFunctionArn output"
+            exit 1
+          fi
+          if [ -z "$TENANTS_TABLE" ] || [ "$TENANTS_TABLE" = "None" ]; then
+            echo "::error::porth-components missing TenantsTableName output"
+            exit 1
+          fi
+          echo "✅ porth-components installed successfully"
+          echo "  AuthorizerFunctionArn: $AUTHORIZER_ARN"
+          echo "  TenantsTableName:      $TENANTS_TABLE"
+          {
+            echo "## Porth — install PASS"
+            echo "- **Stack:** \`$STACK\`"
+            echo "- **Version:** \`${{ inputs.sar_version }}\`"
+            echo "- **AuthorizerFunctionArn:** \`$AUTHORIZER_ARN\`"
+            echo "- **TenantsTableName:** \`$TENANTS_TABLE\`"
+          } >> "$GITHUB_STEP_SUMMARY"
