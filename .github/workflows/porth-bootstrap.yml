@@ -41,9 +41,9 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Resolve porth-components stack outputs
+      - name: Resolve porth-prod stack outputs
         run: |
-          STACK=porth-components
+          STACK=porth-prod
           get_output() {
             aws cloudformation describe-stacks \
               --stack-name "$STACK" \

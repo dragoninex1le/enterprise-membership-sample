@@ -9,13 +9,25 @@ on:
       application_arn:
         description: 'Porth SAR application ARN (provided by Porth publisher)'
         required: true
+      repo_owner:
+        description: 'GitHub repo owner for porth-deploy-role OIDC trust (default: this repo owner)'
+        required: false
+        default: ''
+      repo_name:
+        description: 'GitHub repo name for porth-deploy-role OIDC trust (default: this repo name)'
+        required: false
+        default: ''
+      deploy_environment:
+        description: 'GitHub environment name for porth-deploy-role OIDC trust (default: porth-bootstrap)'
+        required: false
+        default: 'porth-bootstrap'
 
 permissions:
   id-token: write
   contents: read
 
 env:
-  STACK: porth-components
+  STACK: porth-prod
 
 jobs:
   install:
@@ -31,6 +43,20 @@ jobs:
             echo "::error::Invalid application_arn: $APP_ARN_INPUT"
             exit 1
           fi
+
+      - name: Resolve deploy-role OIDC trust parameters
+        id: trust
+        run: |
+          OWNER="${{ inputs.repo_owner }}"
+          REPO="${{ inputs.repo_name }}"
+          ENV="${{ inputs.deploy_environment }}"
+          [ -z "$OWNER" ] && OWNER="${{ github.repository_owner }}"
+          [ -z "$REPO"  ] && REPO="${{ github.event.repository.name }}"
+          [ -z "$ENV"   ] && ENV="porth-bootstrap"
+          echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
+          echo "repo=$REPO"   >> "$GITHUB_OUTPUT"
+          echo "env=$ENV"     >> "$GITHUB_OUTPUT"
+          echo "Porth deploy-role will be trusted for repo:${OWNER}/${REPO}:environment:${ENV}"
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -119,8 +145,12 @@ jobs:
             --change-set-name "$CHANGE_SET_NAME" \
             --change-set-type "$ACTION" \
             --template-url "${{ steps.render-template.outputs.template_url }}" \
-            --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
-            --parameters 'ParameterKey=Environment,ParameterValue=dev' \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+            --parameters \
+              "ParameterKey=Environment,ParameterValue=dev" \
+              "ParameterKey=GitHubRepoOwner,ParameterValue=${{ steps.trust.outputs.owner }}" \
+              "ParameterKey=GitHubRepoName,ParameterValue=${{ steps.trust.outputs.repo }}" \
+              "ParameterKey=DeployEnvironment,ParameterValue=${{ steps.trust.outputs.env }}" \
             --role-arn "${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}" \
             --query 'Id' --output text)
           echo "change_set=$CHANGE_SET" >> "$GITHUB_OUTPUT"
@@ -164,7 +194,7 @@ jobs:
             exit "$WAIT_RC"
           fi
 
-      - name: Verify porth-components outputs
+      - name: Verify porth-prod outputs
         run: |
           set -euo pipefail
           get_output() {
@@ -175,21 +205,29 @@ jobs:
           }
           AUTHORIZER_ARN=$(get_output AuthorizerFunctionArn)
           TENANTS_TABLE=$(get_output TenantsTableName)
+          DEPLOY_ROLE_ARN=$(get_output PorthDeployRoleArn || echo "")
           if [ -z "$AUTHORIZER_ARN" ] || [ "$AUTHORIZER_ARN" = "None" ]; then
-            echo "::error::porth-components missing AuthorizerFunctionArn output"
+            echo "::error::porth-prod missing AuthorizerFunctionArn output"
             exit 1
           fi
           if [ -z "$TENANTS_TABLE" ] || [ "$TENANTS_TABLE" = "None" ]; then
-            echo "::error::porth-components missing TenantsTableName output"
+            echo "::error::porth-prod missing TenantsTableName output"
             exit 1
           fi
-          echo "✅ porth-components installed successfully"
+          echo "✅ porth-prod installed successfully"
           echo "  AuthorizerFunctionArn: $AUTHORIZER_ARN"
           echo "  TenantsTableName:      $TENANTS_TABLE"
+          echo "  PorthDeployRoleArn:    ${DEPLOY_ROLE_ARN:-'(not created — GitHubRepoOwner was empty)'}"
           {
             echo "## Porth — install PASS"
             echo "- **Stack:** \`$STACK\`"
             echo "- **Version:** \`${{ inputs.sar_version }}\`"
             echo "- **AuthorizerFunctionArn:** \`$AUTHORIZER_ARN\`"
             echo "- **TenantsTableName:** \`$TENANTS_TABLE\`"
+            if [ -n "$DEPLOY_ROLE_ARN" ] && [ "$DEPLOY_ROLE_ARN" != "None" ]; then
+              echo "- **PorthDeployRoleArn:** \`$DEPLOY_ROLE_ARN\`"
+              echo ""
+              echo "### Next step — create \`porth-bootstrap\` GitHub environment"
+              echo "Set \`AWS_ROLE_ARN\` = \`$DEPLOY_ROLE_ARN\` in the \`porth-bootstrap\` environment."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"

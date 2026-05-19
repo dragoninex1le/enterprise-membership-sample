@@ -76,15 +76,15 @@ jobs:
 
       - name: Verify Porth is deployed
         run: |
-          if ! aws cloudformation describe-stacks --stack-name porth-components >/dev/null 2>&1; then
-            echo "❌ porth-components stack not found in EMS. Run porth-install.yml first."
+          if ! aws cloudformation describe-stacks --stack-name porth-prod >/dev/null 2>&1; then
+            echo "❌ porth-prod stack not found in EMS. Run porth-install.yml first."
             exit 1
           fi
-          echo "✅ porth-components present"
+          echo "✅ porth-prod present"
 
-      - name: Resolve porth-components stack outputs
+      - name: Resolve porth-prod stack outputs
         run: |
-          STACK=porth-components
+          STACK=porth-prod
           get_output() {
             aws cloudformation describe-stacks \
               --stack-name "$STACK" \
