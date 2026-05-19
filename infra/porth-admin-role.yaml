@@ -1,0 +1,76 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Porth receiving-account IAM role — porth-admin-role.
+  Deploy this template once per receiving account before running porth-bootstrap.yml.
+  The admin role is assumed by GitHub Actions via OIDC to seed platform-tenant data into
+  porth-components DynamoDB tables and to invoke porth-qa-tools Lambda functions during
+  integration test cleanup.
+
+Parameters:
+  GitHubRepoOwner:
+    Type: String
+    Description: GitHub organisation or user that owns the receiving repo (e.g. acme-corp)
+  GitHubRepoName:
+    Type: String
+    Description: GitHub repository name for the receiving product (e.g. my-app)
+  BootstrapEnvironment:
+    Type: String
+    Default: porth-bootstrap
+    Description: GitHub environment name that scopes the porth-admin-role OIDC trust
+
+Resources:
+
+  PorthAdminRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: porth-admin-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepoOwner}/${GitHubRepoName}:environment:${BootstrapEnvironment}
+      Policies:
+        - PolicyName: PorthAdminPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: PorthTablesReadWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:DescribeTable
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:BatchGetItem
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-*
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-*/index/*
+              - Sid: PorthQaToolsInvoke
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:porth-qa-tools-*
+              - Sid: PorthStackDescribe
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/porth-*/*
+              - Sid: CallerIdentity
+                Effect: Allow
+                Action: sts:GetCallerIdentity
+                Resource: '*'
+
+Outputs:
+  PorthAdminRoleArn:
+    Description: >
+      ARN of porth-admin-role.
+      Set as AWS_ROLE_ARN in the porth-bootstrap GitHub environment.
+    Value: !GetAtt PorthAdminRole.Arn
