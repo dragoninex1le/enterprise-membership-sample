@@ -1,33 +1,49 @@
-name: Porth — install
+name: Porth components — install + upgrade
+
+# PORTH-471 — Pipeline 1.
+#
+# Installs or upgrades the Porth components stack (porth-prod) in the EMS
+# account by consuming the porth-user-management SAR application, then
+# bootstraps the reserved 'platform' tenant and patches its IdP config.
+#
+# One-step SAR consume: `serverlessrepo create-cloud-formation-change-set`
+# renders the SAR template and creates the CloudFormation change set in a
+# single call. The change set executes with the porth-install-role's own
+# permissions (there is no separate CFN execution role on this path).
+#
+# GitHubRepoOwner is intentionally NOT passed, so the SAR template's
+# CreateDeployRole condition stays false — no porth-deploy-role is created
+# and no GitHub OIDC provider is required in the EMS account
+# (PORTH-471 decision, 2026-05-19).
+#
+# A change-set inspection step aborts before execute if the change set would
+# Remove or Replace any DynamoDB table (ADR-Z1/Z2 — DDB safety).
 
 on:
   workflow_dispatch:
     inputs:
       sar_version:
-        description: 'Porth SAR app semantic version to install (e.g. 0.0.1)'
+        description: 'Porth SAR app semantic version to install/upgrade to'
         required: true
-      application_arn:
+        default: '0.0.3'
+      stack_name:
+        description: 'CloudFormation stack name in EMS'
+        required: false
+        default: 'porth-prod'
+      sar_app_id:
         description: 'Porth SAR application ARN'
         required: false
         default: 'arn:aws:serverlessrepo:us-east-1:084847995635:applications/porth-user-management'
-      repo_owner:
-        description: 'GitHub repo owner for porth-deploy-role OIDC trust (default: this repo owner)'
+      environment_name:
+        description: 'Porth Environment parameter (drives the DynamoDB table name suffix)'
         required: false
-        default: ''
-      repo_name:
-        description: 'GitHub repo name for porth-deploy-role OIDC trust (default: this repo name)'
-        required: false
-        default: ''
-      deploy_environment:
-        description: 'GitHub environment name for porth-deploy-role OIDC trust (default: porth-bootstrap)'
-        required: false
-        default: 'porth-bootstrap'
+        default: 'dev'
       api_domain_name:
-        description: 'API Gateway custom domain FQDN (e.g. porth-api.ems.estynsoftware.cloud). Leave blank to use the execute-api URL.'
+        description: 'API Gateway custom domain FQDN. Blank = use the execute-api URL.'
         required: false
         default: ''
       acm_certificate_arn:
-        description: 'ACM certificate ARN for the custom domain (must be in the same region). Required when api_domain_name is set.'
+        description: 'ACM certificate ARN for the custom domain (required when api_domain_name is set).'
         required: false
         default: ''
 
@@ -35,81 +51,85 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: porth-install-${{ inputs.stack_name }}
+  cancel-in-progress: false
+
 env:
-  STACK: porth-prod
+  AWS_REGION: us-east-1
 
 jobs:
-  install:
+  install-or-upgrade:
+    name: Install or upgrade Porth ${{ inputs.sar_version }}
     runs-on: ubuntu-latest
     environment: porth-install
+    timeout-minutes: 30
 
     steps:
-      - name: Validate inputs
-        run: |
-          set -euo pipefail
-          APP_ARN_INPUT="${{ inputs.application_arn }}"
-          if [[ ! "$APP_ARN_INPUT" =~ ^arn:aws:serverlessrepo:[a-z0-9-]+:[0-9]+:applications/[a-zA-Z0-9_-]+$ ]]; then
-            echo "::error::Invalid application_arn: $APP_ARN_INPUT"
-            exit 1
-          fi
+      - uses: actions/checkout@v4
 
-      - name: Resolve deploy-role OIDC trust parameters
-        id: trust
-        run: |
-          OWNER="${{ inputs.repo_owner }}"
-          REPO="${{ inputs.repo_name }}"
-          ENV="${{ inputs.deploy_environment }}"
-          [ -z "$OWNER" ] && OWNER="${{ github.repository_owner }}"
-          [ -z "$REPO"  ] && REPO="${{ github.event.repository.name }}"
-          [ -z "$ENV"   ] && ENV="porth-bootstrap"
-          echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
-          echo "repo=$REPO"   >> "$GITHUB_OUTPUT"
-          echo "env=$ENV"     >> "$GITHUB_OUTPUT"
-          echo "Porth deploy-role will be trusted for repo:${OWNER}/${REPO}:environment:${ENV}"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
-      - name: Resolve domain parameters
-        id: domain
-        run: |
-          DOMAIN="${{ inputs.api_domain_name }}"
-          CERT="${{ inputs.acm_certificate_arn }}"
-          [ -z "$DOMAIN" ] && DOMAIN="${{ vars.PORTH_API_DOMAIN_NAME }}"
-          [ -z "$CERT"   ] && CERT="${{ vars.ACM_CERTIFICATE_ARN }}"
-          echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
-          echo "cert=$CERT"     >> "$GITHUB_OUTPUT"
-          echo "Resolved: domain='$DOMAIN' cert='${CERT:0:30}...'"
+      - name: Install Python dependencies
+        run: pip install boto3
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Caller identity
         run: aws sts get-caller-identity
 
-      - name: Pre-flight stack-state recovery
+      - name: Validate inputs and resolve domain parameters
+        run: |
+          set -euo pipefail
+          APP_ARN="${{ inputs.sar_app_id }}"
+          if [[ ! "$APP_ARN" =~ ^arn:aws:serverlessrepo:[a-z0-9-]+:[0-9]+:applications/[a-zA-Z0-9_-]+$ ]]; then
+            echo "::error::Invalid sar_app_id: $APP_ARN"
+            exit 1
+          fi
+          DOMAIN="${{ inputs.api_domain_name }}"
+          CERT="${{ inputs.acm_certificate_arn }}"
+          [ -z "$DOMAIN" ] && DOMAIN="${{ vars.PORTH_API_DOMAIN_NAME }}" || true
+          [ -z "$CERT" ]   && CERT="${{ vars.ACM_CERTIFICATE_ARN }}"   || true
+          if [ -n "$DOMAIN" ] && [ -z "$CERT" ]; then
+            echo "::error::api_domain_name '$DOMAIN' is set but no ACM certificate ARN was provided"
+            exit 1
+          fi
+          echo "PORTH_DOMAIN=$DOMAIN" >> "$GITHUB_ENV"
+          echo "PORTH_CERT=$CERT" >> "$GITHUB_ENV"
+          echo "Resolved domain: '${DOMAIN:-<execute-api default>}'"
+
+      - name: Pre-flight stack-state check
         id: preflight
+        env:
+          STACK: ${{ inputs.stack_name }}
         run: |
           set -euo pipefail
           STATUS=$(aws cloudformation describe-stacks \
             --stack-name "$STACK" \
-            --region "${{ vars.AWS_REGION }}" \
-            --query "Stacks[0].StackStatus" \
-            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+            --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "DOES_NOT_EXIST")
           echo "Pre-flight stack status: $STATUS"
           case "$STATUS" in
             DOES_NOT_EXIST)
-              echo "Stack does not exist — changeset will CREATE."
-              echo "stack_action=CREATE" >> "$GITHUB_OUTPUT"
+              echo "🟢 Action: INSTALL — stack does not exist"
+              echo "action=install" >> "$GITHUB_OUTPUT"
               ;;
-            CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE)
-              echo "Stack in clean state ($STATUS) — changeset will UPDATE."
-              echo "stack_action=UPDATE" >> "$GITHUB_OUTPUT"
+            CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE|IMPORT_COMPLETE)
+              echo "🟢 Action: UPGRADE — stack in clean state ($STATUS)"
+              echo "action=upgrade" >> "$GITHUB_OUTPUT"
               ;;
             REVIEW_IN_PROGRESS|ROLLBACK_COMPLETE|CREATE_FAILED|DELETE_FAILED)
               echo "::warning::Stack in recoverable-failure state ($STATUS) — deleting and recreating"
-              aws cloudformation delete-stack --stack-name "$STACK" --region "${{ vars.AWS_REGION }}"
-              aws cloudformation wait stack-delete-complete --stack-name "$STACK" --region "${{ vars.AWS_REGION }}"
-              echo "stack_action=CREATE" >> "$GITHUB_OUTPUT"
+              aws cloudformation delete-stack --stack-name "$STACK"
+              aws cloudformation wait stack-delete-complete --stack-name "$STACK"
+              echo "🟢 Action: INSTALL — recreating after cleanup"
+              echo "action=install" >> "$GITHUB_OUTPUT"
               ;;
             *_IN_PROGRESS)
               echo "::error::Stack in non-terminal state ($STATUS) — investigate manually before re-running"
@@ -121,96 +141,90 @@ jobs:
               ;;
           esac
 
-      - name: Render SAR template
-        id: render-template
+      - name: SAR create change set
+        id: changeset
+        env:
+          STACK: ${{ inputs.stack_name }}
         run: |
           set -euo pipefail
-          echo "Calling serverlessrepo create-cloud-formation-template..."
-          CREATE_OUT=$(aws serverlessrepo create-cloud-formation-template \
-            --application-id "${{ inputs.application_arn }}" \
+          CHANGE_SET_NAME="porth-${{ steps.preflight.outputs.action }}-${{ inputs.sar_version }}-${{ github.run_id }}"
+
+          PARAM_OVERRIDES=( "Name=Environment,Value=${{ inputs.environment_name }}" )
+          if [ -n "${PORTH_DOMAIN:-}" ]; then
+            PARAM_OVERRIDES+=( "Name=ApiDomainName,Value=${PORTH_DOMAIN}" )
+            PARAM_OVERRIDES+=( "Name=AcmCertificateArn,Value=${PORTH_CERT}" )
+          fi
+          # GitHubRepoOwner is intentionally omitted → SAR CreateDeployRole condition stays false.
+
+          echo "Creating SAR change set: $CHANGE_SET_NAME"
+          CS_OUT=$(aws serverlessrepo create-cloud-formation-change-set \
+            --application-id "${{ inputs.sar_app_id }}" \
             --semantic-version "${{ inputs.sar_version }}" \
-            --output json)
-          TEMPLATE_ID=$(echo "$CREATE_OUT" | jq -r '.TemplateId')
-          echo "TemplateId: $TEMPLATE_ID"
-
-          for i in $(seq 1 30); do
-            GET_OUT=$(aws serverlessrepo get-cloud-formation-template \
-              --application-id "${{ inputs.application_arn }}" \
-              --template-id "$TEMPLATE_ID" \
-              --output json)
-            STATUS=$(echo "$GET_OUT" | jq -r '.Status')
-            if [ "$STATUS" = "ACTIVE" ]; then
-              TEMPLATE_URL=$(echo "$GET_OUT" | jq -r '.TemplateUrl')
-              echo "Template ACTIVE after ${i}s. TemplateUrl: $TEMPLATE_URL"
-              echo "template_url=$TEMPLATE_URL" >> "$GITHUB_OUTPUT"
-              exit 0
-            elif [ "$STATUS" = "EXPIRED" ]; then
-              echo "::error::Template EXPIRED before becoming ACTIVE"
-              exit 1
-            fi
-            echo "  (attempt $i) Status=$STATUS — sleeping 2s"
-            sleep 2
-          done
-          echo "::error::Template did not become ACTIVE within 60s"
-          exit 1
-
-      - name: Create change set
-        id: change-set
-        run: |
-          set -euo pipefail
-          ACTION="${{ steps.preflight.outputs.stack_action }}"
-          CHANGE_SET_NAME="porth-install-$(date -u +%Y%m%d-%H%M%S)"
-          CHANGE_SET=$(aws cloudformation create-change-set \
             --stack-name "$STACK" \
             --change-set-name "$CHANGE_SET_NAME" \
-            --change-set-type "$ACTION" \
-            --template-url "${{ steps.render-template.outputs.template_url }}" \
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
-            --parameters \
-              "ParameterKey=Environment,ParameterValue=dev" \
-              "ParameterKey=GitHubRepoOwner,ParameterValue=${{ steps.trust.outputs.owner }}" \
-              "ParameterKey=GitHubRepoName,ParameterValue=${{ steps.trust.outputs.repo }}" \
-              "ParameterKey=DeployEnvironment,ParameterValue=${{ steps.trust.outputs.env }}" \
-              "ParameterKey=ApiDomainName,ParameterValue=${{ steps.domain.outputs.domain }}" \
-              "ParameterKey=AcmCertificateArn,ParameterValue=${{ steps.domain.outputs.cert }}" \
-            --role-arn "${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}" \
-            --query 'Id' --output text)
-          echo "change_set=$CHANGE_SET" >> "$GITHUB_OUTPUT"
-          echo "Created change set: $CHANGE_SET"
+            --parameter-overrides "${PARAM_OVERRIDES[@]}" \
+            --output json)
+          CHANGE_SET_ID=$(echo "$CS_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["ChangeSetId"])')
+          echo "change_set_id=$CHANGE_SET_ID" >> "$GITHUB_OUTPUT"
+          echo "Created change set: $CHANGE_SET_ID"
 
           set +e
-          aws cloudformation wait change-set-create-complete --change-set-name "$CHANGE_SET"
+          aws cloudformation wait change-set-create-complete --change-set-name "$CHANGE_SET_ID"
           WAIT_RC=$?
           set -e
 
           if [ "$WAIT_RC" -ne 0 ]; then
             DESCRIBE=$(aws cloudformation describe-change-set \
-              --change-set-name "$CHANGE_SET" \
-              --query '{Status:Status,StatusReason:StatusReason,ExecutionStatus:ExecutionStatus}' \
-              --output json 2>/dev/null || echo '{}')
+              --change-set-name "$CHANGE_SET_ID" \
+              --query '{Status:Status,StatusReason:StatusReason}' --output json 2>/dev/null || echo '{}')
             echo "$DESCRIBE"
-            STATUS_REASON=$(echo "$DESCRIBE" | jq -r '.StatusReason // ""')
-            if echo "$STATUS_REASON" | grep -qi "didn't contain changes\|no changes"; then
-              echo "::notice::No changes to apply — stack is already up to date."
+            REASON=$(echo "$DESCRIBE" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("StatusReason") or "")' 2>/dev/null || echo "")
+            if echo "$REASON" | grep -qi "didn't contain changes\|no changes\|No updates"; then
+              echo "✅ Action: NO-OP — stack already at the requested version"
               echo "no_changes=true" >> "$GITHUB_OUTPUT"
             else
-              echo "::error::Change set creation failed"
+              echo "::error::Change set creation failed: $REASON"
               exit "$WAIT_RC"
             fi
           fi
 
-      - name: Execute change set
+      - name: Inspect change set for destructive DynamoDB actions
+        if: steps.changeset.outputs.no_changes != 'true'
         run: |
           set -euo pipefail
-          if [ "${{ steps.change-set.outputs.no_changes }}" = "true" ]; then
+          CHANGES=$(aws cloudformation describe-change-set \
+            --change-set-name "${{ steps.changeset.outputs.change_set_id }}" \
+            --query 'Changes[?ResourceChange.ResourceType==`AWS::DynamoDB::Table`].ResourceChange.{Id:LogicalResourceId,Action:Action,Replacement:Replacement}' \
+            --output json)
+          echo "DynamoDB table changes in change set: $CHANGES"
+          DESTRUCTIVE=$(echo "$CHANGES" | python3 -c '
+          import json, sys
+          changes = json.load(sys.stdin) or []
+          bad = [c for c in changes if c.get("Action") == "Remove" or c.get("Replacement") == "True"]
+          print(json.dumps(bad))
+          ')
+          if [ "$DESTRUCTIVE" != "[]" ]; then
+            echo "::error::Change set would Remove or Replace DynamoDB tables — aborting to protect data (ADR-Z1/Z2)."
+            echo "Destructive changes: $DESTRUCTIVE"
+            exit 1
+          fi
+          echo "✅ No destructive DynamoDB table changes in change set"
+
+      - name: Execute change set
+        env:
+          STACK: ${{ inputs.stack_name }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.changeset.outputs.no_changes }}" = "true" ]; then
             echo "No changes — skipping execute."
             exit 0
           fi
-          aws cloudformation execute-change-set --change-set-name "${{ steps.change-set.outputs.change_set }}"
-          ACTION="${{ steps.preflight.outputs.stack_action }}"
+          aws cloudformation execute-change-set \
+            --change-set-name "${{ steps.changeset.outputs.change_set_id }}"
 
           set +e
-          if [ "$ACTION" = "CREATE" ]; then
+          if [ "${{ steps.preflight.outputs.action }}" = "install" ]; then
             aws cloudformation wait stack-create-complete --stack-name "$STACK"
           else
             aws cloudformation wait stack-update-complete --stack-name "$STACK"
@@ -226,41 +240,112 @@ jobs:
               --output json || true
             exit "$WAIT_RC"
           fi
+          echo "✅ Stack $STACK reached terminal state for ${{ steps.preflight.outputs.action }}"
 
-      - name: Verify porth-prod outputs
+      - name: Resolve Porth stack outputs
+        env:
+          STACK: ${{ inputs.stack_name }}
         run: |
           set -euo pipefail
           get_output() {
             aws cloudformation describe-stacks \
               --stack-name "$STACK" \
               --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
-              --output text
+              --output text 2>/dev/null || echo ""
           }
-          AUTHORIZER_ARN=$(get_output AuthorizerFunctionArn)
+          PORTH_API_URL=$(get_output PorthApiUrl)
           TENANTS_TABLE=$(get_output TenantsTableName)
-          DEPLOY_ROLE_ARN=$(get_output PorthDeployRoleArn || echo "")
-          if [ -z "$AUTHORIZER_ARN" ] || [ "$AUTHORIZER_ARN" = "None" ]; then
-            echo "::error::porth-prod missing AuthorizerFunctionArn output"
+          PERMISSIONS_TABLE=$(get_output PermissionsTableName)
+          ROLES_TABLE=$(get_output RolesTableName)
+          CLAIM_TABLE=$(get_output ClaimMappingConfigsTableName)
+
+          MISSING=""
+          require() {
+            if [ -z "$2" ] || [ "$2" = "None" ]; then MISSING="$MISSING $1"; fi
+          }
+          require PorthApiUrl "$PORTH_API_URL"
+          require TenantsTableName "$TENANTS_TABLE"
+          require PermissionsTableName "$PERMISSIONS_TABLE"
+          require RolesTableName "$ROLES_TABLE"
+          require ClaimMappingConfigsTableName "$CLAIM_TABLE"
+          if [ -n "$MISSING" ]; then
+            echo "::error::porth-prod stack is missing expected outputs:$MISSING"
             exit 1
           fi
-          if [ -z "$TENANTS_TABLE" ] || [ "$TENANTS_TABLE" = "None" ]; then
-            echo "::error::porth-prod missing TenantsTableName output"
-            exit 1
+
+          echo "PORTH_API_URL=$PORTH_API_URL" >> "$GITHUB_ENV"
+          echo "PORTH_TENANTS_TABLE=$TENANTS_TABLE" >> "$GITHUB_ENV"
+          echo "PORTH_PERMISSIONS_TABLE=$PERMISSIONS_TABLE" >> "$GITHUB_ENV"
+          echo "PORTH_ROLES_TABLE=$ROLES_TABLE" >> "$GITHUB_ENV"
+          echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$CLAIM_TABLE" >> "$GITHUB_ENV"
+          echo "✅ Resolved Porth outputs (API: $PORTH_API_URL)"
+
+      # Bootstrap runs on every successful install/upgrade (and on no-op) — the
+      # platform tenant is independent of the CloudFormation stack and the
+      # script is fully idempotent.
+      - name: Bootstrap platform tenant
+        env:
+          PORTH_TENANTS_TABLE: ${{ env.PORTH_TENANTS_TABLE }}
+          PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
+          PORTH_ROLES_TABLE: ${{ env.PORTH_ROLES_TABLE }}
+          PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
+        run: |
+          python3 scripts/bootstrap_platform_tenant.py
+          echo "✅ Platform tenant bootstrapped"
+
+      - name: Patch platform tenant IdP config
+        env:
+          PORTH_TENANT_CONFIG: ${{ secrets.PORTH_TENANT_CONFIG }}
+        run: |
+          TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
+          RESPONSE_FILE="/tmp/patch-tenant.json"
+
+          # Audience is read from PORTH_TENANT_CONFIG; PLATFORM_AUTH0_AUDIENCE is the fallback.
+          AUDIENCE=$(echo "$PORTH_TENANT_CONFIG" | python3 -c \
+            "import json,sys; raw=sys.stdin.read().strip(); d=json.loads(raw); d=d if isinstance(d,dict) else json.loads(d); print(d.get('audience',''),end='')" \
+            2>/dev/null || true)
+          if [ -z "$AUDIENCE" ]; then
+            AUDIENCE="${{ secrets.PLATFORM_AUTH0_AUDIENCE }}"
           fi
-          echo "✅ porth-prod installed successfully"
-          echo "  AuthorizerFunctionArn: $AUTHORIZER_ARN"
-          echo "  TenantsTableName:      $TENANTS_TABLE"
-          echo "  PorthDeployRoleArn:    ${DEPLOY_ROLE_ARN:-'(not created — GitHubRepoOwner was empty)'}"
-          {
-            echo "## Porth — install PASS"
-            echo "- **Stack:** \`$STACK\`"
-            echo "- **Version:** \`${{ inputs.sar_version }}\`"
-            echo "- **AuthorizerFunctionArn:** \`$AUTHORIZER_ARN\`"
-            echo "- **TenantsTableName:** \`$TENANTS_TABLE\`"
-            if [ -n "$DEPLOY_ROLE_ARN" ] && [ "$DEPLOY_ROLE_ARN" != "None" ]; then
-              echo "- **PorthDeployRoleArn:** \`$DEPLOY_ROLE_ARN\`"
-              echo ""
-              echo "### Next step — create \`porth-bootstrap\` GitHub environment"
-              echo "Set \`AWS_ROLE_ARN\` = \`$DEPLOY_ROLE_ARN\` in the \`porth-bootstrap\` environment."
+          echo "Resolved audience (length=${#AUDIENCE})"
+
+          PAYLOAD="{\"idp_config_override\":{\"domain\":\"${{ secrets.PLATFORM_AUTH0_DOMAIN }}\",\"client_id\":\"${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}\",\"audience\":\"${AUDIENCE}\"}}"
+
+          for attempt in 1 2 3 4 5; do
+            STATUS=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
+              -X PATCH "${PORTH_API_URL}/tenants/platform" \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $TEST_TOKEN" \
+              -d "$PAYLOAD")
+            echo "Attempt $attempt: PATCH /tenants/platform → HTTP $STATUS"
+            if [[ "$STATUS" == "200" ]]; then
+              echo "✅ Platform tenant IdP config updated"
+              exit 0
             fi
+            echo "Response: $(cat "$RESPONSE_FILE" 2>/dev/null || true)"
+            if [[ $attempt -lt 5 ]]; then sleep 5; fi
+          done
+          echo "::error::Failed to patch platform tenant IdP config after 5 attempts"
+          exit 1
+
+      - name: Smoke test Porth API
+        run: |
+          STATUS=$(curl -s -o /tmp/health.json -w "%{http_code}" "${PORTH_API_URL}/health" || echo "000")
+          if [[ "$STATUS" == "200" ]]; then
+            echo "✅ Smoke test passed (GET /health → 200)"
+          else
+            echo "::warning::Smoke test: GET /health → HTTP $STATUS (Porth may not expose /health yet — non-fatal)"
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Porth install/upgrade summary"
+            echo ""
+            echo "- **Action:** ${{ steps.preflight.outputs.action }}"
+            echo "- **No-op:** ${{ steps.changeset.outputs.no_changes || 'false' }}"
+            echo "- **Target version:** ${{ inputs.sar_version }}"
+            echo "- **Stack:** ${{ inputs.stack_name }}"
+            echo "- **Porth API URL:** ${PORTH_API_URL:-'(unresolved)'}"
           } >> "$GITHUB_STEP_SUMMARY"
