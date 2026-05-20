@@ -158,6 +158,22 @@ jobs:
               PorthEnvironment=dev \
             --no-fail-on-empty-changeset
 
+      - name: Diagnose SAM managed-bucket failure
+        if: failure()
+        run: |
+          echo "=== aws-sam-cli-managed-default stack status ==="
+          aws cloudformation describe-stacks --stack-name aws-sam-cli-managed-default \
+            --query "Stacks[0].StackStatus" --output text 2>&1 || echo "(stack not found)"
+          echo ""
+          echo "=== failed resource events ==="
+          aws cloudformation describe-stack-events --stack-name aws-sam-cli-managed-default \
+            --query 'StackEvents[?contains(ResourceStatus, `FAILED`)].[LogicalResourceId,ResourceStatus,ResourceStatusReason]' \
+            --output text 2>&1 || echo "(no events)"
+          echo ""
+          echo "=== change sets ==="
+          aws cloudformation list-change-sets --stack-name aws-sam-cli-managed-default \
+            --query 'Summaries[].[ChangeSetName,Status,StatusReason]' --output text 2>&1 || echo "(no change sets)"
+
       - name: Capture CloudFront distribution outputs
         if: success()
         run: |
