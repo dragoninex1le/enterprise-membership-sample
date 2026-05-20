@@ -312,6 +312,7 @@ jobs:
           ROLES_TABLE=$(get_output RolesTableName)
           CLAIM_TABLE=$(get_output ClaimMappingConfigsTableName)
           APIGW_REGIONAL_DOMAIN=$(get_output ApiGatewayRegionalDomainName)
+          APIGW_REGIONAL_HZ=$(get_output ApiGatewayRegionalHostedZoneId)
 
           MISSING=""
           require() {
@@ -327,16 +328,62 @@ jobs:
             exit 1
           fi
 
-          echo "PORTH_API_URL=$PORTH_API_URL" >> "$GITHUB_ENV"
-          echo "PORTH_TENANTS_TABLE=$TENANTS_TABLE" >> "$GITHUB_ENV"
-          echo "PORTH_PERMISSIONS_TABLE=$PERMISSIONS_TABLE" >> "$GITHUB_ENV"
-          echo "PORTH_ROLES_TABLE=$ROLES_TABLE" >> "$GITHUB_ENV"
-          echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$CLAIM_TABLE" >> "$GITHUB_ENV"
+          echo "PORTH_API_URL=$PORTH_API_URL"                               >> "$GITHUB_ENV"
+          echo "PORTH_TENANTS_TABLE=$TENANTS_TABLE"                         >> "$GITHUB_ENV"
+          echo "PORTH_PERMISSIONS_TABLE=$PERMISSIONS_TABLE"                 >> "$GITHUB_ENV"
+          echo "PORTH_ROLES_TABLE=$ROLES_TABLE"                             >> "$GITHUB_ENV"
+          echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$CLAIM_TABLE"             >> "$GITHUB_ENV"
+          echo "APIGW_REGIONAL_DOMAIN=$APIGW_REGIONAL_DOMAIN"               >> "$GITHUB_ENV"
+          echo "APIGW_REGIONAL_HZ=$APIGW_REGIONAL_HZ"                       >> "$GITHUB_ENV"
           echo "✅ Resolved Porth outputs (API: $PORTH_API_URL)"
-          if [ -n "$APIGW_REGIONAL_DOMAIN" ] && [ "$APIGW_REGIONAL_DOMAIN" != "None" ]; then
-            echo "ℹ️  Route 53 alias target: $APIGW_REGIONAL_DOMAIN"
-            echo "   Create an ALIAS A record: porth-api.ems.estynsoftware.cloud → $APIGW_REGIONAL_DOMAIN"
+
+      - name: Upsert Route 53 alias for Porth API custom domain
+        # Idempotent: creates or updates the A-alias record pointing
+        # porth-api.ems.estynsoftware.cloud → API Gateway regional domain.
+        # Skipped if no custom domain was configured (PORTH_DOMAIN empty).
+        if: env.PORTH_DOMAIN != ''
+        run: |
+          set -euo pipefail
+          DOMAIN="${PORTH_DOMAIN}"
+          REGIONAL_DOMAIN="${APIGW_REGIONAL_DOMAIN}"
+          REGIONAL_HZ="${APIGW_REGIONAL_HZ}"
+
+          if [ -z "$REGIONAL_DOMAIN" ] || [ "$REGIONAL_DOMAIN" = "None" ]; then
+            echo "::warning::ApiGatewayRegionalDomainName not in stack outputs — skipping Route 53 upsert"
+            exit 0
           fi
+
+          # Derive parent zone name (porth-api.ems.estynsoftware.cloud → ems.estynsoftware.cloud)
+          PARENT="${DOMAIN#*.}"
+          HZ_ID=$(aws route53 list-hosted-zones-by-name \
+            --dns-name "${PARENT}." \
+            --query "HostedZones[?Name=='${PARENT}.'].Id" \
+            --output text 2>/dev/null | head -1 | sed 's|/hostedzone/||')
+
+          if [ -z "$HZ_ID" ]; then
+            echo "::warning::No Route 53 hosted zone found for $PARENT — skipping Route 53 upsert"
+            exit 0
+          fi
+
+          echo "Upserting: $DOMAIN → $REGIONAL_DOMAIN (apigw hz=$REGIONAL_HZ, r53 hz=$HZ_ID)"
+          aws route53 change-resource-record-sets \
+            --hosted-zone-id "$HZ_ID" \
+            --change-batch "{
+              \"Comment\": \"porth-install.yml: alias for Porth API custom domain\",
+              \"Changes\": [{
+                \"Action\": \"UPSERT\",
+                \"ResourceRecordSet\": {
+                  \"Name\": \"${DOMAIN}.\",
+                  \"Type\": \"A\",
+                  \"AliasTarget\": {
+                    \"HostedZoneId\": \"${REGIONAL_HZ}\",
+                    \"DNSName\": \"${REGIONAL_DOMAIN}.\",
+                    \"EvaluateTargetHealth\": false
+                  }
+                }
+              }]
+            }"
+          echo "✅ Route 53 alias upserted: $DOMAIN → $REGIONAL_DOMAIN"
 
       # Bootstrap runs on every successful install/upgrade (and on no-op) — the
       # platform tenant is independent of the CloudFormation stack and the
