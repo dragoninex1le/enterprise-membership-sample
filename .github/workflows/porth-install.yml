@@ -311,6 +311,7 @@ jobs:
           PERMISSIONS_TABLE=$(get_output PermissionsTableName)
           ROLES_TABLE=$(get_output RolesTableName)
           CLAIM_TABLE=$(get_output ClaimMappingConfigsTableName)
+          EXECUTE_API_URL=$(get_output ApiEndpoint)
           APIGW_REGIONAL_DOMAIN=$(get_output ApiGatewayRegionalDomainName)
           APIGW_REGIONAL_HZ=$(get_output ApiGatewayRegionalHostedZoneId)
 
@@ -329,13 +330,14 @@ jobs:
           fi
 
           echo "PORTH_API_URL=$PORTH_API_URL"                               >> "$GITHUB_ENV"
+          echo "PORTH_EXECUTE_API_URL=$EXECUTE_API_URL"                     >> "$GITHUB_ENV"
           echo "PORTH_TENANTS_TABLE=$TENANTS_TABLE"                         >> "$GITHUB_ENV"
           echo "PORTH_PERMISSIONS_TABLE=$PERMISSIONS_TABLE"                 >> "$GITHUB_ENV"
           echo "PORTH_ROLES_TABLE=$ROLES_TABLE"                             >> "$GITHUB_ENV"
           echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$CLAIM_TABLE"             >> "$GITHUB_ENV"
           echo "APIGW_REGIONAL_DOMAIN=$APIGW_REGIONAL_DOMAIN"               >> "$GITHUB_ENV"
           echo "APIGW_REGIONAL_HZ=$APIGW_REGIONAL_HZ"                       >> "$GITHUB_ENV"
-          echo "✅ Resolved Porth outputs (API: $PORTH_API_URL)"
+          echo "✅ Resolved Porth outputs (API: $PORTH_API_URL, execute-api: $EXECUTE_API_URL)"
 
       - name: Upsert Route 53 alias for Porth API custom domain
         # Idempotent: creates or updates the A-alias record pointing
@@ -420,9 +422,13 @@ jobs:
 
           PAYLOAD="{\"idp_config_override\":{\"domain\":\"${{ secrets.PLATFORM_AUTH0_DOMAIN }}\",\"client_id\":\"${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}\",\"audience\":\"${AUDIENCE}\"}}"
 
+          # Use the raw execute-api URL for bootstrap — the custom domain DNS
+          # record may not exist yet when this first runs (PORTH-471).
+          BOOTSTRAP_URL="${PORTH_EXECUTE_API_URL:-$PORTH_API_URL}"
+
           for attempt in 1 2 3 4 5; do
             STATUS=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
-              -X PATCH "${PORTH_API_URL}/tenants/platform" \
+              -X PATCH "${BOOTSTRAP_URL}/tenants/platform" \
               -H "Content-Type: application/json" \
               -H "Authorization: Bearer $TEST_TOKEN" \
               -d "$PAYLOAD")
@@ -439,11 +445,13 @@ jobs:
 
       - name: Smoke test Porth API
         run: |
-          STATUS=$(curl -s -o /tmp/health.json -w "%{http_code}" "${PORTH_API_URL}/health" || echo "000")
+          # Use raw execute-api URL so smoke test works before DNS record exists
+          SMOKE_URL="${PORTH_EXECUTE_API_URL:-$PORTH_API_URL}"
+          STATUS=$(curl -s -o /tmp/health.json -w "%{http_code}" "${SMOKE_URL}/health" || echo "000")
           if [[ "$STATUS" == "200" ]]; then
             echo "✅ Smoke test passed (GET /health → 200)"
           else
-            echo "::warning::Smoke test: GET /health → HTTP $STATUS (Porth may not expose /health yet — non-fatal)"
+            echo "::warning::Smoke test: GET /health → HTTP $STATUS (non-fatal)"
           fi
 
       - name: Summary
