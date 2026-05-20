@@ -2,7 +2,7 @@ name: Porth components — install + upgrade
 
 # PORTH-471 — Pipeline 1.
 #
-# Installs or upgrades the Porth components stack (porth-prod) in the EMS
+# Installs or upgrades the Porth components stack (serverlessrepo-porth-components) in the EMS
 # account by consuming the porth-user-management SAR application, then
 # bootstraps the reserved 'platform' tenant and patches its IdP config.
 #
@@ -25,11 +25,11 @@ on:
       sar_version:
         description: 'Porth SAR app semantic version to install/upgrade to'
         required: true
-        default: '0.0.3'
+        default: '0.0.4'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
-        default: 'serverlessrepo-porth-prod'
+        default: 'serverlessrepo-porth-components'
       sar_app_id:
         description: 'Porth SAR application ARN'
         required: false
@@ -242,11 +242,11 @@ jobs:
             --output json)
           echo "DynamoDB table changes in change set: $CHANGES"
           DESTRUCTIVE=$(echo "$CHANGES" | python3 -c '
-          import json, sys
-          changes = json.load(sys.stdin) or []
-          bad = [c for c in changes if c.get("Action") == "Remove" or c.get("Replacement") == "True"]
-          print(json.dumps(bad))
-          ')
+import json, sys
+changes = json.load(sys.stdin) or []
+bad = [c for c in changes if c.get("Action") == "Remove" or c.get("Replacement") == "True"]
+print(json.dumps(bad))
+')
           if [ "$DESTRUCTIVE" != "[]" ]; then
             echo "::error::Change set would Remove or Replace DynamoDB tables — aborting to protect data (ADR-Z1/Z2)."
             echo "Destructive changes: $DESTRUCTIVE"
@@ -312,7 +312,7 @@ jobs:
           require RolesTableName "$ROLES_TABLE"
           require ClaimMappingConfigsTableName "$CLAIM_TABLE"
           if [ -n "$MISSING" ]; then
-            echo "::error::porth-prod stack is missing expected outputs:$MISSING"
+            echo "::error::porth-components stack is missing expected outputs:$MISSING"
             exit 1
           fi
 
