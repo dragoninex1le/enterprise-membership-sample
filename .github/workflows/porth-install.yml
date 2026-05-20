@@ -19,9 +19,6 @@ name: Porth components — install + upgrade
 # A change-set inspection step aborts before execute if the change set would
 # Remove or Replace any DynamoDB table (ADR-Z1/Z2 — DDB safety).
 #
-# push trigger on PORTH-471/fix-changeset-name (via .trigger-pipeline-1 path) is
-# a temporary Ralph-loop bootstrap shim — removed before this PR merges to main.
-
 on:
   workflow_dispatch:
     inputs:
@@ -49,9 +46,6 @@ on:
         description: 'ACM certificate ARN for the custom domain (required when api_domain_name is set).'
         required: false
         default: ''
-  push:
-    branches: ['PORTH-471/fix-changeset-name']
-    paths: ['.trigger-pipeline-1']
 
 permissions:
   id-token: write
@@ -446,19 +440,6 @@ jobs:
             }" \
             --region "$AWS_REGION"
           echo "✅ Platform tenant IdP config updated (direct DynamoDB)"
-
-      - name: Diagnose IdP PATCH error (fetch Lambda logs)
-        if: failure()
-        continue-on-error: true
-        run: |
-          # Tail recent CloudWatch log entries for the porth-api Lambda to get
-          # the actual Python traceback behind the HTTP 500.
-          echo "=== Recent porth-api-dev Lambda logs ==="
-          aws logs tail /aws/lambda/porth-api-dev \
-            --since 5m \
-            --format short \
-            --region "$AWS_REGION" 2>/dev/null | tail -100 || \
-          echo "(CloudWatch logs not accessible from porth-install-role)"
 
       - name: Smoke test Porth API
         run: |
