@@ -211,6 +211,12 @@ jobs:
             PARAMS+=( "ParameterKey=ApiDomainName,ParameterValue=${PORTH_DOMAIN}" )
             PARAMS+=( "ParameterKey=AcmCertificateArn,ParameterValue=${PORTH_CERT}" )
           fi
+          # AuthTestToken enables the Layer 1 JWT bypass in the Lambda authorizer.
+          # Only set if the secret is present — otherwise the bypass is disabled.
+          AUTH_TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
+          if [ -n "$AUTH_TEST_TOKEN" ]; then
+            PARAMS+=( "ParameterKey=AuthTestToken,ParameterValue=$AUTH_TEST_TOKEN" )
+          fi
           # GitHubRepoOwner intentionally omitted → SAR CreateDeployRole condition stays false.
 
           echo "Creating $CS_TYPE change set: $CHANGE_SET_NAME"
