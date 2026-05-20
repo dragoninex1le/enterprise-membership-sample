@@ -341,7 +341,10 @@ jobs:
         # Idempotent: creates or updates the A-alias record pointing
         # porth-api.ems.estynsoftware.cloud → API Gateway regional domain.
         # Skipped if no custom domain was configured (PORTH_DOMAIN empty).
+        # Non-fatal: if IAM perms are missing the operator must create the
+        # record manually; subsequent steps (bootstrap, IdP patch) still run.
         if: env.PORTH_DOMAIN != ''
+        continue-on-error: true
         run: |
           set -euo pipefail
           DOMAIN="${PORTH_DOMAIN}"
@@ -358,10 +361,11 @@ jobs:
           HZ_ID=$(aws route53 list-hosted-zones-by-name \
             --dns-name "${PARENT}." \
             --query "HostedZones[?Name=='${PARENT}.'].Id" \
-            --output text 2>/dev/null | head -1 | sed 's|/hostedzone/||')
+            --output text | head -1 | sed 's|/hostedzone/||')
 
           if [ -z "$HZ_ID" ]; then
             echo "::warning::No Route 53 hosted zone found for $PARENT — skipping Route 53 upsert"
+            echo "  Manual step: create ALIAS A record $DOMAIN → $REGIONAL_DOMAIN (hz $REGIONAL_HZ)"
             exit 0
           fi
 
