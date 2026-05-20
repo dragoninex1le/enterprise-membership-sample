@@ -18,6 +18,9 @@ name: Porth components — install + upgrade
 #
 # A change-set inspection step aborts before execute if the change set would
 # Remove or Replace any DynamoDB table (ADR-Z1/Z2 — DDB safety).
+#
+# push trigger on PORTH-471/fix-changeset-name (via .trigger-pipeline-1 path) is
+# a temporary Ralph-loop bootstrap shim — removed before this PR merges to main.
 
 on:
   workflow_dispatch:
@@ -46,13 +49,16 @@ on:
         description: 'ACM certificate ARN for the custom domain (required when api_domain_name is set).'
         required: false
         default: ''
+  push:
+    branches: ['PORTH-471/fix-changeset-name']
+    paths: ['.trigger-pipeline-1']
 
 permissions:
   id-token: write
   contents: read
 
 concurrency:
-  group: porth-install-${{ inputs.stack_name }}
+  group: porth-install-${{ inputs.stack_name || 'serverlessrepo-porth-components' }}
   cancel-in-progress: false
 
 env:
@@ -60,7 +66,7 @@ env:
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.sar_version }}
+    name: Install or upgrade Porth ${{ inputs.sar_version || '0.0.4' }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
@@ -76,6 +82,15 @@ jobs:
       - name: Install Python dependencies
         run: pip install boto3
 
+      # Resolves workflow_dispatch inputs with hard-coded defaults so this job
+      # also works when triggered by the push shim (inputs are empty on push).
+      - name: Resolve effective inputs
+        run: |
+          echo "EFF_SAR_VERSION=${{ inputs.sar_version || '0.0.4' }}" >> "$GITHUB_ENV"
+          echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
+          echo "EFF_SAR_APP_ID=${{ inputs.sar_app_id || 'arn:aws:serverlessrepo:us-east-1:084847995635:applications/porth-user-management' }}" >> "$GITHUB_ENV"
+          echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -88,7 +103,7 @@ jobs:
       - name: Validate inputs and resolve domain parameters
         run: |
           set -euo pipefail
-          APP_ARN="${{ inputs.sar_app_id }}"
+          APP_ARN="${{ env.EFF_SAR_APP_ID }}"
           if [[ ! "$APP_ARN" =~ ^arn:aws:serverlessrepo:[a-z0-9-]+:[0-9]+:applications/[a-zA-Z0-9_-]+$ ]]; then
             echo "::error::Invalid sar_app_id: $APP_ARN"
             exit 1
@@ -108,7 +123,7 @@ jobs:
       - name: Pre-flight stack-state check
         id: preflight
         env:
-          STACK: ${{ inputs.stack_name }}
+          STACK: ${{ env.EFF_STACK_NAME }}
         run: |
           set -euo pipefail
           STATUS=$(aws cloudformation describe-stacks \
@@ -145,15 +160,15 @@ jobs:
         id: render
         run: |
           set -euo pipefail
-          echo "Rendering SAR template: ${{ inputs.sar_app_id }} @ ${{ inputs.sar_version }}"
+          echo "Rendering SAR template: ${{ env.EFF_SAR_APP_ID }} @ ${{ env.EFF_SAR_VERSION }}"
           CREATE_OUT=$(aws serverlessrepo create-cloud-formation-template \
-            --application-id "${{ inputs.sar_app_id }}" \
-            --semantic-version "${{ inputs.sar_version }}" \
+            --application-id "${{ env.EFF_SAR_APP_ID }}" \
+            --semantic-version "${{ env.EFF_SAR_VERSION }}" \
             --output json)
           TEMPLATE_ID=$(echo "$CREATE_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["TemplateId"])')
           for i in $(seq 1 30); do
             GET_OUT=$(aws serverlessrepo get-cloud-formation-template \
-              --application-id "${{ inputs.sar_app_id }}" \
+              --application-id "${{ env.EFF_SAR_APP_ID }}" \
               --template-id "$TEMPLATE_ID" --output json)
             STATUS=$(echo "$GET_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["Status"])')
             if [ "$STATUS" = "ACTIVE" ]; then
@@ -174,7 +189,7 @@ jobs:
       - name: Create change set
         id: changeset
         env:
-          STACK: ${{ inputs.stack_name }}
+          STACK: ${{ env.EFF_STACK_NAME }}
           CFN_EXECUTION_ROLE_ARN: ${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}
         run: |
           set -euo pipefail
@@ -191,7 +206,7 @@ jobs:
           fi
           CHANGE_SET_NAME="porth-${{ steps.preflight.outputs.action }}-$(date -u +%Y%m%d-%H%M%S)"
 
-          PARAMS=( "ParameterKey=Environment,ParameterValue=${{ inputs.environment_name }}" )
+          PARAMS=( "ParameterKey=Environment,ParameterValue=${{ env.EFF_ENV_NAME }}" )
           if [ -n "${PORTH_DOMAIN:-}" ]; then
             PARAMS+=( "ParameterKey=ApiDomainName,ParameterValue=${PORTH_DOMAIN}" )
             PARAMS+=( "ParameterKey=AcmCertificateArn,ParameterValue=${PORTH_CERT}" )
@@ -256,7 +271,7 @@ print(json.dumps(bad))
 
       - name: Execute change set
         env:
-          STACK: ${{ inputs.stack_name }}
+          STACK: ${{ env.EFF_STACK_NAME }}
         run: |
           set -euo pipefail
           if [ "${{ steps.changeset.outputs.no_changes }}" = "true" ]; then
@@ -287,7 +302,7 @@ print(json.dumps(bad))
 
       - name: Resolve Porth stack outputs
         env:
-          STACK: ${{ inputs.stack_name }}
+          STACK: ${{ env.EFF_STACK_NAME }}
         run: |
           set -euo pipefail
           get_output() {
@@ -388,7 +403,7 @@ print(json.dumps(bad))
             echo ""
             echo "- **Action:** ${{ steps.preflight.outputs.action }}"
             echo "- **No-op:** ${{ steps.changeset.outputs.no_changes || 'false' }}"
-            echo "- **Target version:** ${{ inputs.sar_version }}"
-            echo "- **Stack:** ${{ inputs.stack_name }}"
+            echo "- **Target version:** ${{ env.EFF_SAR_VERSION }}"
+            echo "- **Stack:** ${{ env.EFF_STACK_NAME }}"
             echo "- **Porth API URL:** ${PORTH_API_URL:-'(unresolved)'}"
           } >> "$GITHUB_STEP_SUMMARY"
