@@ -2,16 +2,11 @@ name: Deploy Admin UI
 
 on:
   push:
-    branches: ['**']
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      run_api_tests:
-        description: 'Run API integration tests (wipes all DynamoDB tables before and after — opt-in only)'
-        type: boolean
-        default: false
 
-# Serialise deploy runs per branch — prevents concurrent cleanup/bootstrap
-# steps from racing each other and deleting the platform tenant mid-flight.
+# Serialise deploy runs per branch so concurrent runs don't race on the
+# shared sample-app stack.
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: true
@@ -30,6 +25,12 @@ jobs:
   deploy:
     name: Build and Deploy
     runs-on: ubuntu-latest
+    environment: sample-app-deploy
+    env:
+      # Porth components CloudFormation stack name. A SAR *console* install
+      # names the stack serverlessrepo-<app-name>. Override by setting the
+      # PORTH_STACK_NAME variable in the sample-app-deploy environment.
+      PORTH_STACK_NAME: ${{ vars.PORTH_STACK_NAME || 'serverlessrepo-porth-components' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -52,43 +53,68 @@ jobs:
       - name: Install Python dependencies
         run: pip install boto3
 
-      - name: Validate required secrets
+      - name: Validate required config
         run: |
           MISSING=()
-          [ -z "${{ secrets.ACM_CERTIFICATE_ARN }}" ]        && MISSING+=("ACM_CERTIFICATE_ARN")
-          [ -z "${{ secrets.GH_PAT }}" ]                    && MISSING+=("GH_PAT")
-          [ -z "${{ secrets.AWS_ROLE_ARN }}" ]              && MISSING+=("AWS_ROLE_ARN")
-          [ -z "${{ secrets.PLATFORM_AUTH0_DOMAIN }}" ]     && MISSING+=("PLATFORM_AUTH0_DOMAIN")
-          [ -z "${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}" ]  && MISSING+=("PLATFORM_AUTH0_CLIENT_ID")
-          [ -z "${{ secrets.PORTH_AUTH_TEST_TOKEN }}" ]     && MISSING+=("PORTH_AUTH_TEST_TOKEN")
+          [ -z "${{ vars.ACM_CERTIFICATE_ARN }}" ] && MISSING+=("ACM_CERTIFICATE_ARN (env var)")
+          [ -z "${{ secrets.GH_PAT }}" ]           && MISSING+=("GH_PAT (secret)")
           if [ ${#MISSING[@]} -gt 0 ]; then
-            echo "❌ Missing required secrets: ${MISSING[*]}"
+            echo "❌ Missing required config: ${MISSING[*]}"
             exit 1
           fi
-          echo "✅ All required secrets present"
+          echo "✅ All required config present"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Resolve porth-components stack outputs
+      - name: Verify Porth components are deployed in EMS (pre-check)
         run: |
-          STACK=porth-components
+          echo "Looking for the Porth components stack: $PORTH_STACK_NAME"
+          set +e
+          STACK_STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "$PORTH_STACK_NAME" \
+            --query "Stacks[0].StackStatus" --output text 2>&1)
+          DESCRIBE_RC=$?
+          set -e
+          if [ "$DESCRIBE_RC" -ne 0 ]; then
+            echo "❌ Could not find the Porth stack '$PORTH_STACK_NAME'. AWS said:"
+            echo "$STACK_STATUS"
+            echo ""
+            echo "Porth-related stacks that DO exist in this account:"
+            aws cloudformation list-stacks \
+              --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE UPDATE_ROLLBACK_COMPLETE IMPORT_COMPLETE \
+              --query "StackSummaries[?contains(StackName, 'porth') || contains(StackName, 'serverlessrepo')].StackName" \
+              --output text || true
+            echo ""
+            echo "If the name differs, set the PORTH_STACK_NAME variable in the"
+            echo "sample-app-deploy environment to the correct stack name."
+            exit 1
+          fi
+          if [[ "$STACK_STATUS" != "CREATE_COMPLETE" && "$STACK_STATUS" != "UPDATE_COMPLETE" ]]; then
+            echo "❌ Porth stack '$PORTH_STACK_NAME' is in state $STACK_STATUS — not safe to deploy against it"
+            exit 1
+          fi
+          echo "✅ Porth components present and healthy ($PORTH_STACK_NAME — $STACK_STATUS)"
+
+      - name: Resolve Porth stack outputs (EMS)
+        run: |
+          STACK="$PORTH_STACK_NAME"
           get_output() {
             aws cloudformation describe-stacks \
               --stack-name "$STACK" \
               --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
               --output text
           }
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          echo "PORTH_API_URL=$(get_output PorthApiUrl)"                                       >> $GITHUB_ENV
-          echo "PORTH_TENANTS_TABLE=$(get_output TenantsTableName)"                            >> $GITHUB_ENV
-          echo "PORTH_PERMISSIONS_TABLE=$(get_output PermissionsTableName)"                    >> $GITHUB_ENV
-          echo "PORTH_ROLES_TABLE=$(get_output RolesTableName)"                                >> $GITHUB_ENV
-          echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$(get_output ClaimMappingConfigsTableName)"  >> $GITHUB_ENV
-          echo "SAM_ARTIFACTS_BUCKET=porth-sam-artifacts-${ACCOUNT_ID}"                       >> $GITHUB_ENV
+          PORTH_API_URL=$(get_output PorthApiUrl)
+          if [ -z "$PORTH_API_URL" ] || [ "$PORTH_API_URL" == "None" ]; then
+            echo "❌ Could not resolve PorthApiUrl from the $STACK stack outputs"
+            exit 1
+          fi
+          echo "PORTH_API_URL=$PORTH_API_URL" >> $GITHUB_ENV
+          echo "✅ Resolved PORTH_API_URL=$PORTH_API_URL"
 
       - name: Resolve sample app stack outputs
         run: |
@@ -111,9 +137,31 @@ jobs:
           VITE_SAMPLE_APP_API_URL: ${{ env.SAMPLE_APP_API_URL }}
           VITE_PLATFORM_APEX: porth-sample
 
-      # ── Step 1: SAM build + deploy ───────────────────────────────────────────
+      # ── SAM build + deploy ───────────────────────────────────────────────────────────────
       - name: SAM build
         run: sam build
+
+      - name: Clean up stacks stuck in a non-recoverable state
+        run: |
+          # A stack left in REVIEW_IN_PROGRESS (failed --resolve-s3) or
+          # ROLLBACK_COMPLETE / *_FAILED (failed initial CREATE) cannot be
+          # updated — it must be deleted before it can be recreated cleanly.
+          for STACK in aws-sam-cli-managed-default "$SAM_STACK_NAME"; do
+            STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+              --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
+            echo "$STACK state: $STATUS"
+            case "$STATUS" in
+              REVIEW_IN_PROGRESS|ROLLBACK_COMPLETE|CREATE_FAILED|ROLLBACK_FAILED|DELETE_FAILED)
+                echo "  Deleting $STACK (state $STATUS) so it can be recreated cleanly..."
+                aws cloudformation delete-stack --stack-name "$STACK"
+                aws cloudformation wait stack-delete-complete --stack-name "$STACK" || true
+                echo "  Deleted."
+                ;;
+              *)
+                echo "  No cleanup needed."
+                ;;
+            esac
+          done
 
       - name: SAM deploy (infrastructure)
         run: |
@@ -121,14 +169,56 @@ jobs:
             --stack-name ${{ env.SAM_STACK_NAME }} \
             --region ${{ env.AWS_REGION }} \
             --capabilities CAPABILITY_IAM \
-            --s3-bucket ${{ env.SAM_ARTIFACTS_BUCKET }} \
+            --resolve-s3 \
             --s3-prefix ${{ env.SAM_STACK_NAME }} \
             --parameter-overrides \
               Environment=dev \
               PorthApiUrl=${{ env.PORTH_API_URL }} \
-              AcmCertificateArn=${{ secrets.ACM_CERTIFICATE_ARN }} \
+              AcmCertificateArn=${{ vars.ACM_CERTIFICATE_ARN }} \
+              CloudFrontAlias='*.porth-sample.ems.estynsoftware.cloud' \
+              CloudFrontApexAlias='porth-sample.ems.estynsoftware.cloud' \
               PorthEnvironment=dev \
             --no-fail-on-empty-changeset
+
+      - name: Diagnose SAM managed-bucket failure
+        if: failure()
+        run: |
+          echo "=== aws-sam-cli-managed-default stack status ==="
+          aws cloudformation describe-stacks --stack-name aws-sam-cli-managed-default \
+            --query "Stacks[0].StackStatus" --output text 2>&1 || echo "(stack not found)"
+          echo ""
+          echo "=== failed resource events ==="
+          aws cloudformation describe-stack-events --stack-name aws-sam-cli-managed-default \
+            --query 'StackEvents[?contains(ResourceStatus, `FAILED`)].[LogicalResourceId,ResourceStatus,ResourceStatusReason]' \
+            --output text 2>&1 || echo "(no events)"
+          echo ""
+          echo "=== change sets ==="
+          aws cloudformation list-change-sets --stack-name aws-sam-cli-managed-default \
+            --query 'Summaries[].[ChangeSetName,Status,StatusReason]' --output text 2>&1 || echo "(no change sets)"
+
+      - name: Capture CloudFront distribution outputs
+        if: success()
+        run: |
+          set -euo pipefail
+          CF_DOMAIN=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.SAM_STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].Outputs[?OutputKey=='CloudFrontUrl'].OutputValue" \
+            --output text 2>/dev/null || echo "")
+          CF_DIST_ID=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.SAM_STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" \
+            --output text 2>/dev/null || echo "")
+          echo "CloudFront domain: $CF_DOMAIN"
+          echo "CloudFront distribution ID: $CF_DIST_ID"
+          {
+            echo "## CloudFront Distribution"
+            echo "- **Domain:** $CF_DOMAIN"
+            echo "- **Distribution ID:** $CF_DIST_ID"
+            echo "- **Alias record needed:** porth-sample.ems.estynsoftware.cloud → $CF_DOMAIN"
+            echo "- **CloudFront Hosted Zone ID for Alias:** Z2FDTNDATAQYW2"
+          } >> $GITHUB_STEP_SUMMARY
 
       - name: Resolve stack outputs
         id: outputs
@@ -141,17 +231,10 @@ jobs:
             --stack-name ${{ env.SAM_STACK_NAME }} \
             --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" \
             --output text)
-          CLEANUP_FN=$(aws cloudformation describe-stacks \
-            --stack-name porth-qa-tools \
-            --query "Stacks[0].Outputs[?OutputKey=='QaCleanupFunctionArn'].OutputValue" \
-            --output text)
-          echo "bucket=$BUCKET"         >> $GITHUB_OUTPUT
-          echo "cf_id=$CF_ID"           >> $GITHUB_OUTPUT
-          echo "cleanup_fn=$CLEANUP_FN" >> $GITHUB_OUTPUT
+          echo "bucket=$BUCKET" >> $GITHUB_OUTPUT
+          echo "cf_id=$CF_ID"   >> $GITHUB_OUTPUT
 
-      # ── Step 2: Sync frontend assets to S3 + invalidate CDN ─────────────────────
-      # Done immediately after infrastructure deploy so the live site is always
-      # up-to-date even if the bootstrap/test steps below fail.
+      # ── Sync frontend assets to S3 + invalidate CDN ────────────────────────────
       - name: Sync assets to S3
         run: |
           aws s3 sync frontend/dist s3://${{ steps.outputs.outputs.bucket }} \
@@ -167,152 +250,3 @@ jobs:
           aws cloudfront create-invalidation \
             --distribution-id ${{ steps.outputs.outputs.cf_id }} \
             --paths "/*"
-
-      # ── Step 3: Cleanup (pre-test) ─────────────────────────────────────────────
-      # Only runs when explicitly opted in via workflow_dispatch run_api_tests:true.
-      # Normal pushes to main never wipe DynamoDB — use reset-env.yml for that.
-      - name: Cleanup (pre-test)
-        if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.run_api_tests == true
-        run: |
-          python3 - <<'EOF'
-          import boto3, json, sys
-
-          TABLES = [
-              "porth-users-dev",
-              "porth-tenants-dev",
-              "porth-permissions-dev",
-              "porth-roles-dev",
-              "porth-claim-mapping-configs-dev",
-              "porth-org-units-dev",
-          ]
-          fn = "${{ steps.outputs.outputs.cleanup_fn }}"
-          client = boto3.client("lambda", region_name="us-east-1")
-          failed = False
-
-          print("Pre-test cleanup")
-          for table in TABLES:
-              payload = {"body": json.dumps({"table_name": table})}
-              resp = client.invoke(FunctionName=fn, Payload=json.dumps(payload))
-              result = json.loads(resp["Payload"].read())
-              body = json.loads(result.get("body", "{}"))
-              if result.get("statusCode", 200) == 200:
-                  print(f"  ✅ {table}: deleted {body.get('deleted', '?')} items")
-              else:
-                  print(f"  ❌ {table}: {body.get('error', result)}", file=sys.stderr)
-                  failed = True
-
-          sys.exit(1 if failed else 0)
-          EOF
-
-      # ── Step 4: Bootstrap platform tenant (pre-test) ────────────────────────────
-      - name: Bootstrap platform tenant (pre-test)
-        if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.run_api_tests == true
-        env:
-          PORTH_TENANTS_TABLE: ${{ env.PORTH_TENANTS_TABLE }}
-          PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
-          PORTH_ROLES_TABLE: ${{ env.PORTH_ROLES_TABLE }}
-          PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
-        run: python3 scripts/bootstrap_platform_tenant.py
-
-      # ── Step 5: Run API integration tests ──────────────────────────────────────
-      - name: Run API integration tests
-        if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.run_api_tests == true
-        env:
-          PORTH_AUTH_TEST_TOKEN: ${{ secrets.PORTH_AUTH_TEST_TOKEN }}
-        run: |
-          PORTH_API_URL="${{ env.PORTH_API_URL }}" \
-            bash scripts/api-tests/run-all.sh
-
-      # ── Step 6: Cleanup (post-test) ──────────────────────────────────────────────
-      - name: Cleanup (post-test)
-        if: always() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.run_api_tests == true
-        run: |
-          python3 - <<'EOF'
-          import boto3, json, sys
-
-          TABLES = [
-              "porth-users-dev",
-              "porth-tenants-dev",
-              "porth-permissions-dev",
-              "porth-roles-dev",
-              "porth-claim-mapping-configs-dev",
-              "porth-org-units-dev",
-          ]
-          fn = "${{ steps.outputs.outputs.cleanup_fn }}"
-          client = boto3.client("lambda", region_name="us-east-1")
-          failed = False
-
-          print("Post-test cleanup")
-          for table in TABLES:
-              payload = {"body": json.dumps({"table_name": table})}
-              resp = client.invoke(FunctionName=fn, Payload=json.dumps(payload))
-              result = json.loads(resp["Payload"].read())
-              body = json.loads(result.get("body", "{}"))
-              if result.get("statusCode", 200) == 200:
-                  print(f"  ✅ {table}: deleted {body.get('deleted', '?')} items")
-              else:
-                  print(f"  ❌ {table}: {body.get('error', result)}", file=sys.stderr)
-                  failed = True
-
-          sys.exit(1 if failed else 0)
-          EOF
-
-      # ── Step 7: Bootstrap platform tenant ───────────────────────────────────────
-      # Runs on every main deploy. Applies platform configuration changes
-      # (permissions upserted, role-permission links regenerated, claim mapping
-      # versioned) while leaving user-created tenants, orgs and users untouched.
-      # Also serves as the post-test reseed when run_api_tests is true, so always()
-      # is required to ensure it runs even if the integration tests or cleanup failed.
-      - name: Bootstrap platform tenant
-        if: always() && github.ref == 'refs/heads/main'
-        env:
-          PORTH_TENANTS_TABLE: ${{ env.PORTH_TENANTS_TABLE }}
-          PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
-          PORTH_ROLES_TABLE: ${{ env.PORTH_ROLES_TABLE }}
-          PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
-        run: python3 scripts/bootstrap_platform_tenant.py
-
-      # ── Step 8: Patch platform tenant IdP config ─────────────────────────────────
-      # Audience is read from PORTH_TENANT_CONFIG (same JSON blob used for E2E IdP
-      # setup). PLATFORM_AUTH0_AUDIENCE is used as fallback if not present.
-      - name: Patch platform tenant IdP config
-        if: always() && github.ref == 'refs/heads/main'
-        env:
-          PORTH_TENANT_CONFIG: ${{ secrets.PORTH_TENANT_CONFIG }}
-        run: |
-          TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
-          RESPONSE_FILE="/tmp/patch-tenant.json"
-
-          # Extract audience from PORTH_TENANT_CONFIG.
-          # Use || true so bash -e doesn't exit if PORTH_TENANT_CONFIG is not
-          # valid JSON. Also try double-decode for JSON-encoded-JSON secrets.
-          AUDIENCE=$(echo "$PORTH_TENANT_CONFIG" | python3 -c \
-            "import json,sys; raw=sys.stdin.read().strip(); d=json.loads(raw); d=d if isinstance(d,dict) else json.loads(d); print(d.get('audience',''),end='')" \
-            2>/dev/null || true)
-          if [ -z "$AUDIENCE" ]; then
-            AUDIENCE="${{ secrets.PLATFORM_AUTH0_AUDIENCE }}"
-          fi
-          echo "Resolved audience (length=${#AUDIENCE})"
-
-          PAYLOAD="{\"idp_config_override\":{\"domain\":\"${{ secrets.PLATFORM_AUTH0_DOMAIN }}\",\"client_id\":\"${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}\",\"audience\":\"${AUDIENCE}\"}}"
-
-          for attempt in 1 2 3 4 5; do
-            STATUS=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
-              -X PATCH "${{ env.PORTH_API_URL }}/tenants/platform" \
-              -H "Content-Type: application/json" \
-              -H "Authorization: Bearer $TEST_TOKEN" \
-              -d "$PAYLOAD")
-            echo "Attempt $attempt: PATCH /tenants/platform → HTTP $STATUS"
-            if [[ "$STATUS" == "200" ]]; then
-              echo "✅ Platform tenant IdP config updated"
-              break
-            fi
-            echo "Response: $(cat $RESPONSE_FILE)"
-            if [[ $attempt -lt 5 ]]; then
-              echo "Retrying in 5s..."
-              sleep 5
-            else
-              echo "❌ Failed to patch tenant IdP config after $attempt attempts"
-              exit 1
-            fi
-          done
