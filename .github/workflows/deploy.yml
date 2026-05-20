@@ -141,22 +141,27 @@ jobs:
       - name: SAM build
         run: sam build
 
-      - name: Clean up stale SAM managed-bucket stack
+      - name: Clean up stacks stuck in a non-recoverable state
         run: |
-          STATUS=$(aws cloudformation describe-stacks --stack-name aws-sam-cli-managed-default \
-            --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
-          echo "aws-sam-cli-managed-default state: $STATUS"
-          case "$STATUS" in
-            REVIEW_IN_PROGRESS|ROLLBACK_COMPLETE|CREATE_FAILED|DELETE_FAILED)
-              echo "Deleting stale managed-bucket stack so --resolve-s3 can recreate it cleanly..."
-              aws cloudformation delete-stack --stack-name aws-sam-cli-managed-default
-              aws cloudformation wait stack-delete-complete --stack-name aws-sam-cli-managed-default || true
-              echo "Deleted."
-              ;;
-            *)
-              echo "No cleanup needed."
-              ;;
-          esac
+          # A stack left in REVIEW_IN_PROGRESS (failed --resolve-s3) or
+          # ROLLBACK_COMPLETE / *_FAILED (failed initial CREATE) cannot be
+          # updated — it must be deleted before it can be recreated cleanly.
+          for STACK in aws-sam-cli-managed-default "$SAM_STACK_NAME"; do
+            STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+              --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
+            echo "$STACK state: $STATUS"
+            case "$STATUS" in
+              REVIEW_IN_PROGRESS|ROLLBACK_COMPLETE|CREATE_FAILED|ROLLBACK_FAILED|DELETE_FAILED)
+                echo "  Deleting $STACK (state $STATUS) so it can be recreated cleanly..."
+                aws cloudformation delete-stack --stack-name "$STACK"
+                aws cloudformation wait stack-delete-complete --stack-name "$STACK" || true
+                echo "  Deleted."
+                ;;
+              *)
+                echo "  No cleanup needed."
+                ;;
+            esac
+          done
 
       - name: SAM deploy (infrastructure)
         run: |
