@@ -2,14 +2,14 @@ name: Porth components — install + upgrade
 
 # PORTH-471 — Pipeline 1.
 #
-# Installs or upgrades the Porth components stack (porth-prod) in the EMS
+# Installs or upgrades the Porth components stack (serverlessrepo-porth-components) in the EMS
 # account by consuming the porth-user-management SAR application, then
 # bootstraps the reserved 'platform' tenant and patches its IdP config.
 #
-# One-step SAR consume: `serverlessrepo create-cloud-formation-change-set`
-# renders the SAR template and creates the CloudFormation change set in a
-# single call. The change set executes with the porth-install-role's own
-# permissions (there is no separate CFN execution role on this path).
+# Two-step SAR consume (PORTH-459 pattern): render the SAR template, then
+# `cloudformation create-change-set --role-arn <porth-cfn-execution-role>` so
+# CloudFormation performs every resource operation as the dedicated execution
+# role. porth-install-role only orchestrates — it calls the CFN/SAR APIs.
 #
 # GitHubRepoOwner is intentionally NOT passed, so the SAR template's
 # CreateDeployRole condition stays false — no porth-deploy-role is created
@@ -18,18 +18,18 @@ name: Porth components — install + upgrade
 #
 # A change-set inspection step aborts before execute if the change set would
 # Remove or Replace any DynamoDB table (ADR-Z1/Z2 — DDB safety).
-
+#
 on:
   workflow_dispatch:
     inputs:
       sar_version:
         description: 'Porth SAR app semantic version to install/upgrade to'
         required: true
-        default: '0.0.3'
+        default: '0.0.4'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
-        default: 'porth-prod'
+        default: 'serverlessrepo-porth-components'
       sar_app_id:
         description: 'Porth SAR application ARN'
         required: false
@@ -52,7 +52,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: porth-install-${{ inputs.stack_name }}
+  group: porth-install-${{ inputs.stack_name || 'serverlessrepo-porth-components' }}
   cancel-in-progress: false
 
 env:
@@ -60,7 +60,7 @@ env:
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.sar_version }}
+    name: Install or upgrade Porth ${{ inputs.sar_version || '0.0.4' }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
@@ -76,6 +76,15 @@ jobs:
       - name: Install Python dependencies
         run: pip install boto3
 
+      # Resolves workflow_dispatch inputs with hard-coded defaults so this job
+      # also works when triggered by the push shim (inputs are empty on push).
+      - name: Resolve effective inputs
+        run: |
+          echo "EFF_SAR_VERSION=${{ inputs.sar_version || '0.0.4' }}" >> "$GITHUB_ENV"
+          echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
+          echo "EFF_SAR_APP_ID=${{ inputs.sar_app_id || 'arn:aws:serverlessrepo:us-east-1:084847995635:applications/porth-user-management' }}" >> "$GITHUB_ENV"
+          echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -88,7 +97,7 @@ jobs:
       - name: Validate inputs and resolve domain parameters
         run: |
           set -euo pipefail
-          APP_ARN="${{ inputs.sar_app_id }}"
+          APP_ARN="${{ env.EFF_SAR_APP_ID }}"
           if [[ ! "$APP_ARN" =~ ^arn:aws:serverlessrepo:[a-z0-9-]+:[0-9]+:applications/[a-zA-Z0-9_-]+$ ]]; then
             echo "::error::Invalid sar_app_id: $APP_ARN"
             exit 1
@@ -108,7 +117,7 @@ jobs:
       - name: Pre-flight stack-state check
         id: preflight
         env:
-          STACK: ${{ inputs.stack_name }}
+          STACK: ${{ env.EFF_STACK_NAME }}
         run: |
           set -euo pipefail
           STATUS=$(aws cloudformation describe-stacks \
@@ -141,31 +150,80 @@ jobs:
               ;;
           esac
 
-      - name: SAR create change set
-        id: changeset
-        env:
-          STACK: ${{ inputs.stack_name }}
+      - name: Render SAR template
+        id: render
         run: |
           set -euo pipefail
-          CHANGE_SET_NAME="porth-${{ steps.preflight.outputs.action }}-${{ inputs.sar_version }}-${{ github.run_id }}"
+          echo "Rendering SAR template: ${{ env.EFF_SAR_APP_ID }} @ ${{ env.EFF_SAR_VERSION }}"
+          CREATE_OUT=$(aws serverlessrepo create-cloud-formation-template \
+            --application-id "${{ env.EFF_SAR_APP_ID }}" \
+            --semantic-version "${{ env.EFF_SAR_VERSION }}" \
+            --output json)
+          TEMPLATE_ID=$(echo "$CREATE_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["TemplateId"])')
+          for i in $(seq 1 30); do
+            GET_OUT=$(aws serverlessrepo get-cloud-formation-template \
+              --application-id "${{ env.EFF_SAR_APP_ID }}" \
+              --template-id "$TEMPLATE_ID" --output json)
+            STATUS=$(echo "$GET_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["Status"])')
+            if [ "$STATUS" = "ACTIVE" ]; then
+              TEMPLATE_URL=$(echo "$GET_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["TemplateUrl"])')
+              echo "template_url=$TEMPLATE_URL" >> "$GITHUB_OUTPUT"
+              echo "✅ SAR template ACTIVE"
+              exit 0
+            elif [ "$STATUS" = "EXPIRED" ]; then
+              echo "::error::SAR template EXPIRED before becoming ACTIVE"
+              exit 1
+            fi
+            echo "  (attempt $i) template status=$STATUS — waiting 2s"
+            sleep 2
+          done
+          echo "::error::SAR template did not become ACTIVE within 60s"
+          exit 1
 
-          PARAM_OVERRIDES=( "Name=Environment,Value=${{ inputs.environment_name }}" )
-          if [ -n "${PORTH_DOMAIN:-}" ]; then
-            PARAM_OVERRIDES+=( "Name=ApiDomainName,Value=${PORTH_DOMAIN}" )
-            PARAM_OVERRIDES+=( "Name=AcmCertificateArn,Value=${PORTH_CERT}" )
+      - name: Create change set
+        id: changeset
+        env:
+          STACK: ${{ env.EFF_STACK_NAME }}
+          CFN_EXECUTION_ROLE_ARN: ${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CFN_EXECUTION_ROLE_ARN:-}" ]; then
+            echo "::error::vars.AWS_CFN_EXECUTION_ROLE_ARN is not set. The porth-install"
+            echo "environment must provide the porth-cfn-execution-role ARN — CloudFormation"
+            echo "runs the Porth stack under that role, not under porth-install-role."
+            exit 1
           fi
-          # GitHubRepoOwner is intentionally omitted → SAR CreateDeployRole condition stays false.
+          if [ "${{ steps.preflight.outputs.action }}" = "install" ]; then
+            CS_TYPE="CREATE"
+          else
+            CS_TYPE="UPDATE"
+          fi
+          CHANGE_SET_NAME="porth-${{ steps.preflight.outputs.action }}-$(date -u +%Y%m%d-%H%M%S)"
 
-          echo "Creating SAR change set: $CHANGE_SET_NAME"
-          CS_OUT=$(aws serverlessrepo create-cloud-formation-change-set \
-            --application-id "${{ inputs.sar_app_id }}" \
-            --semantic-version "${{ inputs.sar_version }}" \
+          PARAMS=( "ParameterKey=Environment,ParameterValue=${{ env.EFF_ENV_NAME }}" )
+          if [ -n "${PORTH_DOMAIN:-}" ]; then
+            PARAMS+=( "ParameterKey=ApiDomainName,ParameterValue=${PORTH_DOMAIN}" )
+            PARAMS+=( "ParameterKey=AcmCertificateArn,ParameterValue=${PORTH_CERT}" )
+          fi
+          # AuthTestToken enables the Layer 1 JWT bypass in the Lambda authorizer.
+          # Only set if the secret is present — otherwise the bypass is disabled.
+          AUTH_TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
+          if [ -n "$AUTH_TEST_TOKEN" ]; then
+            PARAMS+=( "ParameterKey=AuthTestToken,ParameterValue=$AUTH_TEST_TOKEN" )
+          fi
+          # GitHubRepoOwner intentionally omitted → SAR CreateDeployRole condition stays false.
+
+          echo "Creating $CS_TYPE change set: $CHANGE_SET_NAME"
+          echo "CloudFormation execution role: $CFN_EXECUTION_ROLE_ARN"
+          CHANGE_SET_ID=$(aws cloudformation create-change-set \
             --stack-name "$STACK" \
             --change-set-name "$CHANGE_SET_NAME" \
+            --change-set-type "$CS_TYPE" \
+            --template-url "${{ steps.render.outputs.template_url }}" \
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
-            --parameter-overrides "${PARAM_OVERRIDES[@]}" \
-            --output json)
-          CHANGE_SET_ID=$(echo "$CS_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["ChangeSetId"])')
+            --role-arn "$CFN_EXECUTION_ROLE_ARN" \
+            --parameters "${PARAMS[@]}" \
+            --query 'Id' --output text)
           echo "change_set_id=$CHANGE_SET_ID" >> "$GITHUB_OUTPUT"
           echo "Created change set: $CHANGE_SET_ID"
 
@@ -198,12 +256,7 @@ jobs:
             --query 'Changes[?ResourceChange.ResourceType==`AWS::DynamoDB::Table`].ResourceChange.{Id:LogicalResourceId,Action:Action,Replacement:Replacement}' \
             --output json)
           echo "DynamoDB table changes in change set: $CHANGES"
-          DESTRUCTIVE=$(echo "$CHANGES" | python3 -c '
-          import json, sys
-          changes = json.load(sys.stdin) or []
-          bad = [c for c in changes if c.get("Action") == "Remove" or c.get("Replacement") == "True"]
-          print(json.dumps(bad))
-          ')
+          DESTRUCTIVE=$(echo "$CHANGES" | python3 -c 'import json, sys; changes = json.load(sys.stdin) or []; bad = [c for c in changes if c.get("Action") == "Remove" or c.get("Replacement") == "True"]; print(json.dumps(bad))')
           if [ "$DESTRUCTIVE" != "[]" ]; then
             echo "::error::Change set would Remove or Replace DynamoDB tables — aborting to protect data (ADR-Z1/Z2)."
             echo "Destructive changes: $DESTRUCTIVE"
@@ -213,7 +266,7 @@ jobs:
 
       - name: Execute change set
         env:
-          STACK: ${{ inputs.stack_name }}
+          STACK: ${{ env.EFF_STACK_NAME }}
         run: |
           set -euo pipefail
           if [ "${{ steps.changeset.outputs.no_changes }}" = "true" ]; then
@@ -244,7 +297,7 @@ jobs:
 
       - name: Resolve Porth stack outputs
         env:
-          STACK: ${{ inputs.stack_name }}
+          STACK: ${{ env.EFF_STACK_NAME }}
         run: |
           set -euo pipefail
           get_output() {
@@ -258,6 +311,9 @@ jobs:
           PERMISSIONS_TABLE=$(get_output PermissionsTableName)
           ROLES_TABLE=$(get_output RolesTableName)
           CLAIM_TABLE=$(get_output ClaimMappingConfigsTableName)
+          EXECUTE_API_URL=$(get_output ApiEndpoint)
+          APIGW_REGIONAL_DOMAIN=$(get_output ApiGatewayRegionalDomainName)
+          APIGW_REGIONAL_HZ=$(get_output ApiGatewayRegionalHostedZoneId)
 
           MISSING=""
           require() {
@@ -269,16 +325,71 @@ jobs:
           require RolesTableName "$ROLES_TABLE"
           require ClaimMappingConfigsTableName "$CLAIM_TABLE"
           if [ -n "$MISSING" ]; then
-            echo "::error::porth-prod stack is missing expected outputs:$MISSING"
+            echo "::error::porth-components stack is missing expected outputs:$MISSING"
             exit 1
           fi
 
-          echo "PORTH_API_URL=$PORTH_API_URL" >> "$GITHUB_ENV"
-          echo "PORTH_TENANTS_TABLE=$TENANTS_TABLE" >> "$GITHUB_ENV"
-          echo "PORTH_PERMISSIONS_TABLE=$PERMISSIONS_TABLE" >> "$GITHUB_ENV"
-          echo "PORTH_ROLES_TABLE=$ROLES_TABLE" >> "$GITHUB_ENV"
-          echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$CLAIM_TABLE" >> "$GITHUB_ENV"
-          echo "✅ Resolved Porth outputs (API: $PORTH_API_URL)"
+          echo "PORTH_API_URL=$PORTH_API_URL"                               >> "$GITHUB_ENV"
+          echo "PORTH_EXECUTE_API_URL=$EXECUTE_API_URL"                     >> "$GITHUB_ENV"
+          echo "PORTH_TENANTS_TABLE=$TENANTS_TABLE"                         >> "$GITHUB_ENV"
+          echo "PORTH_PERMISSIONS_TABLE=$PERMISSIONS_TABLE"                 >> "$GITHUB_ENV"
+          echo "PORTH_ROLES_TABLE=$ROLES_TABLE"                             >> "$GITHUB_ENV"
+          echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$CLAIM_TABLE"             >> "$GITHUB_ENV"
+          echo "APIGW_REGIONAL_DOMAIN=$APIGW_REGIONAL_DOMAIN"               >> "$GITHUB_ENV"
+          echo "APIGW_REGIONAL_HZ=$APIGW_REGIONAL_HZ"                       >> "$GITHUB_ENV"
+          echo "✅ Resolved Porth outputs (API: $PORTH_API_URL, execute-api: $EXECUTE_API_URL)"
+
+      - name: Upsert Route 53 alias for Porth API custom domain
+        # Idempotent: creates or updates the A-alias record pointing
+        # porth-api.ems.estynsoftware.cloud → API Gateway regional domain.
+        # Skipped if no custom domain was configured (PORTH_DOMAIN empty).
+        # Non-fatal: if IAM perms are missing the operator must create the
+        # record manually; subsequent steps (bootstrap, IdP patch) still run.
+        if: env.PORTH_DOMAIN != ''
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          DOMAIN="${PORTH_DOMAIN}"
+          REGIONAL_DOMAIN="${APIGW_REGIONAL_DOMAIN}"
+          REGIONAL_HZ="${APIGW_REGIONAL_HZ}"
+
+          if [ -z "$REGIONAL_DOMAIN" ] || [ "$REGIONAL_DOMAIN" = "None" ]; then
+            echo "::warning::ApiGatewayRegionalDomainName not in stack outputs — skipping Route 53 upsert"
+            exit 0
+          fi
+
+          # Derive parent zone name (porth-api.ems.estynsoftware.cloud → ems.estynsoftware.cloud)
+          PARENT="${DOMAIN#*.}"
+          HZ_ID=$(aws route53 list-hosted-zones-by-name \
+            --dns-name "${PARENT}." \
+            --query "HostedZones[?Name=='${PARENT}.'].Id" \
+            --output text | head -1 | sed 's|/hostedzone/||')
+
+          if [ -z "$HZ_ID" ]; then
+            echo "::warning::No Route 53 hosted zone found for $PARENT — skipping Route 53 upsert"
+            echo "  Manual step: create ALIAS A record $DOMAIN → $REGIONAL_DOMAIN (hz $REGIONAL_HZ)"
+            exit 0
+          fi
+
+          echo "Upserting: $DOMAIN → $REGIONAL_DOMAIN (apigw hz=$REGIONAL_HZ, r53 hz=$HZ_ID)"
+          aws route53 change-resource-record-sets \
+            --hosted-zone-id "$HZ_ID" \
+            --change-batch "{
+              \"Comment\": \"porth-install.yml: alias for Porth API custom domain\",
+              \"Changes\": [{
+                \"Action\": \"UPSERT\",
+                \"ResourceRecordSet\": {
+                  \"Name\": \"${DOMAIN}.\",
+                  \"Type\": \"A\",
+                  \"AliasTarget\": {
+                    \"HostedZoneId\": \"${REGIONAL_HZ}\",
+                    \"DNSName\": \"${REGIONAL_DOMAIN}.\",
+                    \"EvaluateTargetHealth\": false
+                  }
+                }
+              }]
+            }"
+          echo "✅ Route 53 alias upserted: $DOMAIN → $REGIONAL_DOMAIN"
 
       # Bootstrap runs on every successful install/upgrade (and on no-op) — the
       # platform tenant is independent of the CloudFormation stack and the
@@ -293,48 +404,52 @@ jobs:
           python3 scripts/bootstrap_platform_tenant.py
           echo "✅ Platform tenant bootstrapped"
 
-      - name: Patch platform tenant IdP config
+      - name: Patch platform tenant IdP config (direct DynamoDB)
+        # Writes idp_config_override directly to DynamoDB — same pattern as the
+        # bootstrap script — bypassing the Porth API (which requires EventBridge
+        # PutEvents that the Lambda execution role may be missing in this account).
+        # The authorizer reads idp_config from DynamoDB and will pick this up on
+        # the next cache miss (PORTH-471).
         env:
           PORTH_TENANT_CONFIG: ${{ secrets.PORTH_TENANT_CONFIG }}
         run: |
-          TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
-          RESPONSE_FILE="/tmp/patch-tenant.json"
-
-          # Audience is read from PORTH_TENANT_CONFIG; PLATFORM_AUTH0_AUDIENCE is the fallback.
+          set -euo pipefail
+          # Audience: prefer PORTH_TENANT_CONFIG JSON, fall back to secret.
           AUDIENCE=$(echo "$PORTH_TENANT_CONFIG" | python3 -c \
             "import json,sys; raw=sys.stdin.read().strip(); d=json.loads(raw); d=d if isinstance(d,dict) else json.loads(d); print(d.get('audience',''),end='')" \
             2>/dev/null || true)
           if [ -z "$AUDIENCE" ]; then
             AUDIENCE="${{ secrets.PLATFORM_AUTH0_AUDIENCE }}"
           fi
-          echo "Resolved audience (length=${#AUDIENCE})"
+          DOMAIN="${{ secrets.PLATFORM_AUTH0_DOMAIN }}"
+          CLIENT_ID="${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}"
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-          PAYLOAD="{\"idp_config_override\":{\"domain\":\"${{ secrets.PLATFORM_AUTH0_DOMAIN }}\",\"client_id\":\"${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}\",\"audience\":\"${AUDIENCE}\"}}"
-
-          for attempt in 1 2 3 4 5; do
-            STATUS=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
-              -X PATCH "${PORTH_API_URL}/tenants/platform" \
-              -H "Content-Type: application/json" \
-              -H "Authorization: Bearer $TEST_TOKEN" \
-              -d "$PAYLOAD")
-            echo "Attempt $attempt: PATCH /tenants/platform → HTTP $STATUS"
-            if [[ "$STATUS" == "200" ]]; then
-              echo "✅ Platform tenant IdP config updated"
-              exit 0
-            fi
-            echo "Response: $(cat "$RESPONSE_FILE" 2>/dev/null || true)"
-            if [[ $attempt -lt 5 ]]; then sleep 5; fi
-          done
-          echo "::error::Failed to patch platform tenant IdP config after 5 attempts"
-          exit 1
+          echo "Writing idp_config_override to DynamoDB (domain=${DOMAIN} audience-len=${#AUDIENCE})"
+          aws dynamodb update-item \
+            --table-name "$PORTH_TENANTS_TABLE" \
+            --key '{"PK":{"S":"TENANT#platform"},"SK":{"S":"METADATA"}}' \
+            --update-expression "SET idp_config_override = :idp, updated_at = :ua" \
+            --expression-attribute-values "{
+              \":idp\":{\"M\":{
+                \"domain\":{\"S\":\"${DOMAIN}\"},
+                \"client_id\":{\"S\":\"${CLIENT_ID}\"},
+                \"audience\":{\"S\":\"${AUDIENCE}\"}
+              }},
+              \":ua\":{\"S\":\"${NOW}\"}
+            }" \
+            --region "$AWS_REGION"
+          echo "✅ Platform tenant IdP config updated (direct DynamoDB)"
 
       - name: Smoke test Porth API
         run: |
-          STATUS=$(curl -s -o /tmp/health.json -w "%{http_code}" "${PORTH_API_URL}/health" || echo "000")
+          # Use raw execute-api URL so smoke test works before DNS record exists
+          SMOKE_URL="${PORTH_EXECUTE_API_URL:-$PORTH_API_URL}"
+          STATUS=$(curl -s -o /tmp/health.json -w "%{http_code}" "${SMOKE_URL}/health" || echo "000")
           if [[ "$STATUS" == "200" ]]; then
             echo "✅ Smoke test passed (GET /health → 200)"
           else
-            echo "::warning::Smoke test: GET /health → HTTP $STATUS (Porth may not expose /health yet — non-fatal)"
+            echo "::warning::Smoke test: GET /health → HTTP $STATUS (non-fatal)"
           fi
 
       - name: Summary
@@ -345,7 +460,7 @@ jobs:
             echo ""
             echo "- **Action:** ${{ steps.preflight.outputs.action }}"
             echo "- **No-op:** ${{ steps.changeset.outputs.no_changes || 'false' }}"
-            echo "- **Target version:** ${{ inputs.sar_version }}"
-            echo "- **Stack:** ${{ inputs.stack_name }}"
+            echo "- **Target version:** ${{ env.EFF_SAR_VERSION }}"
+            echo "- **Stack:** ${{ env.EFF_STACK_NAME }}"
             echo "- **Porth API URL:** ${PORTH_API_URL:-'(unresolved)'}"
           } >> "$GITHUB_STEP_SUMMARY"
