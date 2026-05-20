@@ -26,6 +26,11 @@ jobs:
     name: Build and Deploy
     runs-on: ubuntu-latest
     environment: sample-app-deploy
+    env:
+      # Porth components CloudFormation stack name. A SAR *console* install
+      # names the stack serverlessrepo-<app-name>. Override by setting the
+      # PORTH_STACK_NAME variable in the sample-app-deploy environment.
+      PORTH_STACK_NAME: ${{ vars.PORTH_STACK_NAME || 'serverlessrepo-porth-user-management' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -67,32 +72,36 @@ jobs:
 
       - name: Verify Porth components are deployed in EMS (pre-check)
         run: |
-          echo "Caller identity:"
-          aws sts get-caller-identity || true
+          echo "Looking for the Porth components stack: $PORTH_STACK_NAME"
           set +e
-          DESCRIBE_OUT=$(aws cloudformation describe-stacks \
-            --stack-name porth-prod \
+          STACK_STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "$PORTH_STACK_NAME" \
             --query "Stacks[0].StackStatus" --output text 2>&1)
           DESCRIBE_RC=$?
           set -e
           if [ "$DESCRIBE_RC" -ne 0 ]; then
-            echo "❌ Could not describe the porth-prod stack (exit $DESCRIBE_RC). AWS said:"
-            echo "$DESCRIBE_OUT"
+            echo "❌ Could not find the Porth stack '$PORTH_STACK_NAME'. AWS said:"
+            echo "$STACK_STATUS"
             echo ""
-            echo "Either porth-prod is not deployed in this account/region (195950944420 / us-east-1),"
-            echo "or sample-app-deploy-role lacks cloudformation:DescribeStacks on it."
+            echo "Porth-related stacks that DO exist in this account:"
+            aws cloudformation list-stacks \
+              --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE UPDATE_ROLLBACK_COMPLETE IMPORT_COMPLETE \
+              --query "StackSummaries[?contains(StackName, 'porth') || contains(StackName, 'serverlessrepo')].StackName" \
+              --output text || true
+            echo ""
+            echo "If the name differs, set the PORTH_STACK_NAME variable in the"
+            echo "sample-app-deploy environment to the correct stack name."
             exit 1
           fi
-          STACK_STATUS="$DESCRIBE_OUT"
           if [[ "$STACK_STATUS" != "CREATE_COMPLETE" && "$STACK_STATUS" != "UPDATE_COMPLETE" ]]; then
-            echo "❌ Porth stack is in state $STACK_STATUS — not safe to deploy the sample app against it"
+            echo "❌ Porth stack '$PORTH_STACK_NAME' is in state $STACK_STATUS — not safe to deploy against it"
             exit 1
           fi
-          echo "✅ Porth components present and stack healthy ($STACK_STATUS)"
+          echo "✅ Porth components present and healthy ($PORTH_STACK_NAME — $STACK_STATUS)"
 
       - name: Resolve Porth stack outputs (EMS)
         run: |
-          STACK=porth-prod
+          STACK="$PORTH_STACK_NAME"
           get_output() {
             aws cloudformation describe-stacks \
               --stack-name "$STACK" \
@@ -102,7 +111,7 @@ jobs:
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           PORTH_API_URL=$(get_output PorthApiUrl)
           if [ -z "$PORTH_API_URL" ] || [ "$PORTH_API_URL" == "None" ]; then
-            echo "❌ Could not resolve PorthApiUrl from porth-prod stack outputs"
+            echo "❌ Could not resolve PorthApiUrl from the $STACK stack outputs"
             exit 1
           fi
           echo "PORTH_API_URL=$PORTH_API_URL"                         >> $GITHUB_ENV
