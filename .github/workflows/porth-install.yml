@@ -29,7 +29,7 @@ on:
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
-        default: 'porth-prod'
+        default: 'serverlessrepo-porth-prod'
       sar_app_id:
         description: 'Porth SAR application ARN'
         required: false
