@@ -6,10 +6,10 @@ name: Porth components — install + upgrade
 # account by consuming the porth-user-management SAR application, then
 # bootstraps the reserved 'platform' tenant and patches its IdP config.
 #
-# One-step SAR consume: `serverlessrepo create-cloud-formation-change-set`
-# renders the SAR template and creates the CloudFormation change set in a
-# single call. The change set executes with the porth-install-role's own
-# permissions (there is no separate CFN execution role on this path).
+# Two-step SAR consume (PORTH-459 pattern): render the SAR template, then
+# `cloudformation create-change-set --role-arn <porth-cfn-execution-role>` so
+# CloudFormation performs every resource operation as the dedicated execution
+# role. porth-install-role only orchestrates — it calls the CFN/SAR APIs.
 #
 # GitHubRepoOwner is intentionally NOT passed, so the SAR template's
 # CreateDeployRole condition stays false — no porth-deploy-role is created
@@ -141,34 +141,74 @@ jobs:
               ;;
           esac
 
-      - name: SAR create change set
+      - name: Render SAR template
+        id: render
+        run: |
+          set -euo pipefail
+          echo "Rendering SAR template: ${{ inputs.sar_app_id }} @ ${{ inputs.sar_version }}"
+          CREATE_OUT=$(aws serverlessrepo create-cloud-formation-template \
+            --application-id "${{ inputs.sar_app_id }}" \
+            --semantic-version "${{ inputs.sar_version }}" \
+            --output json)
+          TEMPLATE_ID=$(echo "$CREATE_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["TemplateId"])')
+          for i in $(seq 1 30); do
+            GET_OUT=$(aws serverlessrepo get-cloud-formation-template \
+              --application-id "${{ inputs.sar_app_id }}" \
+              --template-id "$TEMPLATE_ID" --output json)
+            STATUS=$(echo "$GET_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["Status"])')
+            if [ "$STATUS" = "ACTIVE" ]; then
+              TEMPLATE_URL=$(echo "$GET_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["TemplateUrl"])')
+              echo "template_url=$TEMPLATE_URL" >> "$GITHUB_OUTPUT"
+              echo "✅ SAR template ACTIVE"
+              exit 0
+            elif [ "$STATUS" = "EXPIRED" ]; then
+              echo "::error::SAR template EXPIRED before becoming ACTIVE"
+              exit 1
+            fi
+            echo "  (attempt $i) template status=$STATUS — waiting 2s"
+            sleep 2
+          done
+          echo "::error::SAR template did not become ACTIVE within 60s"
+          exit 1
+
+      - name: Create change set
         id: changeset
         env:
           STACK: ${{ inputs.stack_name }}
+          CFN_EXECUTION_ROLE_ARN: ${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}
         run: |
           set -euo pipefail
-          # CloudFormation change-set names must match [a-zA-Z][-a-zA-Z0-9]* —
-          # no dots, so sanitise the semantic version (0.0.3 -> 0-0-3).
-          VERSION="${{ inputs.sar_version }}"
-          CHANGE_SET_NAME="porth-${{ steps.preflight.outputs.action }}-${VERSION//./-}-${{ github.run_id }}"
-
-          PARAM_OVERRIDES=( "Name=Environment,Value=${{ inputs.environment_name }}" )
-          if [ -n "${PORTH_DOMAIN:-}" ]; then
-            PARAM_OVERRIDES+=( "Name=ApiDomainName,Value=${PORTH_DOMAIN}" )
-            PARAM_OVERRIDES+=( "Name=AcmCertificateArn,Value=${PORTH_CERT}" )
+          if [ -z "${CFN_EXECUTION_ROLE_ARN:-}" ]; then
+            echo "::error::vars.AWS_CFN_EXECUTION_ROLE_ARN is not set. The porth-install"
+            echo "environment must provide the porth-cfn-execution-role ARN — CloudFormation"
+            echo "runs the Porth stack under that role, not under porth-install-role."
+            exit 1
           fi
-          # GitHubRepoOwner is intentionally omitted → SAR CreateDeployRole condition stays false.
+          if [ "${{ steps.preflight.outputs.action }}" = "install" ]; then
+            CS_TYPE="CREATE"
+          else
+            CS_TYPE="UPDATE"
+          fi
+          CHANGE_SET_NAME="porth-${{ steps.preflight.outputs.action }}-$(date -u +%Y%m%d-%H%M%S)"
 
-          echo "Creating SAR change set: $CHANGE_SET_NAME"
-          CS_OUT=$(aws serverlessrepo create-cloud-formation-change-set \
-            --application-id "${{ inputs.sar_app_id }}" \
-            --semantic-version "${{ inputs.sar_version }}" \
+          PARAMS=( "ParameterKey=Environment,ParameterValue=${{ inputs.environment_name }}" )
+          if [ -n "${PORTH_DOMAIN:-}" ]; then
+            PARAMS+=( "ParameterKey=ApiDomainName,ParameterValue=${PORTH_DOMAIN}" )
+            PARAMS+=( "ParameterKey=AcmCertificateArn,ParameterValue=${PORTH_CERT}" )
+          fi
+          # GitHubRepoOwner intentionally omitted → SAR CreateDeployRole condition stays false.
+
+          echo "Creating $CS_TYPE change set: $CHANGE_SET_NAME"
+          echo "CloudFormation execution role: $CFN_EXECUTION_ROLE_ARN"
+          CHANGE_SET_ID=$(aws cloudformation create-change-set \
             --stack-name "$STACK" \
             --change-set-name "$CHANGE_SET_NAME" \
+            --change-set-type "$CS_TYPE" \
+            --template-url "${{ steps.render.outputs.template_url }}" \
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
-            --parameter-overrides "${PARAM_OVERRIDES[@]}" \
-            --output json)
-          CHANGE_SET_ID=$(echo "$CS_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["ChangeSetId"])')
+            --role-arn "$CFN_EXECUTION_ROLE_ARN" \
+            --parameters "${PARAMS[@]}" \
+            --query 'Id' --output text)
           echo "change_set_id=$CHANGE_SET_ID" >> "$GITHUB_OUTPUT"
           echo "Created change set: $CHANGE_SET_ID"
 
