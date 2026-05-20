@@ -108,14 +108,12 @@ jobs:
               --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
               --output text
           }
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           PORTH_API_URL=$(get_output PorthApiUrl)
           if [ -z "$PORTH_API_URL" ] || [ "$PORTH_API_URL" == "None" ]; then
             echo "❌ Could not resolve PorthApiUrl from the $STACK stack outputs"
             exit 1
           fi
-          echo "PORTH_API_URL=$PORTH_API_URL"                         >> $GITHUB_ENV
-          echo "SAM_ARTIFACTS_BUCKET=porth-sam-artifacts-$ACCOUNT_ID" >> $GITHUB_ENV
+          echo "PORTH_API_URL=$PORTH_API_URL" >> $GITHUB_ENV
           echo "✅ Resolved PORTH_API_URL=$PORTH_API_URL"
 
       - name: Resolve sample app stack outputs
@@ -149,7 +147,7 @@ jobs:
             --stack-name ${{ env.SAM_STACK_NAME }} \
             --region ${{ env.AWS_REGION }} \
             --capabilities CAPABILITY_IAM \
-            --s3-bucket ${{ env.SAM_ARTIFACTS_BUCKET }} \
+            --resolve-s3 \
             --s3-prefix ${{ env.SAM_STACK_NAME }} \
             --parameter-overrides \
               Environment=dev \
