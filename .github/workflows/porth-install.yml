@@ -256,12 +256,7 @@ jobs:
             --query 'Changes[?ResourceChange.ResourceType==`AWS::DynamoDB::Table`].ResourceChange.{Id:LogicalResourceId,Action:Action,Replacement:Replacement}' \
             --output json)
           echo "DynamoDB table changes in change set: $CHANGES"
-          DESTRUCTIVE=$(echo "$CHANGES" | python3 -c '
-import json, sys
-changes = json.load(sys.stdin) or []
-bad = [c for c in changes if c.get("Action") == "Remove" or c.get("Replacement") == "True"]
-print(json.dumps(bad))
-')
+          DESTRUCTIVE=$(echo "$CHANGES" | python3 -c 'import json, sys; changes = json.load(sys.stdin) or []; bad = [c for c in changes if c.get("Action") == "Remove" or c.get("Replacement") == "True"]; print(json.dumps(bad))')
           if [ "$DESTRUCTIVE" != "[]" ]; then
             echo "::error::Change set would Remove or Replace DynamoDB tables — aborting to protect data (ADR-Z1/Z2)."
             echo "Destructive changes: $DESTRUCTIVE"
