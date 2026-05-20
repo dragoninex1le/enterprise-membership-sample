@@ -432,7 +432,14 @@ jobs:
           # record may not exist yet when this first runs (PORTH-471).
           BOOTSTRAP_URL="${PORTH_EXECUTE_API_URL:-$PORTH_API_URL}"
 
-          for attempt in 1 2 3 4 5; do
+          # Allow time for Lambda to propagate the AuthTestToken env var change.
+          # _TEST_TOKEN is a module-level constant (cold-start only), so warm
+          # containers that pre-date the CFN update will return 403 until recycled
+          # by AWS (typically within ~60s).  We give up to 3 minutes total.
+          echo "Waiting 30s for Lambda env-var propagation before first PATCH attempt..."
+          sleep 30
+
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
             STATUS=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
               -X PATCH "${BOOTSTRAP_URL}/tenants/platform" \
               -H "Content-Type: application/json" \
@@ -444,9 +451,9 @@ jobs:
               exit 0
             fi
             echo "Response: $(cat "$RESPONSE_FILE" 2>/dev/null || true)"
-            if [[ $attempt -lt 5 ]]; then sleep 5; fi
+            if [[ $attempt -lt 12 ]]; then sleep 10; fi
           done
-          echo "::error::Failed to patch platform tenant IdP config after 5 attempts"
+          echo "::error::Failed to patch platform tenant IdP config after 12 attempts"
           exit 1
 
       - name: Smoke test Porth API
