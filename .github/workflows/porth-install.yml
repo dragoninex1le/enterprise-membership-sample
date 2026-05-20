@@ -410,51 +410,42 @@ jobs:
           python3 scripts/bootstrap_platform_tenant.py
           echo "✅ Platform tenant bootstrapped"
 
-      - name: Patch platform tenant IdP config
+      - name: Patch platform tenant IdP config (direct DynamoDB)
+        # Writes idp_config_override directly to DynamoDB — same pattern as the
+        # bootstrap script — bypassing the Porth API (which requires EventBridge
+        # PutEvents that the Lambda execution role may be missing in this account).
+        # The authorizer reads idp_config from DynamoDB and will pick this up on
+        # the next cache miss (PORTH-471).
         env:
           PORTH_TENANT_CONFIG: ${{ secrets.PORTH_TENANT_CONFIG }}
         run: |
-          TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
-          RESPONSE_FILE="/tmp/patch-tenant.json"
-
-          # Audience is read from PORTH_TENANT_CONFIG; PLATFORM_AUTH0_AUDIENCE is the fallback.
+          set -euo pipefail
+          # Audience: prefer PORTH_TENANT_CONFIG JSON, fall back to secret.
           AUDIENCE=$(echo "$PORTH_TENANT_CONFIG" | python3 -c \
             "import json,sys; raw=sys.stdin.read().strip(); d=json.loads(raw); d=d if isinstance(d,dict) else json.loads(d); print(d.get('audience',''),end='')" \
             2>/dev/null || true)
           if [ -z "$AUDIENCE" ]; then
             AUDIENCE="${{ secrets.PLATFORM_AUTH0_AUDIENCE }}"
           fi
-          echo "Resolved audience (length=${#AUDIENCE})"
+          DOMAIN="${{ secrets.PLATFORM_AUTH0_DOMAIN }}"
+          CLIENT_ID="${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}"
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-          PAYLOAD="{\"idp_config_override\":{\"domain\":\"${{ secrets.PLATFORM_AUTH0_DOMAIN }}\",\"client_id\":\"${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}\",\"audience\":\"${AUDIENCE}\"}}"
-
-          # Use the raw execute-api URL for bootstrap — the custom domain DNS
-          # record may not exist yet when this first runs (PORTH-471).
-          BOOTSTRAP_URL="${PORTH_EXECUTE_API_URL:-$PORTH_API_URL}"
-
-          # Allow time for Lambda to propagate the AuthTestToken env var change.
-          # _TEST_TOKEN is a module-level constant (cold-start only), so warm
-          # containers that pre-date the CFN update will return 403 until recycled
-          # by AWS (typically within ~60s).  We give up to 3 minutes total.
-          echo "Waiting 30s for Lambda env-var propagation before first PATCH attempt..."
-          sleep 30
-
-          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            STATUS=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
-              -X PATCH "${BOOTSTRAP_URL}/tenants/platform" \
-              -H "Content-Type: application/json" \
-              -H "Authorization: Bearer $TEST_TOKEN" \
-              -d "$PAYLOAD")
-            echo "Attempt $attempt: PATCH /tenants/platform → HTTP $STATUS"
-            if [[ "$STATUS" == "200" ]]; then
-              echo "✅ Platform tenant IdP config updated"
-              exit 0
-            fi
-            echo "Response: $(cat "$RESPONSE_FILE" 2>/dev/null || true)"
-            if [[ $attempt -lt 12 ]]; then sleep 10; fi
-          done
-          echo "::error::Failed to patch platform tenant IdP config after 12 attempts"
-          exit 1
+          echo "Writing idp_config_override to DynamoDB (domain=${DOMAIN} audience-len=${#AUDIENCE})"
+          aws dynamodb update-item \
+            --table-name "$PORTH_TENANTS_TABLE" \
+            --key '{"PK":{"S":"TENANT#platform"},"SK":{"S":"METADATA"}}' \
+            --update-expression "SET idp_config_override = :idp, updated_at = :ua" \
+            --expression-attribute-values "{
+              \":idp\":{\"M\":{
+                \"domain\":{\"S\":\"${DOMAIN}\"},
+                \"client_id\":{\"S\":\"${CLIENT_ID}\"},
+                \"audience\":{\"S\":\"${AUDIENCE}\"}
+              }},
+              \":ua\":{\"S\":\"${NOW}\"}
+            }" \
+            --region "$AWS_REGION"
+          echo "✅ Platform tenant IdP config updated (direct DynamoDB)"
 
       - name: Diagnose IdP PATCH error (fetch Lambda logs)
         if: failure()
