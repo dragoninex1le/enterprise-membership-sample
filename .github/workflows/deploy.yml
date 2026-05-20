@@ -67,14 +67,23 @@ jobs:
 
       - name: Verify Porth components are deployed in EMS (pre-check)
         run: |
-          if ! aws cloudformation describe-stacks --stack-name porth-prod >/dev/null 2>&1; then
-            echo "❌ Porth components are not deployed in EMS."
-            echo "Run the 'Porth components — install + upgrade' workflow first."
-            echo "  See: .github/workflows/porth-install.yml"
+          echo "Caller identity:"
+          aws sts get-caller-identity || true
+          set +e
+          DESCRIBE_OUT=$(aws cloudformation describe-stacks \
+            --stack-name porth-prod \
+            --query "Stacks[0].StackStatus" --output text 2>&1)
+          DESCRIBE_RC=$?
+          set -e
+          if [ "$DESCRIBE_RC" -ne 0 ]; then
+            echo "❌ Could not describe the porth-prod stack (exit $DESCRIBE_RC). AWS said:"
+            echo "$DESCRIBE_OUT"
+            echo ""
+            echo "Either porth-prod is not deployed in this account/region (195950944420 / us-east-1),"
+            echo "or sample-app-deploy-role lacks cloudformation:DescribeStacks on it."
             exit 1
           fi
-          STACK_STATUS=$(aws cloudformation describe-stacks --stack-name porth-prod \
-            --query "Stacks[0].StackStatus" --output text)
+          STACK_STATUS="$DESCRIBE_OUT"
           if [[ "$STACK_STATUS" != "CREATE_COMPLETE" && "$STACK_STATUS" != "UPDATE_COMPLETE" ]]; then
             echo "❌ Porth stack is in state $STACK_STATUS — not safe to deploy the sample app against it"
             exit 1
