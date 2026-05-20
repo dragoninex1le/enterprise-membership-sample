@@ -2,7 +2,7 @@ name: Deploy Admin UI
 
 on:
   push:
-    branches: ['**']
+    branches: [main]
   workflow_dispatch:
 
 # Serialise deploy runs per branch so concurrent runs don't race on the
@@ -30,7 +30,7 @@ jobs:
       # Porth components CloudFormation stack name. A SAR *console* install
       # names the stack serverlessrepo-<app-name>. Override by setting the
       # PORTH_STACK_NAME variable in the sample-app-deploy environment.
-      PORTH_STACK_NAME: ${{ vars.PORTH_STACK_NAME || 'serverlessrepo-porth-user-management' }}
+      PORTH_STACK_NAME: ${{ vars.PORTH_STACK_NAME || 'serverlessrepo-porth-components' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -137,7 +137,7 @@ jobs:
           VITE_SAMPLE_APP_API_URL: ${{ env.SAMPLE_APP_API_URL }}
           VITE_PLATFORM_APEX: porth-sample
 
-      # ── SAM build + deploy ───────────────────────────────────────────────────
+      # ── SAM build + deploy ───────────────────────────────────────────────────────────────
       - name: SAM build
         run: sam build
 
@@ -234,7 +234,7 @@ jobs:
           echo "bucket=$BUCKET" >> $GITHUB_OUTPUT
           echo "cf_id=$CF_ID"   >> $GITHUB_OUTPUT
 
-      # ── Sync frontend assets to S3 + invalidate CDN ──────────────────────────
+      # ── Sync frontend assets to S3 + invalidate CDN ────────────────────────────
       - name: Sync assets to S3
         run: |
           aws s3 sync frontend/dist s3://${{ steps.outputs.outputs.bucket }} \
