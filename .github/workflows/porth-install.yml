@@ -147,7 +147,10 @@ jobs:
           STACK: ${{ inputs.stack_name }}
         run: |
           set -euo pipefail
-          CHANGE_SET_NAME="porth-${{ steps.preflight.outputs.action }}-${{ inputs.sar_version }}-${{ github.run_id }}"
+          # CloudFormation change-set names must match [a-zA-Z][-a-zA-Z0-9]* —
+          # no dots, so sanitise the semantic version (0.0.3 -> 0-0-3).
+          VERSION="${{ inputs.sar_version }}"
+          CHANGE_SET_NAME="porth-${{ steps.preflight.outputs.action }}-${VERSION//./-}-${{ github.run_id }}"
 
           PARAM_OVERRIDES=( "Name=Environment,Value=${{ inputs.environment_name }}" )
           if [ -n "${PORTH_DOMAIN:-}" ]; then
