@@ -25,7 +25,7 @@ on:
       sar_version:
         description: 'Porth SAR app semantic version to install/upgrade to'
         required: true
-        default: '0.0.5'
+        default: '0.0.6'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
@@ -60,7 +60,7 @@ env:
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.sar_version || '0.0.5' }}
+    name: Install or upgrade Porth ${{ inputs.sar_version || '0.0.6' }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
@@ -80,7 +80,7 @@ jobs:
       # also works when triggered by the push shim (inputs are empty on push).
       - name: Resolve effective inputs
         run: |
-          echo "EFF_SAR_VERSION=${{ inputs.sar_version || '0.0.5' }}" >> "$GITHUB_ENV"
+          echo "EFF_SAR_VERSION=${{ inputs.sar_version || '0.0.6' }}" >> "$GITHUB_ENV"
           echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
           echo "EFF_SAR_APP_ID=${{ inputs.sar_app_id || 'arn:aws:serverlessrepo:us-east-1:084847995635:applications/porth-user-management' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
@@ -440,6 +440,85 @@ jobs:
             }" \
             --region "$AWS_REGION"
           echo "✅ Platform tenant IdP config updated (direct DynamoDB)"
+
+      # ── Seed SSM auth-policy + session-policy templates ─────────────────────
+      # Components deploy.yml seeds these after every deploy, but porth-install
+      # (SAR consume path) has no equivalent step.  Without these params the
+      # AuthorizerFunction cannot load its policy cache and authorised routes
+      # return 500.  continue-on-error: true so a missing SSM permission doesn't
+      # block the rest of the workflow; an operator can re-run just this step.
+      - name: Seed SSM auth-policy templates
+        continue-on-error: true
+        run: |
+          ENV="${{ env.EFF_ENV_NAME }}"
+          ALLOW_ALL='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"execute-api:Invoke","Resource":"*"}]}'
+          INDEX='{ "/organizations":"platform-admin-only", "/tenants":"tenant-scoped-rbac", "/users":"tenant-scoped-user", "/roles":"tenant-scoped-rbac", "/permissions":"tenant-scoped-rbac", "/claim-mapping-configs":"tenant-scoped-rbac", "/org-units":"tenant-scoped-rbac", "/provision":"tenant-scoped-user" }'
+
+          for NAME in \
+            "/porth/${ENV}/auth-policy/platform-admin-only:$ALLOW_ALL" \
+            "/porth/${ENV}/auth-policy/tenant-scoped-rbac:$ALLOW_ALL" \
+            "/porth/${ENV}/auth-policy/tenant-scoped-user:$ALLOW_ALL"
+          do
+            PARAM="${NAME%%:*}"
+            VALUE="${NAME#*:}"
+            aws ssm put-parameter \
+              --name "$PARAM" \
+              --value "$VALUE" \
+              --type String \
+              --overwrite \
+              --region "$AWS_REGION" \
+              --no-cli-pager
+            echo "✅ $PARAM"
+          done
+
+          aws ssm put-parameter \
+            --name "/porth/${ENV}/auth-policy/index" \
+            --value "$INDEX" \
+            --type String \
+            --overwrite \
+            --region "$AWS_REGION" \
+            --no-cli-pager
+          echo "✅ /porth/${ENV}/auth-policy/index"
+
+          TEMPLATE_NAME="tenant-scoped-default"
+          TENANT_SESSION_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:PutItem","dynamodb:Query","dynamodb:UpdateItem","dynamodb:DeleteItem","dynamodb:BatchGetItem","dynamodb:BatchWriteItem","dynamodb:ConditionCheckItem"],"Resource":"*","Condition":{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["TENANT#$tenant","ORG#$org_id"]}}}]}'
+          aws ssm put-parameter \
+            --name "/porth/${ENV}/auth-session-policy/${TEMPLATE_NAME}" \
+            --value "$TENANT_SESSION_POLICY" \
+            --type String \
+            --overwrite \
+            --region "$AWS_REGION" \
+            --no-cli-pager
+          echo "✅ /porth/${ENV}/auth-session-policy/${TEMPLATE_NAME}"
+
+          SESSION_INDEX="{\"roles\":{\"tenant\":\"porth-tenant-${ENV}\",\"platform_admin\":\"porth-platform-admin-${ENV}\"},\"context_rules\":[],\"paths\":{\"default\":\"${TEMPLATE_NAME}\"}}"
+          aws ssm put-parameter \
+            --name "/porth/${ENV}/auth-session-policy/index" \
+            --value "$SESSION_INDEX" \
+            --type String \
+            --overwrite \
+            --region "$AWS_REGION" \
+            --no-cli-pager
+          echo "✅ /porth/${ENV}/auth-session-policy/index"
+
+          # Seed the auth-test-token SSM fallback. The AuthorizerFunction reads
+          # PORTH_AUTH_TEST_TOKEN env var first (set via CFN AuthTestToken param),
+          # then falls back to this SSM path on cold start. Seeding here ensures the
+          # bypass works even when the CFN parameter was absent during the last deploy.
+          # Uses SecureString so the value is encrypted at rest.
+          AUTH_TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
+          if [ -n "$AUTH_TEST_TOKEN" ]; then
+            aws ssm put-parameter \
+              --name "/porth/${ENV}/auth-test-token" \
+              --value "$AUTH_TEST_TOKEN" \
+              --type SecureString \
+              --overwrite \
+              --region "$AWS_REGION" \
+              --no-cli-pager
+            echo "✅ /porth/${ENV}/auth-test-token"
+          else
+            echo "⚠️  PORTH_AUTH_TEST_TOKEN secret not set — skipping auth-test-token SSM seed"
+          fi
 
       - name: Smoke test Porth API
         run: |
