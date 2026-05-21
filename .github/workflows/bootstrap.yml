@@ -45,6 +45,68 @@ jobs:
           echo "PORTH_ROLES_TABLE=$(get_output RolesTableName)"                                >> $GITHUB_ENV
           echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$(get_output ClaimMappingConfigsTableName)"  >> $GITHUB_ENV
 
+      # ── Seed SSM auth-policy + session-policy templates ─────────────────────
+      # These params are required by the AuthorizerFunction policy cache.
+      # The porth-install OIDC role doesn't have ssm:PutParameter, so seeding
+      # is done here using secrets.AWS_ROLE_ARN (the broader deploy role).
+      # Environment is derived from the table names (suffix after the last dash).
+      - name: Seed SSM auth-policy templates
+        run: |
+          set -euo pipefail
+          # Derive env from the resolved table name (e.g. porth-tenants-dev → dev)
+          ENV=$(echo "$PORTH_PERMISSIONS_TABLE" | awk -F'-' '{print $NF}')
+          echo "Seeding SSM params for environment: $ENV"
+
+          ALLOW_ALL='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"execute-api:Invoke","Resource":"*"}]}'
+          INDEX='{ "/organizations":"platform-admin-only", "/tenants":"tenant-scoped-rbac", "/users":"tenant-scoped-user", "/roles":"tenant-scoped-rbac", "/permissions":"tenant-scoped-rbac", "/claim-mapping-configs":"tenant-scoped-rbac", "/org-units":"tenant-scoped-rbac", "/provision":"tenant-scoped-user" }'
+
+          for NAME in \
+            "/porth/${ENV}/auth-policy/platform-admin-only:$ALLOW_ALL" \
+            "/porth/${ENV}/auth-policy/tenant-scoped-rbac:$ALLOW_ALL" \
+            "/porth/${ENV}/auth-policy/tenant-scoped-user:$ALLOW_ALL"
+          do
+            PARAM="${NAME%%:*}"
+            VALUE="${NAME#*:}"
+            aws ssm put-parameter \
+              --name "$PARAM" \
+              --value "$VALUE" \
+              --type String \
+              --overwrite \
+              --region "$AWS_REGION" \
+              --no-cli-pager
+            echo "✅ $PARAM"
+          done
+
+          aws ssm put-parameter \
+            --name "/porth/${ENV}/auth-policy/index" \
+            --value "$INDEX" \
+            --type String \
+            --overwrite \
+            --region "$AWS_REGION" \
+            --no-cli-pager
+          echo "✅ /porth/${ENV}/auth-policy/index"
+
+          TEMPLATE_NAME="tenant-scoped-default"
+          TENANT_SESSION_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:PutItem","dynamodb:Query","dynamodb:UpdateItem","dynamodb:DeleteItem","dynamodb:BatchGetItem","dynamodb:BatchWriteItem","dynamodb:ConditionCheckItem"],"Resource":"*","Condition":{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["TENANT#$tenant","ORG#$org_id"]}}}]}'
+          aws ssm put-parameter \
+            --name "/porth/${ENV}/auth-session-policy/${TEMPLATE_NAME}" \
+            --value "$TENANT_SESSION_POLICY" \
+            --type String \
+            --overwrite \
+            --region "$AWS_REGION" \
+            --no-cli-pager
+          echo "✅ /porth/${ENV}/auth-session-policy/${TEMPLATE_NAME}"
+
+          SESSION_INDEX="{\"roles\":{\"tenant\":\"porth-tenant-${ENV}\",\"platform_admin\":\"porth-platform-admin-${ENV}\"},\"context_rules\":[],\"paths\":{\"default\":\"${TEMPLATE_NAME}\"}}"
+          aws ssm put-parameter \
+            --name "/porth/${ENV}/auth-session-policy/index" \
+            --value "$SESSION_INDEX" \
+            --type String \
+            --overwrite \
+            --region "$AWS_REGION" \
+            --no-cli-pager
+          echo "✅ /porth/${ENV}/auth-session-policy/index"
+
       - name: Install porth-common
         run: pip install "git+https://${{ secrets.GH_PAT }}@github.com/dragoninex1le/Components.git"
 
