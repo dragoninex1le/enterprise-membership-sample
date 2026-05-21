@@ -4,6 +4,11 @@ name: Bootstrap Platform Tenant
 # resets the DynamoDB tables.  Idempotent — safe to run multiple times.
 on:
   workflow_dispatch:
+    inputs:
+      stack_name:
+        description: 'CloudFormation stack name for porth-components'
+        required: false
+        default: 'serverlessrepo-porth-components'
 
 permissions:
   id-token: write
@@ -33,7 +38,7 @@ jobs:
 
       - name: Resolve porth-components stack outputs
         run: |
-          STACK=porth-components
+          STACK="${{ inputs.stack_name || 'serverlessrepo-porth-components' }}"
           get_output() {
             aws cloudformation describe-stacks \
               --stack-name "$STACK" \
