@@ -75,7 +75,7 @@ jobs:
 
       - name: Resolve porth-components stack outputs
         run: |
-          STACK=porth-components
+          STACK=serverlessrepo-porth-components
           get_output() {
             aws cloudformation describe-stacks \
               --stack-name "$STACK" \
