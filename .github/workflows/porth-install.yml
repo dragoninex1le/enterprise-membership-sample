@@ -187,12 +187,6 @@ jobs:
           CFN_EXECUTION_ROLE_ARN: ${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}
         run: |
           set -euo pipefail
-          if [ -z "${CFN_EXECUTION_ROLE_ARN:-}" ]; then
-            echo "::error::vars.AWS_CFN_EXECUTION_ROLE_ARN is not set. The porth-install"
-            echo "environment must provide the porth-cfn-execution-role ARN — CloudFormation"
-            echo "runs the Porth stack under that role, not under porth-install-role."
-            exit 1
-          fi
           if [ "${{ steps.preflight.outputs.action }}" = "install" ]; then
             CS_TYPE="CREATE"
           else
@@ -213,15 +207,26 @@ jobs:
           fi
           # GitHubRepoOwner intentionally omitted → SAR CreateDeployRole condition stays false.
 
+          # CFN_EXECUTION_ROLE_ARN is optional. When set, CloudFormation assumes this
+          # role for all resource operations (recommended for least-privilege). When absent,
+          # CloudFormation uses the calling OIDC role (porth-install-role) directly —
+          # acceptable when that role already has the necessary resource permissions.
+          ROLE_ARGS=()
+          if [ -n "${CFN_EXECUTION_ROLE_ARN:-}" ]; then
+            ROLE_ARGS=("--role-arn" "$CFN_EXECUTION_ROLE_ARN")
+            echo "CloudFormation execution role: $CFN_EXECUTION_ROLE_ARN"
+          else
+            echo "ℹ️  AWS_CFN_EXECUTION_ROLE_ARN not set — CloudFormation will use the calling role directly"
+          fi
+
           echo "Creating $CS_TYPE change set: $CHANGE_SET_NAME"
-          echo "CloudFormation execution role: $CFN_EXECUTION_ROLE_ARN"
           CHANGE_SET_ID=$(aws cloudformation create-change-set \
             --stack-name "$STACK" \
             --change-set-name "$CHANGE_SET_NAME" \
             --change-set-type "$CS_TYPE" \
             --template-url "${{ steps.render.outputs.template_url }}" \
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
-            --role-arn "$CFN_EXECUTION_ROLE_ARN" \
+            "${ROLE_ARGS[@]}" \
             --parameters "${PARAMS[@]}" \
             --query 'Id' --output text)
           echo "change_set_id=$CHANGE_SET_ID" >> "$GITHUB_OUTPUT"
