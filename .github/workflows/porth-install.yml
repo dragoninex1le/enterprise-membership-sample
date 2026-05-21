@@ -205,13 +205,10 @@ jobs:
             PARAMS+=( "ParameterKey=ApiDomainName,ParameterValue=${PORTH_DOMAIN}" )
             PARAMS+=( "ParameterKey=AcmCertificateArn,ParameterValue=${PORTH_CERT}" )
           fi
-          # AuthTestToken enables the Layer 1 JWT bypass in the Lambda authorizer.
-          # Only set if the secret is present — otherwise the bypass is disabled.
           AUTH_TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
           if [ -n "$AUTH_TEST_TOKEN" ]; then
             PARAMS+=( "ParameterKey=AuthTestToken,ParameterValue=$AUTH_TEST_TOKEN" )
           fi
-          # GitHubRepoOwner intentionally omitted → SAR CreateDeployRole condition stays false.
 
           echo "Creating $CS_TYPE change set: $CHANGE_SET_NAME"
           echo "CloudFormation execution role: $CFN_EXECUTION_ROLE_ARN"
@@ -340,11 +337,6 @@ jobs:
           echo "✅ Resolved Porth outputs (API: $PORTH_API_URL, execute-api: $EXECUTE_API_URL)"
 
       - name: Upsert Route 53 alias for Porth API custom domain
-        # Idempotent: creates or updates the A-alias record pointing
-        # porth-api.ems.estynsoftware.cloud → API Gateway regional domain.
-        # Skipped if no custom domain was configured (PORTH_DOMAIN empty).
-        # Non-fatal: if IAM perms are missing the operator must create the
-        # record manually; subsequent steps (bootstrap, IdP patch) still run.
         if: env.PORTH_DOMAIN != ''
         continue-on-error: true
         run: |
@@ -358,7 +350,6 @@ jobs:
             exit 0
           fi
 
-          # Derive parent zone name (porth-api.ems.estynsoftware.cloud → ems.estynsoftware.cloud)
           PARENT="${DOMAIN#*.}"
           HZ_ID=$(aws route53 list-hosted-zones-by-name \
             --dns-name "${PARENT}." \
@@ -391,6 +382,67 @@ jobs:
             }"
           echo "✅ Route 53 alias upserted: $DOMAIN → $REGIONAL_DOMAIN"
 
+      # ── Seed authorizer policy templates in SSM ──────────────────────────────────
+      # The Porth authoriser Lambda reads auth-policy templates from SSM at request
+      # time. These must exist in the CONSUMING account (EMS) — they are NOT
+      # deployed by CloudFormation (the cfn-execution-role lacks ssm:PutParameter
+      # on the auth-policy path). This step seeds them with permissive ALLOW_ALL
+      # bootstrap values so all Porth API endpoints are reachable immediately.
+      # Real per-path narrowing is tracked in PORTH-440.
+      - name: Seed SSM auth-policy templates
+        continue-on-error: true
+        run: |
+          ENV="${{ env.EFF_ENV_NAME }}"
+          ALLOW_ALL='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"execute-api:Invoke","Resource":"*"}]}'
+          INDEX='{ "/organizations":"platform-admin-only", "/tenants":"tenant-scoped-rbac", "/users":"tenant-scoped-user", "/roles":"tenant-scoped-rbac", "/permissions":"tenant-scoped-rbac", "/claim-mapping-configs":"tenant-scoped-rbac", "/org-units":"tenant-scoped-rbac", "/provision":"tenant-scoped-user" }'
+
+          for NAME in \
+            "/porth/${ENV}/auth-policy/platform-admin-only:$ALLOW_ALL" \
+            "/porth/${ENV}/auth-policy/tenant-scoped-rbac:$ALLOW_ALL" \
+            "/porth/${ENV}/auth-policy/tenant-scoped-user:$ALLOW_ALL"
+          do
+            PARAM="${NAME%%:*}"
+            VALUE="${NAME#*:}"
+            aws ssm put-parameter \
+              --name "$PARAM" \
+              --value "$VALUE" \
+              --type String \
+              --overwrite \
+              --region "${{ env.AWS_REGION }}" \
+              --no-cli-pager
+            echo "✅ $PARAM"
+          done
+
+          aws ssm put-parameter \
+            --name "/porth/${ENV}/auth-policy/index" \
+            --value "$INDEX" \
+            --type String \
+            --overwrite \
+            --region "${{ env.AWS_REGION }}" \
+            --no-cli-pager
+          echo "✅ /porth/${ENV}/auth-policy/index"
+
+          TEMPLATE_NAME="tenant-scoped-default"
+          TENANT_SESSION_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:PutItem","dynamodb:Query","dynamodb:UpdateItem","dynamodb:DeleteItem","dynamodb:BatchGetItem","dynamodb:BatchWriteItem","dynamodb:ConditionCheckItem"],"Resource":"*","Condition":{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["TENANT#$tenant","ORG#$org_id"]}}}]}'
+          aws ssm put-parameter \
+            --name "/porth/${ENV}/auth-session-policy/${TEMPLATE_NAME}" \
+            --value "$TENANT_SESSION_POLICY" \
+            --type String \
+            --overwrite \
+            --region "${{ env.AWS_REGION }}" \
+            --no-cli-pager
+          echo "✅ /porth/${ENV}/auth-session-policy/${TEMPLATE_NAME}"
+
+          SESSION_INDEX="{\"roles\":{\"tenant\":\"porth-tenant-${ENV}\",\"platform_admin\":\"porth-platform-admin-${ENV}\"},\"context_rules\":[],\"paths\":{\"default\":\"${TEMPLATE_NAME}\"}}"
+          aws ssm put-parameter \
+            --name "/porth/${ENV}/auth-session-policy/index" \
+            --value "$SESSION_INDEX" \
+            --type String \
+            --overwrite \
+            --region "${{ env.AWS_REGION }}" \
+            --no-cli-pager
+          echo "✅ /porth/${ENV}/auth-session-policy/index"
+
       # Bootstrap runs on every successful install/upgrade (and on no-op) — the
       # platform tenant is independent of the CloudFormation stack and the
       # script is fully idempotent.
@@ -405,16 +457,10 @@ jobs:
           echo "✅ Platform tenant bootstrapped"
 
       - name: Patch platform tenant IdP config (direct DynamoDB)
-        # Writes idp_config_override directly to DynamoDB — same pattern as the
-        # bootstrap script — bypassing the Porth API (which requires EventBridge
-        # PutEvents that the Lambda execution role may be missing in this account).
-        # The authorizer reads idp_config from DynamoDB and will pick this up on
-        # the next cache miss (PORTH-471).
         env:
           PORTH_TENANT_CONFIG: ${{ secrets.PORTH_TENANT_CONFIG }}
         run: |
           set -euo pipefail
-          # Audience: prefer PORTH_TENANT_CONFIG JSON, fall back to secret.
           AUDIENCE=$(echo "$PORTH_TENANT_CONFIG" | python3 -c \
             "import json,sys; raw=sys.stdin.read().strip(); d=json.loads(raw); d=d if isinstance(d,dict) else json.loads(d); print(d.get('audience',''),end='')" \
             2>/dev/null || true)
@@ -443,7 +489,6 @@ jobs:
 
       - name: Smoke test Porth API
         run: |
-          # Use raw execute-api URL so smoke test works before DNS record exists
           SMOKE_URL="${PORTH_EXECUTE_API_URL:-$PORTH_API_URL}"
           STATUS=$(curl -s -o /tmp/health.json -w "%{http_code}" "${SMOKE_URL}/health" || echo "000")
           if [[ "$STATUS" == "200" ]]; then
