@@ -1,6 +1,6 @@
 name: Porth components — install + upgrade
 
-# PORTH-471 — Pipeline 1.
+# PORTH-471 — Pipeline 1. PORTH-530 — upgraded to SAR 0.1.16 + ADR-Z9 BFF wiring.
 #
 # Installs or upgrades the Porth components stack (serverlessrepo-porth-components) in the EMS
 # account by consuming the porth-user-management SAR application, then
@@ -19,13 +19,29 @@ name: Porth components — install + upgrade
 # A change-set inspection step aborts before execute if the change set would
 # Remove or Replace any DynamoDB table (ADR-Z1/Z2 — DDB safety).
 #
+# PORTH-530 — environment model: EMS is a SINGLE-environment instance (no slots), so
+# EnvironmentMode=single + FixedEnvironment=prod. The SAR template's deploy-time Rules
+# require that pair (single => FixedEnvironment non-empty; multi => empty). Note this
+# turns on the ADR-Z8 `ENV#prod#` partition-key prefix for all Porth data.
+#
+# PORTH-530 — required vars/secrets (GitHub environment: porth-install):
+#   vars.AWS_ROLE_ARN                 OIDC role to assume
+#   vars.AWS_CFN_EXECUTION_ROLE_ARN   (optional) CFN execution role
+#   vars.DNS_ZONE                     e.g. ems.estynsoftware.cloud — cookie-domain derivation
+#   vars.API_DOMAIN_NAME              (or legacy vars.PORTH_API_DOMAIN_NAME)
+#   vars.PORTH_SPA_ORIGINS            CSV of SPA origins, e.g. https://app.ems.estynsoftware.cloud
+#   secrets.ACM_CERTIFICATE_ARN       cert for the custom domain (us-east-1)
+#   secrets.PLATFORM_AUTH0_DOMAIN / _CLIENT_ID / _AUDIENCE
+#   secrets.PORTH_AUTH_TEST_TOKEN     (optional) authorizer test-token bypass
+#   secrets.PORTH_TENANT_CONFIG       (optional) audience override
+#
 on:
   workflow_dispatch:
     inputs:
       sar_version:
         description: 'Porth SAR app semantic version to install/upgrade to'
         required: true
-        default: '0.0.6'
+        default: '0.1.16'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
@@ -38,12 +54,16 @@ on:
         description: 'Porth Environment parameter (drives the DynamoDB table name suffix)'
         required: false
         default: 'dev'
+      fixed_environment:
+        description: 'ADR-Z8 environment slot this install is pinned to (EnvironmentMode=single)'
+        required: false
+        default: 'prod'
       api_domain_name:
-        description: 'API Gateway custom domain FQDN. Blank = use the execute-api URL.'
+        description: 'API Gateway custom domain FQDN. Blank = use the vars value.'
         required: false
         default: ''
       acm_certificate_arn:
-        description: 'ACM certificate ARN for the custom domain (required when api_domain_name is set).'
+        description: 'ACM certificate ARN for the custom domain. Blank = use the secret.'
         required: false
         default: ''
 
@@ -60,7 +80,7 @@ env:
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.sar_version || '0.0.6' }}
+    name: Install or upgrade Porth ${{ inputs.sar_version || '0.1.16' }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
@@ -80,10 +100,11 @@ jobs:
       # also works when triggered by the push shim (inputs are empty on push).
       - name: Resolve effective inputs
         run: |
-          echo "EFF_SAR_VERSION=${{ inputs.sar_version || '0.0.6' }}" >> "$GITHUB_ENV"
+          echo "EFF_SAR_VERSION=${{ inputs.sar_version || '0.1.16' }}" >> "$GITHUB_ENV"
           echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
           echo "EFF_SAR_APP_ID=${{ inputs.sar_app_id || 'arn:aws:serverlessrepo:us-east-1:084847995635:applications/porth-user-management' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
+          echo "EFF_FIXED_ENV=${{ inputs.fixed_environment || 'prod' }}" >> "$GITHUB_ENV"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -94,7 +115,27 @@ jobs:
       - name: Caller identity
         run: aws sts get-caller-identity
 
+      # Precondition: verify the SAR app is accessible (Org-scoped share).
+      # A 403/404 here means the share is missing — escalate to the Porth team
+      # rather than debugging a confusing template-render failure later.
+      - name: Verify SAR app is accessible (Org-scoped share)
+        run: |
+          set -euo pipefail
+          echo "Checking SAR app accessibility: ${{ env.EFF_SAR_APP_ID }}"
+          aws serverlessrepo get-application \
+            --application-id "${{ env.EFF_SAR_APP_ID }}" \
+            --query '{Name:Name,Author:Author,Version:Version.SemanticVersion}' \
+            --output json
+          echo "✅ SAR app is accessible"
+
       - name: Validate inputs and resolve domain parameters
+        env:
+          ACM_SECRET: ${{ secrets.ACM_CERTIFICATE_ARN }}
+          ACM_LEGACY_VAR: ${{ vars.ACM_CERTIFICATE_ARN }}
+          API_DOMAIN_VAR: ${{ vars.API_DOMAIN_NAME }}
+          API_DOMAIN_LEGACY_VAR: ${{ vars.PORTH_API_DOMAIN_NAME }}
+          DNS_ZONE_VAR: ${{ vars.DNS_ZONE }}
+          SPA_ORIGINS_VAR: ${{ vars.PORTH_SPA_ORIGINS }}
         run: |
           set -euo pipefail
           APP_ARN="${{ env.EFF_SAR_APP_ID }}"
@@ -102,17 +143,33 @@ jobs:
             echo "::error::Invalid sar_app_id: $APP_ARN"
             exit 1
           fi
+
+          # Custom domain: dispatch input wins, then the canonical var, then the legacy name.
           DOMAIN="${{ inputs.api_domain_name }}"
+          [ -z "$DOMAIN" ] && DOMAIN="${API_DOMAIN_VAR:-}" || true
+          [ -z "$DOMAIN" ] && DOMAIN="${API_DOMAIN_LEGACY_VAR:-}" || true
+
+          # ACM: dispatch input wins, then the secret (canonical), then the legacy var.
           CERT="${{ inputs.acm_certificate_arn }}"
-          [ -z "$DOMAIN" ] && DOMAIN="${{ vars.PORTH_API_DOMAIN_NAME }}" || true
-          [ -z "$CERT" ]   && CERT="${{ vars.ACM_CERTIFICATE_ARN }}"   || true
+          [ -z "$CERT" ] && CERT="${ACM_SECRET:-}" || true
+          [ -z "$CERT" ] && CERT="${ACM_LEGACY_VAR:-}" || true
+
           if [ -n "$DOMAIN" ] && [ -z "$CERT" ]; then
             echo "::error::api_domain_name '$DOMAIN' is set but no ACM certificate ARN was provided"
             exit 1
           fi
+
           echo "PORTH_DOMAIN=$DOMAIN" >> "$GITHUB_ENV"
           echo "PORTH_CERT=$CERT" >> "$GITHUB_ENV"
-          echo "Resolved domain: '${DOMAIN:-<execute-api default>}'"
+          echo "PORTH_DNS_ZONE=${DNS_ZONE_VAR%.}" >> "$GITHUB_ENV"
+          echo "PORTH_SPA_ORIGINS_RAW=${SPA_ORIGINS_VAR:-}" >> "$GITHUB_ENV"
+
+          echo "Resolved domain:      '${DOMAIN:-<execute-api default>}'"
+          echo "Resolved DNS zone:    '${DNS_ZONE_VAR%.}'"
+          echo "Resolved SPA origins: '${SPA_ORIGINS_VAR:-<unset — authorizer origin gate disabled>}'"
+          if [ -z "${SPA_ORIGINS_VAR:-}" ]; then
+            echo "::warning::PORTH_SPA_ORIGINS is empty — the cookie path's CSRF/Origin gate will be OFF"
+          fi
 
       - name: Pre-flight stack-state check
         id: preflight
@@ -124,6 +181,29 @@ jobs:
             --stack-name "$STACK" \
             --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "DOES_NOT_EXIST")
           echo "Pre-flight stack status: $STATUS"
+
+          # Robust delete: plain delete first; if it lands in DELETE_FAILED
+          # (resources that can't be deleted — common after a ROLLBACK_FAILED),
+          # retry retaining the stuck resources so the stack can be removed.
+          robust_delete() {
+            local s="$1"
+            aws cloudformation delete-stack --stack-name "$s"
+            if ! aws cloudformation wait stack-delete-complete --stack-name "$s" 2>/dev/null; then
+              echo "::warning::Plain delete did not complete — retrying with --retain-resources"
+              local stuck
+              stuck=$(aws cloudformation list-stack-resources --stack-name "$s" \
+                --query "StackResourceSummaries[?ResourceStatus=='DELETE_FAILED'].LogicalResourceId" \
+                --output text 2>/dev/null || true)
+              echo "Retaining stuck resources: ${stuck:-none}"
+              if [ -n "$stuck" ]; then
+                aws cloudformation delete-stack --stack-name "$s" --retain-resources $stuck
+              else
+                aws cloudformation delete-stack --stack-name "$s"
+              fi
+              aws cloudformation wait stack-delete-complete --stack-name "$s"
+            fi
+          }
+
           case "$STATUS" in
             DOES_NOT_EXIST)
               echo "🟢 Action: INSTALL — stack does not exist"
@@ -133,10 +213,9 @@ jobs:
               echo "🟢 Action: UPGRADE — stack in clean state ($STATUS)"
               echo "action=upgrade" >> "$GITHUB_OUTPUT"
               ;;
-            REVIEW_IN_PROGRESS|ROLLBACK_COMPLETE|CREATE_FAILED|DELETE_FAILED)
+            REVIEW_IN_PROGRESS|ROLLBACK_COMPLETE|ROLLBACK_FAILED|CREATE_FAILED|DELETE_FAILED|UPDATE_ROLLBACK_FAILED)
               echo "::warning::Stack in recoverable-failure state ($STATUS) — deleting and recreating"
-              aws cloudformation delete-stack --stack-name "$STACK"
-              aws cloudformation wait stack-delete-complete --stack-name "$STACK"
+              robust_delete "$STACK"
               echo "🟢 Action: INSTALL — recreating after cleanup"
               echo "action=install" >> "$GITHUB_OUTPUT"
               ;;
@@ -195,10 +274,13 @@ jobs:
           CHANGE_SET_NAME="porth-${{ steps.preflight.outputs.action }}-$(date -u +%Y%m%d-%H%M%S)"
 
           PARAMS=( "ParameterKey=Environment,ParameterValue=${{ env.EFF_ENV_NAME }}" )
-          if [ -n "${PORTH_DOMAIN:-}" ]; then
-            PARAMS+=( "ParameterKey=ApiDomainName,ParameterValue=${PORTH_DOMAIN}" )
-            PARAMS+=( "ParameterKey=AcmCertificateArn,ParameterValue=${PORTH_CERT}" )
-          fi
+
+          # ADR-Z8 (PORTH-530): EMS is a single-environment instance — the authorizer pins
+          # every request to FixedEnvironment and IGNORES the X-Porth-Environment header.
+          # The template's deploy-time Rules reject an inconsistent pair.
+          PARAMS+=( "ParameterKey=EnvironmentMode,ParameterValue=single" )
+          PARAMS+=( "ParameterKey=FixedEnvironment,ParameterValue=${{ env.EFF_FIXED_ENV }}" )
+
           # AuthTestToken enables the Layer 1 JWT bypass in the Lambda authorizer.
           # Only set if the secret is present — otherwise the bypass is disabled.
           AUTH_TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
@@ -207,10 +289,36 @@ jobs:
           fi
           # GitHubRepoOwner intentionally omitted → SAR CreateDeployRole condition stays false.
 
+          # Custom domain (PORTH-479): AcmCertificateArn + ApiDomainName together flip the
+          # template's HasCustomDomain condition, creating the ApiGatewayV2 DomainName +
+          # ApiMapping and exporting the regional domain/hosted-zone outputs for the Route53
+          # alias. Without BOTH the API stays on the raw execute-api URL. DnsZone (dot-less)
+          # keeps the authorizer's cookie-domain derivation consistent with the proxy blob.
+          if [ -n "${PORTH_DOMAIN:-}" ] && [ -n "${PORTH_CERT:-}" ]; then
+            PARAMS+=( "ParameterKey=AcmCertificateArn,ParameterValue=${PORTH_CERT}" )
+            PARAMS+=( "ParameterKey=ApiDomainName,ParameterValue=${PORTH_DOMAIN}" )
+            if [ -n "${PORTH_DNS_ZONE:-}" ]; then
+              PARAMS+=( "ParameterKey=DnsZone,ParameterValue=${PORTH_DNS_ZONE}" )
+            fi
+            echo "Custom domain ENABLED: ${PORTH_DOMAIN}"
+          else
+            echo "ℹ️  Custom domain OFF (API domain / ACM cert not both set) — execute-api URL only"
+          fi
+
+          # PORTH-479 Path B: SpaOrigins → the authorizer's PORTH_SPA_ORIGINS, the Origin
+          # allow-list for the cookie path's CSRF/Origin defence-in-depth. Cookie-authed
+          # mutating requests are DENIED unless the request Origin is listed. Must match the
+          # proxy's /porth/auth spa_origins — both are sourced from this one var. Commas are
+          # \,-escaped so the aws-cli --parameters shorthand keeps the CSV as one value.
+          if [ -n "${PORTH_SPA_ORIGINS_RAW:-}" ]; then
+            SPA_ORIGINS_ESCAPED="${PORTH_SPA_ORIGINS_RAW//,/\\,}"
+            PARAMS+=( "ParameterKey=SpaOrigins,ParameterValue=${SPA_ORIGINS_ESCAPED}" )
+            echo "SpaOrigins (authorizer Origin allow-list): ${PORTH_SPA_ORIGINS_RAW}"
+          fi
+
           # CFN_EXECUTION_ROLE_ARN is optional. When set, CloudFormation assumes this
           # role for all resource operations (recommended for least-privilege). When absent,
-          # CloudFormation uses the calling OIDC role (porth-install-role) directly —
-          # acceptable when that role already has the necessary resource permissions.
+          # CloudFormation uses the calling OIDC role (porth-install-role) directly.
           ROLE_ARGS=()
           if [ -n "${CFN_EXECUTION_ROLE_ARN:-}" ]; then
             ROLE_ARGS=("--role-arn" "$CFN_EXECUTION_ROLE_ARN")
@@ -319,6 +427,9 @@ jobs:
           EXECUTE_API_URL=$(get_output ApiEndpoint)
           APIGW_REGIONAL_DOMAIN=$(get_output ApiGatewayRegionalDomainName)
           APIGW_REGIONAL_HZ=$(get_output ApiGatewayRegionalHostedZoneId)
+          # PORTH-530: the ADR-Z9 BFF session spine — needed by the /porth/auth blob.
+          SESSIONS_TABLE=$(get_output SessionsTableName)
+          SESSION_KMS=$(get_output SessionKmsKeyArn)
 
           MISSING=""
           require() {
@@ -340,16 +451,23 @@ jobs:
           echo "PORTH_PERMISSIONS_TABLE=$PERMISSIONS_TABLE"                 >> "$GITHUB_ENV"
           echo "PORTH_ROLES_TABLE=$ROLES_TABLE"                             >> "$GITHUB_ENV"
           echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$CLAIM_TABLE"             >> "$GITHUB_ENV"
+          echo "PORTH_SESSIONS_TABLE=$SESSIONS_TABLE"                       >> "$GITHUB_ENV"
+          echo "PORTH_SESSION_KMS=$SESSION_KMS"                             >> "$GITHUB_ENV"
           echo "APIGW_REGIONAL_DOMAIN=$APIGW_REGIONAL_DOMAIN"               >> "$GITHUB_ENV"
           echo "APIGW_REGIONAL_HZ=$APIGW_REGIONAL_HZ"                       >> "$GITHUB_ENV"
           echo "✅ Resolved Porth outputs (API: $PORTH_API_URL, execute-api: $EXECUTE_API_URL)"
+          if [ -n "$SESSIONS_TABLE" ] && [ "$SESSIONS_TABLE" != "None" ]; then
+            echo "✅ BFF session spine: sessions table $SESSIONS_TABLE"
+          else
+            echo "::warning::SessionsTableName not exported — the BFF may not be present in this SAR version"
+          fi
 
       - name: Upsert Route 53 alias for Porth API custom domain
         # Idempotent: creates or updates the A-alias record pointing
         # porth-api.ems.estynsoftware.cloud → API Gateway regional domain.
         # Skipped if no custom domain was configured (PORTH_DOMAIN empty).
         # Non-fatal: if IAM perms are missing the operator must create the
-        # record manually; subsequent steps (bootstrap, IdP patch) still run.
+        # record manually; subsequent steps still run.
         if: env.PORTH_DOMAIN != ''
         continue-on-error: true
         run: |
@@ -395,6 +513,54 @@ jobs:
               }]
             }"
           echo "✅ Route 53 alias upserted: $DOMAIN → $REGIONAL_DOMAIN"
+
+      # ── Seed the OAuth-proxy config blob (/porth/auth) — PORTH-530 ──────────
+      # PORTH-479: the BFF proxy (estyn_platform.config, prefix /porth) reads this
+      # JSON blob at request time. Without it the proxy is INERT — no browser login
+      # completes. custom_domain drives the /auth/callback URL (must be registered in
+      # Auth0); cookie_domain is the ZONE-level .<DnsZone> (env is a data axis, not the
+      # cookie). sessions_table + kms come from the stack outputs above. spa_origins is
+      # sourced from the SAME PORTH_SPA_ORIGINS var as the authorizer's SpaOrigins param,
+      # so the two cannot drift.
+      - name: Seed OAuth-proxy config blob (/porth/auth)
+        continue-on-error: true
+        env:
+          A0_DOMAIN: ${{ secrets.PLATFORM_AUTH0_DOMAIN }}
+          A0_CLIENT_ID: ${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}
+          A0_AUDIENCE: ${{ secrets.PLATFORM_AUTH0_AUDIENCE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${A0_DOMAIN:-}" ] || [ -z "${PORTH_DNS_ZONE:-}" ] || [ -z "${PORTH_DOMAIN:-}" ]; then
+            echo "::warning::Missing PLATFORM_AUTH0_DOMAIN / DNS_ZONE / API domain — skipping /porth/auth seed (proxy stays inert)"
+            exit 0
+          fi
+          BLOB=$(python3 -c '
+          import json, os
+          d = os.environ["A0_DOMAIN"].rstrip("."); z = os.environ["PORTH_DNS_ZONE"].rstrip(".")
+          print(json.dumps({
+              "issuer": f"https://{d}/",
+              "jwks_uri": f"https://{d}/.well-known/jwks.json",
+              "interactive_client_id": os.environ.get("A0_CLIENT_ID", ""),
+              "audience": os.environ.get("A0_AUDIENCE", ""),
+              "protocol": "auth0",
+              "custom_domain": os.environ.get("PORTH_DOMAIN", ""),
+              "cookie_domain": f".{z}",
+              "dns_zone": z,
+              "spa_origins": os.environ.get("PORTH_SPA_ORIGINS_RAW", ""),
+              "platform_tenant_id": "platform",
+              "environment": os.environ.get("EFF_FIXED_ENV", ""),
+              "sessions_table": os.environ.get("PORTH_SESSIONS_TABLE", ""),
+              "session_kms_key_id": os.environ.get("PORTH_SESSION_KMS", ""),
+              "end_session_endpoint": f"https://{d}/v2/logout",
+          }))
+          ')
+          echo "→ writing /porth/auth blob"
+          aws ssm put-parameter --name /porth/auth --type String --overwrite \
+            --value "$BLOB" --region "$AWS_REGION"
+          echo "← read-back /porth/auth:"
+          aws ssm get-parameter --name /porth/auth --query Parameter.Value --output text --region "$AWS_REGION" 2>&1 | head -c 800 || true
+          echo
+          echo "✅ Seeded /porth/auth"
 
       # Bootstrap runs on every successful install/upgrade (and on no-op) — the
       # platform tenant is independent of the CloudFormation stack and the
@@ -508,9 +674,7 @@ jobs:
 
           # Seed the auth-test-token SSM fallback. The AuthorizerFunction reads
           # PORTH_AUTH_TEST_TOKEN env var first (set via CFN AuthTestToken param),
-          # then falls back to this SSM path on cold start. Seeding here ensures the
-          # bypass works even when the CFN parameter was absent during the last deploy.
-          # Uses SecureString so the value is encrypted at rest.
+          # then falls back to this SSM path on cold start.
           AUTH_TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
           if [ -n "$AUTH_TEST_TOKEN" ]; then
             aws ssm put-parameter \
@@ -546,5 +710,13 @@ jobs:
             echo "- **No-op:** ${{ steps.changeset.outputs.no_changes || 'false' }}"
             echo "- **Target version:** ${{ env.EFF_SAR_VERSION }}"
             echo "- **Stack:** ${{ env.EFF_STACK_NAME }}"
+            echo "- **Environment param:** ${{ env.EFF_ENV_NAME }}"
+            echo "- **Env mode:** single (FixedEnvironment=\`${{ env.EFF_FIXED_ENV }}\`)"
             echo "- **Porth API URL:** ${PORTH_API_URL:-'(unresolved)'}"
+            echo "- **Custom domain:** ${PORTH_DOMAIN:-'OFF (execute-api only)'}"
+            echo "- **SPA origins:** ${PORTH_SPA_ORIGINS_RAW:-'(unset — origin gate OFF)'}"
+            echo ""
+            echo "### Next steps"
+            echo "- Seed test tenants via the (separate) porth-seed-testbed workflow"
+            echo "- Then run the PORTH-494 security suite against this install"
           } >> "$GITHUB_STEP_SUMMARY"
