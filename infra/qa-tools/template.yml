@@ -107,19 +107,26 @@ Resources:
               Resource:
                 - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-*
                 - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-*/index/*
-            # Read the IdP blob porth-install seeds, the operator-authored tenant manifest,
-            # and the password SecureStrings (existence check only — never decrypted).
+            # Read the operator-authored manifest; publish the resolved set.
             - Effect: Allow
               Action: ssm:GetParameter
               Resource:
-                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/auth
                 - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/config/testbed
                 - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/testbed/*
             - Effect: Allow
               Action: ssm:PutParameter
               Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/testbed/*
-            # Only ever used for the existence check on password SecureStrings — the value is
-            # never decrypted, so no credential can reach a log.
+            # DescribeSecret only — metadata, never the value. Deliberately NOT
+            # GetSecretValue: the seeder has no reason to hold a password, and the boundary
+            # is enforced by the API rather than by a WithDecryption flag staying false.
+            #
+            # The trailing `*` is REQUIRED, and not just a prefix wildcard: Secrets Manager
+            # appends a random six-character suffix to every secret ARN, so a pattern ending
+            # at the secret name matches nothing (same trap as PORTH-532).
+            - Effect: Allow
+              Action: secretsmanager:DescribeSecret
+              Resource: !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:porth/testbed/*
+            # For the manifest parameter when it is a SecureString.
             - Effect: Allow
               Action: kms:Decrypt
               Resource: '*'

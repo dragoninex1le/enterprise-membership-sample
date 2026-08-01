@@ -16,7 +16,9 @@ POST /qa/seed with a JSON body (the manifest):
           "porth_org_id": "ems",                // org slug — find-or-create, resolved to a UUID
           "provider_org_id": "org_XXXX",        // Auth0 Organization id (required for tenant login)
           "reserved_for_e2e": false,            // true => skipped, the slot is left for the e2e test
-          "admin": { "email": "...", "password_ssm": "/porth/testbed/tenants/acme/password" }
+          "idp": { "issuer": "...", "jwks_uri": "...", "client_id": "...",
+                   "audience": "...", "protocol": "auth0" },
+          "admin": { "email": "...", "password_secret": "porth/testbed/tenants/acme/password" }
         }
       ]
     }
@@ -30,8 +32,8 @@ keeps the Lambda dependency-free and means no Porth API credential has to exist 
 
 **Why it does not generate passwords:** the matching user must exist in Auth0, which needs the
 Management API. Passwords are therefore created out-of-band alongside the Auth0 user and stored
-at `admin.password_ssm`; this Lambda only *verifies* the parameter is present and never reads its
-value. Nothing secret is returned or logged.
+at `admin.password_secret`. This Lambda only calls DescribeSecret — metadata, structurally
+incapable of returning the value. Nothing secret is returned or logged.
 
 Safety:
 - Only deployed to dev/staging (SAM template restricts Environment).
@@ -65,8 +67,6 @@ logger.setLevel(logging.INFO)
 # match in DOM order — and the next action writes IdP config onto whatever row matched. So a
 # seeded name merely *containing* one of these can make the test clobber the wrong tenant.
 RESERVED_NAMES = ("demo-tenant", "demo corp")
-
-AUTH_BLOB_PARAM = "/porth/auth"
 
 # INPUT: the tenant manifest, authored by the operator. It lives in SSM rather than as a
 # GitHub variable so the testbed's configuration lives in the account it configures — this
@@ -106,31 +106,38 @@ def handler(event, context):
     region = os.environ.get("AWS_REGION", "us-east-1")
     dynamodb = boto3.resource("dynamodb", region_name=region)
     ssm = boto3.client("ssm", region_name=region)
+    secrets = boto3.client("secretsmanager", region_name=region)
 
     # The manifest normally comes from SSM, so the caller passes nothing but env_scope and no
-    # testbed configuration transits CI. An inline `tenants` array overrides it — used by the
-    # tests and for a one-off dry run against a candidate manifest.
-    tenants = body.get("tenants")
-    if tenants is None:
+    # testbed configuration transits CI. An inline manifest overrides it — used by the tests
+    # and for a one-off dry run against a candidate document.
+    if body.get("tenants") is not None or body.get("platform") is not None:
+        manifest = {"platform": body.get("platform"), "tenants": body.get("tenants")}
+    else:
         try:
-            tenants = _load_manifest(ssm)
+            manifest = _load_manifest(ssm)
         except ClientError as e:
             if e.response["Error"]["Code"] in ("ParameterNotFound", "AccessDeniedException"):
                 return _response(400, {
                     "error": f"{TESTBED_CONFIG_PARAM} is absent — the tenant manifest lives "
                              f"there, not in the workflow. Create it with: aws ssm "
-                             f"put-parameter --name {TESTBED_CONFIG_PARAM} --type String "
+                             f"put-parameter --name {TESTBED_CONFIG_PARAM} --type SecureString "
                              f"--value file://manifest.json"
                 })
             raise
         except (json.JSONDecodeError, TypeError) as e:
             return _response(400, {"error": f"{TESTBED_CONFIG_PARAM} is not valid JSON: {e}"})
 
+    tenants = manifest.get("tenants")
+    platform = manifest.get("platform")
+
     if not isinstance(tenants, list) or not tenants:
         return _response(400, {"error": "tenants must be a non-empty array"})
 
     # --- Validate the whole manifest before writing anything ------------------
     errors = []
+    if platform is not None:
+        errors.extend(f"platform: {e}" for e in _validate_platform(platform))
     for i, t in enumerate(tenants):
         errors.extend(f"tenants[{i}]: {e}" for e in _validate_tenant(t))
     if errors:
@@ -142,13 +149,6 @@ def handler(event, context):
         "claims": dynamodb.Table(f"porth-claim-mapping-configs-{porth_env}"),
     }
 
-    try:
-        idp_defaults = _load_idp_defaults(ssm)
-    except ClientError as e:
-        return _response(500, {
-            "error": f"Cannot read {AUTH_BLOB_PARAM} — has porth-install run? {e}"
-        })
-
     logger.info(
         "QA seed starting: env=%s env_scope=%s tenants=%d dry_run=%s",
         porth_env, env_scope, len(tenants), dry_run,
@@ -157,9 +157,7 @@ def handler(event, context):
     results = []
     for t in tenants:
         try:
-            results.append(
-                _seed_tenant(t, tables, ssm, idp_defaults, env_scope, dry_run)
-            )
+            results.append(_seed_tenant(t, tables, secrets, env_scope, dry_run))
         except ClientError as e:
             code = e.response["Error"]["Code"]
             logger.error("seed failed for %s: %s", t.get("tenant_id"), code)
@@ -167,9 +165,16 @@ def handler(event, context):
                 "tenant_id": t.get("tenant_id"), "status": "error", "error": code,
             })
 
+    # The platform tenant is NOT created here — PORTH-536 owns that, and duplicating it is
+    # how the ADR-Z8 scoping bug spread in the first place. The block is validated and
+    # published so every testbed identity resolves from one document.
+    platform_warnings = []
+    if platform:
+        platform_warnings = _check_secret(secrets, platform["admin"]["password_secret"])
+
     seeded = [r for r in results if r["status"] in ("created", "adopted")]
     if seeded and not dry_run:
-        _write_manifest(ssm, env_scope, seeded)
+        _write_manifest(ssm, env_scope, seeded, tenants, platform)
 
     logger.info(
         "QA seed complete: created=%d adopted=%d skipped=%d error=%d",
@@ -181,6 +186,7 @@ def handler(event, context):
     return _response(status, {
         "env_scope": env_scope,
         "dry_run": dry_run,
+        "platform_warnings": platform_warnings,
         "results": results,
     })
 
@@ -188,19 +194,67 @@ def handler(event, context):
 # --------------------------------------------------------------------------- #
 # Validation
 # --------------------------------------------------------------------------- #
+def _validate_platform(p) -> list:
+    """The platform block declares the platform-admin identity and the platform IdP config.
+
+    It is deliberately NOT seeded here: creating the platform tenant is PORTH-536's job, and
+    it must exist before any login — including the install's own smoke test — so it is
+    install-time, not testbed-time. Declaring it here gives every testbed identity one home.
+    """
+    if not isinstance(p, dict):
+        return ["must be an object"]
+    return _validate_admin(p.get("admin"), "admin") + _validate_idp(p.get("idp"), "idp")
+
+
+def _validate_admin(admin, where: str) -> list:
+    """Shared by the platform block and every tenant — one definition of 'an identity'."""
+    if not isinstance(admin, dict) or not admin.get("email"):
+        return [f"{where}.email is required"]
+    if admin.get("password"):
+        return [f"{where}.password must not be inline — use password_secret"]
+    if not admin.get("password_secret"):
+        return [f"{where}.password_secret is required (a Secrets Manager name or ARN, never a value)"]
+    return []
+
+
+def _validate_idp(idp, where: str) -> list:
+    """PORTH-488: tenants resolve on a NEUTRAL OIDC pair, so both halves are mandatory.
+
+    `issuer` must byte-match the `iss` claim in issued tokens. Providers differ on the
+    trailing slash — Auth0 issues `https://host/`, Keycloak `https://host/realms/name` —
+    and a mismatch surfaces as an opaque validation rejection, so it is worth being strict
+    here rather than at 3am.
+    """
+    if not isinstance(idp, dict):
+        return [f"{where} must be an object"]
+
+    problems = [f"{where}.{k} is required" for k in ("issuer", "jwks_uri") if not idp.get(k)]
+    issuer = idp.get("issuer")
+    if isinstance(issuer, str) and issuer and not issuer.startswith(("http://", "https://")):
+        problems.append(f"{where}.issuer '{issuer}' must be an absolute URL")
+    return problems
+
+
 def _validate_tenant(t) -> list:
     """Return a list of problems with one manifest entry (empty == valid)."""
     if not isinstance(t, dict):
         return ["must be an object"]
 
-    problems = []
     tid = t.get("tenant_id")
     if not tid or not isinstance(tid, str):
         return ["tenant_id is required"]
+
+    problems = []
     if not _TENANT_ID_RE.match(tid):
         problems.append(f"tenant_id '{tid}' must be lowercase alphanumeric/hyphen, 2-63 chars")
 
-    # Guard every human-visible name, not just the id — the e2e row match is a substring.
+    # A reserved entry documents a slot the e2e suite owns; nothing is written for it. The
+    # name guard below exists to stop a *seeded* near-miss clobbering that tenant's config,
+    # which cannot happen when nothing is seeded — and applying it here would make the flag
+    # unusable for the only name it is ever needed for.
+    if t.get("reserved_for_e2e"):
+        return problems
+
     for field in ("tenant_id", "display_name", "porth_org_id"):
         val = t.get(field)
         if isinstance(val, str):
@@ -212,38 +266,27 @@ def _validate_tenant(t) -> list:
                         f"its row lookup is a substring match and would target the wrong tenant"
                     )
 
-    admin = t.get("admin")
-    if not isinstance(admin, dict) or not admin.get("email"):
-        problems.append("admin.email is required")
-    elif not admin.get("password_ssm"):
-        problems.append("admin.password_ssm is required (path to a SecureString; never a value)")
-    elif "password" in admin and admin.get("password"):
-        problems.append("admin.password must not be inline — use password_ssm")
-
+    problems.extend(_validate_admin(t.get("admin"), "admin"))
+    problems.extend(_validate_idp(t.get("idp"), "idp"))
     return problems
 
 
 # --------------------------------------------------------------------------- #
 # Seeding
 # --------------------------------------------------------------------------- #
-def _seed_tenant(t, tables, ssm, idp_defaults, env_scope, dry_run) -> dict:
+def _seed_tenant(t, tables, secrets, env_scope, dry_run) -> dict:
     tid = t["tenant_id"]
 
     if t.get("reserved_for_e2e"):
         logger.info("skipping %s — reserved_for_e2e", tid)
         return {"tenant_id": tid, "status": "skipped", "reason": "reserved_for_e2e"}
 
-    warnings = []
     admin = t["admin"]
-    if not _ssm_param_exists(ssm, admin["password_ssm"]):
-        warnings.append(
-            f"{admin['password_ssm']} does not exist — create the SecureString alongside the "
-            f"Auth0 user, or logins for this tenant will fail"
-        )
+    warnings = _check_secret(secrets, admin["password_secret"])
     if not t.get("provider_org_id"):
         warnings.append(
             "no provider_org_id — PORTH-511 denies a non-platform-admin token without org_id, "
-            "so tenant logins will not work until the Auth0 Organization id is supplied"
+            "so tenant logins will not work until the provider's organization id is supplied"
         )
 
     if dry_run:
@@ -259,13 +302,13 @@ def _seed_tenant(t, tables, ssm, idp_defaults, env_scope, dry_run) -> dict:
     tenant_pk = _env_key(env_scope, f"TENANT#{tid}")
     existing = tenants_tbl.get_item(Key={"PK": tenant_pk, "SK": "METADATA"}).get("Item")
 
-    idp_config = {
-        "issuer": idp_defaults["issuer"],
-        "jwks_uri": idp_defaults["jwks_uri"],
-        "client_id": idp_defaults["client_id"],
-        "audience": idp_defaults["audience"],
-        "protocol": "auth0",
-    }
+    # The tenant's own IdP config, verbatim from the manifest. Written per tenant rather than
+    # inherited from /porth/auth so the testbed can run tenants on different providers — which
+    # is the point of PORTH-488's neutral issuer/jwks_uri pair. `provider_org_id` sits outside
+    # the block because it is a Porth-level tenant fact; a Keycloak tenant has no equivalent.
+    # `_`-prefixed keys are the manifest's comment convention (JSON has none) — strip them so
+    # they never land in an auth config record.
+    idp_config = {k: v for k, v in t["idp"].items() if not k.startswith("_")}
     if t.get("provider_org_id"):
         idp_config["provider_org_id"] = t["provider_org_id"]
 
@@ -283,7 +326,7 @@ def _seed_tenant(t, tables, ssm, idp_defaults, env_scope, dry_run) -> dict:
         "status": "active",
         "idp_config_override": idp_config,
         "admin_email": admin["email"],
-        "admin_password_ssm": admin["password_ssm"],
+        "admin_password_secret": admin["password_secret"],
         "updated_at": now,
         "created_at": (existing or {}).get("created_at", now),
     }
@@ -409,23 +452,10 @@ def _ensure_claim_mapping(claims_tbl, tid, env_scope, now) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# SSM
+# SSM / Secrets Manager
 # --------------------------------------------------------------------------- #
-def _load_idp_defaults(ssm) -> dict:
-    """Derive the tenant IdP config from the /porth/auth blob porth-install already seeds, so no
-    Auth0 credential has to be passed to this Lambda."""
-    raw = ssm.get_parameter(Name=AUTH_BLOB_PARAM)["Parameter"]["Value"]
-    blob = json.loads(raw)
-    return {
-        "issuer": blob.get("issuer", ""),
-        "jwks_uri": blob.get("jwks_uri", ""),
-        "client_id": blob.get("interactive_client_id", ""),
-        "audience": blob.get("audience", ""),
-    }
-
-
-def _load_manifest(ssm) -> list:
-    """Read the tenant manifest from SSM.
+def _load_manifest(ssm) -> dict:
+    """Read the testbed manifest from SSM.
 
     This is the bootstrap's configuration, and it lives in the account it configures rather
     than as a GitHub variable: this repo is public, so config held there is unversioned,
@@ -433,28 +463,49 @@ def _load_manifest(ssm) -> list:
     here also means the invoking workflow needs to know nothing about the testbed beyond
     which environment slot to write.
 
-    Accepts either ``{"tenants": [...]}`` or a bare array.
+    ``WithDecryption=True`` unconditionally, so the parameter works as either a String or a
+    SecureString. Without it a SecureString returns KMS ciphertext and the JSON parse fails
+    with something that looks nothing like the real problem.
+
+    Accepts ``{"platform": {...}, "tenants": [...]}`` or a bare tenants array.
     """
-    raw = ssm.get_parameter(Name=TESTBED_CONFIG_PARAM)["Parameter"]["Value"]
+    raw = ssm.get_parameter(Name=TESTBED_CONFIG_PARAM, WithDecryption=True)["Parameter"]["Value"]
     manifest = json.loads(raw)
-    return manifest.get("tenants") if isinstance(manifest, dict) else manifest
+    return manifest if isinstance(manifest, dict) else {"tenants": manifest}
 
 
-def _ssm_param_exists(ssm, name) -> bool:
-    """Existence check only — the value is never read, so no secret can reach a log."""
+def _check_secret(secrets, secret_id) -> list:
+    """Confirm a password secret exists, without ever being able to read it.
+
+    ``DescribeSecret`` returns metadata only — structurally incapable of returning the value,
+    unlike an SSM ``GetParameter`` whose safety depends on a ``WithDecryption`` flag staying
+    false. The password itself is created out of band alongside the IdP user, because that
+    needs the provider's management API.
+    """
     try:
-        ssm.get_parameter(Name=name, WithDecryption=False)
-        return True
+        secrets.describe_secret(SecretId=secret_id)
+        return []
     except ClientError as e:
-        if e.response["Error"]["Code"] in ("ParameterNotFound", "AccessDeniedException"):
-            return False
+        code = e.response["Error"]["Code"]
+        if code in ("ResourceNotFoundException", "AccessDeniedException"):
+            return [
+                f"secret '{secret_id}' does not exist ({code}) — create it alongside the IdP "
+                f"user, or logins using this identity will fail"
+            ]
         raise
 
 
-def _write_manifest(ssm, env_scope, seeded) -> None:
-    """Publish the resolved set so the PORTH-494 config can be generated rather than hand-kept.
-    Contains ids and SSM *paths* only — no credentials."""
-    manifest = {
+def _write_manifest(ssm, env_scope, seeded, tenants, platform) -> None:
+    """Publish the resolved set so the PORTH-494 config and the e2e suite can be generated
+    rather than hand-kept.
+
+    Carries the admin email and the secret *name* alongside the ids Porth assigned, so a
+    consumer needs only this one parameter to know every testbed identity and where to fetch
+    its credential. Never a credential value.
+    """
+    by_id = {t["tenant_id"]: t for t in tenants if isinstance(t, dict) and t.get("tenant_id")}
+
+    resolved = {
         "env_scope": env_scope,
         "generated_at": _utc_now(),
         "tenants": [
@@ -462,13 +513,27 @@ def _write_manifest(ssm, env_scope, seeded) -> None:
                 "tenant_id": r["tenant_id"],
                 "porth_org_uuid": r.get("porth_org_uuid"),
                 "role_id": r.get("role_id"),
+                "admin": {
+                    "email": by_id.get(r["tenant_id"], {}).get("admin", {}).get("email"),
+                    "password_secret": by_id.get(r["tenant_id"], {})
+                                              .get("admin", {}).get("password_secret"),
+                },
             }
             for r in seeded
         ],
     }
+    if platform:
+        resolved["platform"] = {
+            "tenant_id": "platform",
+            "admin": {
+                "email": platform["admin"]["email"],
+                "password_secret": platform["admin"]["password_secret"],
+            },
+        }
+
     ssm.put_parameter(
         Name=TESTBED_MANIFEST_PARAM,
-        Value=json.dumps(manifest),
+        Value=json.dumps(resolved),
         Type="String",
         Overwrite=True,
     )

@@ -32,11 +32,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "seed"))
 os.environ.setdefault("PORTH_ENV", "dev")
 os.environ.setdefault("AWS_REGION", "us-east-1")
 
-AUTH_BLOB = {
+AUTH0_IDP = {
     "issuer": "https://example.eu.auth0.com/",
     "jwks_uri": "https://example.eu.auth0.com/.well-known/jwks.json",
-    "interactive_client_id": "test-client-id",
+    "client_id": "test-client-id",
     "audience": "https://porth-api.example.test",
+    "protocol": "auth0",
+}
+
+# A second provider, to prove a tenant is not tied to the platform's IdP. Note the issuer has
+# NO trailing slash — Keycloak differs from Auth0 here, and `iss` must match byte for byte.
+KEYCLOAK_IDP = {
+    "issuer": "https://kc.example.test/realms/porth",
+    "jwks_uri": "https://kc.example.test/realms/porth/protocol/openid-connect/certs",
+    "client_id": "porth-kc",
+    "audience": "porth-api",
+    "protocol": "oidc",
+}
+
+PLATFORM = {
+    "idp": dict(AUTH0_IDP),
+    "admin": {
+        "email": "platform-admin@ems.test",
+        "password_secret": "porth/testbed/platform/password",
+    },
 }
 
 TENANT = {
@@ -45,9 +64,10 @@ TENANT = {
     "tenant_tier": "standard",
     "porth_org_id": "ems",
     "provider_org_id": "org_TESTTESTTESTTEST",
+    "idp": dict(AUTH0_IDP),
     "admin": {
         "email": "test-admin@acme.ems.test",
-        "password_ssm": "/porth/testbed/tenants/acme/password",
+        "password_secret": "porth/testbed/tenants/acme/password",
     },
 }
 
@@ -114,27 +134,37 @@ def _matches(item, condition) -> bool:
 
 
 class FakeSSM:
-    def __init__(self, blob, existing_params=(), manifest=None):
-        self.blob = blob
+    def __init__(self, manifest=None):
         self.manifest = manifest
-        self.params = dict.fromkeys(existing_params, "unused")
         self.written = {}
 
     def get_parameter(self, Name, **kwargs):
         from botocore.exceptions import ClientError
 
-        if Name == "/porth/auth" and self.blob is not None:
-            return {"Parameter": {"Value": json.dumps(self.blob)}}
         if Name == "/porth/config/testbed" and self.manifest is not None:
+            # The parameter may be a SecureString; without WithDecryption the caller would
+            # get KMS ciphertext back and fail JSON parsing on something inscrutable.
+            assert kwargs.get("WithDecryption") is True, "manifest must be read decrypted"
             return {"Parameter": {"Value": self.manifest}}
-        if Name in self.params:
-            # WithDecryption=False is the point — the seeder must never read a password value.
-            assert kwargs.get("WithDecryption") is False, "password value must not be decrypted"
-            return {"Parameter": {"Value": self.params[Name]}}
         raise ClientError({"Error": {"Code": "ParameterNotFound"}}, "GetParameter")
 
     def put_parameter(self, Name, Value, **kwargs):
         self.written[Name] = Value
+
+
+class FakeSecrets:
+    """DescribeSecret only. GetSecretValue is deliberately absent — if the seeder ever tries
+    to read a password value, these tests fail with AttributeError rather than passing."""
+
+    def __init__(self, existing=()):
+        self.existing = set(existing)
+
+    def describe_secret(self, SecretId):
+        from botocore.exceptions import ClientError
+
+        if SecretId in self.existing:
+            return {"Name": SecretId, "ARN": f"arn:aws:secretsmanager:::secret:{SecretId}-AbCdEf"}
+        raise ClientError({"Error": {"Code": "ResourceNotFoundException"}}, "DescribeSecret")
 
 
 @pytest.fixture
@@ -145,26 +175,62 @@ def env(monkeypatch):
     import handler
 
     store = {}
-    ssm = FakeSSM(
-        dict(AUTH_BLOB),
-        existing_params=[TENANT["admin"]["password_ssm"]],
-        manifest=json.dumps({"tenants": [TENANT]}),
-    )
+    ssm = FakeSSM(manifest=json.dumps({"platform": PLATFORM, "tenants": [TENANT]}))
+    secrets = FakeSecrets(existing=[
+        TENANT["admin"]["password_secret"], PLATFORM["admin"]["password_secret"],
+    ])
+    clients = {"ssm": ssm, "secretsmanager": secrets}
+
     monkeypatch.setattr(
         boto3, "resource",
         lambda *a, **k: types.SimpleNamespace(Table=lambda name: FakeTable(store, name)),
     )
-    monkeypatch.setattr(boto3, "client", lambda *a, **k: ssm)
+    monkeypatch.setattr(boto3, "client", lambda service, **k: clients[service])
 
     def run(**payload):
         return json.loads(handler.handler(payload, None)["body"])
 
-    return types.SimpleNamespace(store=store, ssm=ssm, run=run)
+    return types.SimpleNamespace(store=store, ssm=ssm, secrets=secrets, run=run)
 
 
 def _seed(env, **overrides):
     tenant = {**TENANT, **overrides}
     return env.run(env_scope="prod", tenants=[tenant])
+
+
+# --------------------------------------------------------------------------- #
+# The shipped example
+# --------------------------------------------------------------------------- #
+def test_the_example_manifest_validates():
+    """An example that does not validate is worse than no example — it sends an operator
+    debugging their own copy of a shape that was never right."""
+    import handler
+
+    raw = json.loads(
+        (Path(__file__).resolve().parents[1] / "testbed-manifest.example.json").read_text()
+    )
+
+    def strip(node):
+        if isinstance(node, dict):
+            return {k: strip(v) for k, v in node.items() if k != "_comment"}
+        if isinstance(node, list):
+            return [strip(v) for v in node]
+        return node
+
+    manifest = strip(raw)
+    problems = [f"platform: {e}" for e in handler._validate_platform(manifest["platform"])]
+    for i, t in enumerate(manifest["tenants"]):
+        problems += [f"tenants[{i}] ({t.get('tenant_id')}): {e}"
+                     for e in handler._validate_tenant(t)]
+
+    assert problems == []
+
+    # It must also demonstrate the things it claims to: more than one provider, and the
+    # reserved slot using the name the guard would otherwise reject.
+    protocols = {(t.get("idp") or {}).get("protocol") for t in manifest["tenants"]}
+    assert {"auth0", "oidc"} <= protocols
+    assert any(t.get("reserved_for_e2e") and t["tenant_id"] == "demo-tenant"
+               for t in manifest["tenants"])
 
 
 # --------------------------------------------------------------------------- #
@@ -247,18 +313,53 @@ def test_writes_tenant_tier_not_environment_type(env):
     assert "environment_type" not in tenant
 
 
-def test_idp_config_comes_from_the_auth_blob_plus_provider_org(env):
-    """PORTH-488 neutral OIDC, sourced from /porth/auth so no Auth0 credential is passed in.
-    provider_org_id is what makes a tenant login resolve at all (PORTH-511)."""
+def test_idp_config_is_written_verbatim_from_the_tenant(env):
+    """Each tenant carries its own block. provider_org_id sits outside it — a Porth-level
+    tenant fact (PORTH-511) that a non-Auth0 tenant has no equivalent for."""
     _seed(env)
     idp = env.store["porth-tenants-dev"][("ENV#prod#TENANT#acme", "METADATA")][
         "idp_config_override"
     ]
 
-    assert idp["issuer"] == AUTH_BLOB["issuer"]
-    assert idp["jwks_uri"] == AUTH_BLOB["jwks_uri"]
-    assert idp["client_id"] == AUTH_BLOB["interactive_client_id"]
+    for key, value in AUTH0_IDP.items():
+        assert idp[key] == value
     assert idp["provider_org_id"] == TENANT["provider_org_id"]
+
+
+def test_a_tenant_can_run_on_a_different_provider(env):
+    """The point of PORTH-488's neutral issuer/jwks_uri pair — the testbed must be able to
+    exercise more than one IdP at a time, not just N tenants on one Auth0 app."""
+    kc = {**TENANT, "tenant_id": "initech", "display_name": "Initech",
+          "idp": dict(KEYCLOAK_IDP)}
+    kc.pop("provider_org_id")
+    env.secrets.existing.add(kc["admin"]["password_secret"])
+
+    env.run(env_scope="prod", tenants=[kc])
+    idp = env.store["porth-tenants-dev"][("ENV#prod#TENANT#initech", "METADATA")][
+        "idp_config_override"
+    ]
+
+    assert idp["issuer"] == KEYCLOAK_IDP["issuer"]
+    assert not idp["issuer"].endswith("/"), "Keycloak issuers have no trailing slash"
+    assert idp["protocol"] == "oidc"
+    # No Auth0 leakage from the platform block.
+    assert "end_session_endpoint" not in idp
+    assert "provider_org_id" not in idp
+
+
+def test_rejects_an_idp_missing_the_neutral_oidc_pair(env):
+    """PORTH-488 requires both halves; one without the other cannot validate a token."""
+    result = _seed(env, idp={"client_id": "x", "audience": "y"})
+
+    details = " ".join(result["details"])
+    assert "idp.issuer is required" in details
+    assert "idp.jwks_uri is required" in details
+
+
+def test_rejects_a_non_absolute_issuer(env):
+    result = _seed(env, idp={**AUTH0_IDP, "issuer": "example.eu.auth0.com"})
+
+    assert any("must be an absolute URL" in d for d in result["details"])
 
 
 def test_seeds_a_claim_mapping_config(env):
@@ -283,15 +384,47 @@ def test_tenant_admin_role_carries_source_key(env):
     assert role["source_key"] == "tenant-admin"
 
 
-def test_publishes_the_manifest_without_credentials(env):
-    """The PORTH-494 config is generated from this, so it must carry ids and paths only."""
-    result = _seed(env)
-    manifest = json.loads(env.ssm.written["/porth/testbed/tenants"])
+def test_publishes_the_resolved_set_with_identities_but_no_credentials(env):
+    """The PORTH-494 config and the e2e suite are generated from this, so it carries every
+    identity and where to fetch its credential — but never a credential value."""
+    result = env.run(env_scope="prod")
+    published = json.loads(env.ssm.written["/porth/testbed/tenants"])
 
-    assert manifest["env_scope"] == "prod"
-    assert [t["tenant_id"] for t in manifest["tenants"]] == ["acme"]
-    assert manifest["tenants"][0]["porth_org_uuid"] == result["results"][0]["porth_org_uuid"]
-    assert "password" not in json.dumps(manifest).lower()
+    assert published["env_scope"] == "prod"
+    assert [t["tenant_id"] for t in published["tenants"]] == ["acme"]
+    assert published["tenants"][0]["porth_org_uuid"] == result["results"][0]["porth_org_uuid"]
+    assert published["tenants"][0]["admin"]["email"] == TENANT["admin"]["email"]
+    assert published["tenants"][0]["admin"]["password_secret"] == TENANT["admin"]["password_secret"]
+
+    # The platform admin resolves from the same document, so nothing needs a GitHub secret.
+    assert published["platform"]["admin"]["email"] == PLATFORM["admin"]["email"]
+    assert published["platform"]["tenant_id"] == "platform"
+
+
+def test_the_platform_tenant_is_declared_but_never_created(env):
+    """Creating it is PORTH-536's job — it must exist before any login, including the
+    install's own smoke test, so it is install-time rather than testbed-time."""
+    result = env.run(env_scope="prod")
+
+    assert result["platform_warnings"] == []
+    assert ("ENV#prod#TENANT#platform", "METADATA") not in env.store["porth-tenants-dev"]
+    assert [r["tenant_id"] for r in result["results"]] == ["acme"]
+
+
+def test_warns_when_the_platform_secret_is_missing(env):
+    env.secrets.existing.discard(PLATFORM["admin"]["password_secret"])
+
+    assert any("does not exist" in w for w in env.run(env_scope="prod")["platform_warnings"])
+
+
+def test_rejects_a_platform_block_without_an_idp(env):
+    env.ssm.manifest = json.dumps(
+        {"platform": {"admin": PLATFORM["admin"]}, "tenants": [TENANT]}
+    )
+
+    result = env.run(env_scope="prod")
+
+    assert any(d.startswith("platform: idp") for d in result["details"])
 
 
 def test_is_idempotent(env):
@@ -343,13 +476,13 @@ def test_rejects_an_inline_password(env):
     result = _seed(env, admin={"email": "a@b.test", "password": "hunter2"})
 
     assert result["error"] == "Manifest validation failed"
-    assert any("password_ssm" in d for d in result["details"])
+    assert any("password_secret" in d for d in result["details"])
 
 
 def test_requires_a_password_path(env):
     result = _seed(env, admin={"email": "a@b.test"})
 
-    assert any("password_ssm is required" in d for d in result["details"])
+    assert any("password_secret is required" in d for d in result["details"])
 
 
 def test_rejects_a_malformed_tenant_id(env):
@@ -379,7 +512,7 @@ def test_skips_tenants_reserved_for_e2e(env):
 
 def test_warns_when_the_password_parameter_is_absent(env):
     """Not fatal — the Auth0 user is created out of band — but logins will fail without it."""
-    result = _seed(env, admin={**TENANT["admin"], "password_ssm": "/porth/testbed/tenants/nope"})
+    result = _seed(env, admin={**TENANT["admin"], "password_secret": "porth/testbed/nope"})
 
     assert any("does not exist" in w for w in result["results"][0]["warnings"])
 
@@ -402,12 +535,26 @@ def test_rejects_an_empty_manifest(env):
     assert "non-empty" in env.run(env_scope="prod", tenants=[])["error"]
 
 
-def test_fails_when_the_auth_blob_is_absent(env):
-    """Seeding without an IdP config would create a tenant nobody can ever log in to, so this
-    is fatal here — unlike the platform bootstrap, where the tenant is still worth creating."""
-    env.ssm.blob = None
+def test_a_reserved_entry_may_use_the_name_the_e2e_test_owns(env):
+    """The whole point of the flag. The name guard stops a *seeded* near-miss clobbering that
+    tenant's config — which cannot happen when nothing is seeded. Applying it here would make
+    the flag unusable for the only name it is ever needed for."""
+    reserved = {"tenant_id": "demo-tenant", "display_name": "Demo Corp",
+                "reserved_for_e2e": True}
 
-    assert "/porth/auth" in env.run(env_scope="prod", tenants=[TENANT])["error"]
+    result = env.run(env_scope="prod", tenants=[TENANT, reserved])
+
+    assert [r["status"] for r in result["results"]] == ["created", "skipped"]
+    assert ("ENV#prod#TENANT#demo-tenant", "METADATA") not in env.store["porth-tenants-dev"]
+
+
+def test_a_reserved_entry_needs_no_idp_or_admin(env):
+    """Nothing is written for it, so requiring an identity would be noise."""
+    reserved = {"tenant_id": "spare-slot", "reserved_for_e2e": True}
+
+    result = env.run(env_scope="prod", tenants=[TENANT, reserved])
+
+    assert result["results"][1]["status"] == "skipped"
 
 
 def test_dry_run_writes_nothing(env):

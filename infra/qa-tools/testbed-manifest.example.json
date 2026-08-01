@@ -1,0 +1,113 @@
+{
+  "_comment": [
+    "Example of the document held in SSM at /porth/config/testbed. Copy, fill in, and load:",
+    "  aws ssm put-parameter --name /porth/config/testbed --type SecureString \\",
+    "    --value file://testbed-manifest.json --overwrite --region us-east-1",
+    "",
+    "It is NOT read from this repo — this file is documentation. The seed Lambda reads the",
+    "SSM parameter directly, so nothing about the testbed transits CI.",
+    "",
+    "Passwords are NEVER in here. 'password_secret' is a Secrets Manager name; the seeder",
+    "only calls DescribeSecret and cannot read the value. Create each one alongside the IdP",
+    "user, which needs that provider's management API:",
+    "  aws secretsmanager create-secret --name porth/testbed/tenants/acme/password \\",
+    "    --secret-string '<password>' --region us-east-1",
+    "",
+    "Get the three IdP URLs from the provider's discovery document rather than by hand —",
+    "the issuer must byte-match the 'iss' claim, and Auth0 has a trailing slash where",
+    "Keycloak does not:",
+    "  curl -s https://<host>/.well-known/openid-configuration | jq '{issuer, jwks_uri, end_session_endpoint}'"
+  ],
+
+  "platform": {
+    "_comment": [
+      "The platform-admin identity and the IdP the BFF proxy authenticates against.",
+      "porth-install builds /porth/auth from platform.idp; the platform TENANT itself is",
+      "created by the bootstrap, not by the seeder (PORTH-536)."
+    ],
+    "idp": {
+      "issuer": "https://estyn.eu.auth0.com/",
+      "jwks_uri": "https://estyn.eu.auth0.com/.well-known/jwks.json",
+      "client_id": "REPLACE_WITH_PLATFORM_AUTH0_CLIENT_ID",
+      "audience": "https://porth-api.ems.estynsoftware.cloud",
+      "protocol": "auth0",
+      "end_session_endpoint": "https://estyn.eu.auth0.com/v2/logout"
+    },
+    "admin": {
+      "email": "platform-admin@ems.estynsoftware.test",
+      "password_secret": "porth/testbed/platform/password"
+    }
+  },
+
+  "tenants": [
+    {
+      "tenant_id": "acme",
+      "display_name": "Acme Corporation",
+      "tenant_tier": "standard",
+      "porth_org_id": "ems",
+      "provider_org_id": "org_REPLACE_WITH_AUTH0_ORG_ID",
+      "idp": {
+        "issuer": "https://estyn.eu.auth0.com/",
+        "jwks_uri": "https://estyn.eu.auth0.com/.well-known/jwks.json",
+        "client_id": "REPLACE_WITH_PLATFORM_AUTH0_CLIENT_ID",
+        "audience": "https://porth-api.ems.estynsoftware.cloud",
+        "protocol": "auth0"
+      },
+      "admin": {
+        "email": "admin@acme.ems.estynsoftware.test",
+        "password_secret": "porth/testbed/tenants/acme/password"
+      }
+    },
+    {
+      "tenant_id": "globex",
+      "display_name": "Globex Industries",
+      "tenant_tier": "standard",
+      "porth_org_id": "ems",
+      "provider_org_id": "org_REPLACE_WITH_AUTH0_ORG_ID",
+      "idp": {
+        "issuer": "https://estyn.eu.auth0.com/",
+        "jwks_uri": "https://estyn.eu.auth0.com/.well-known/jwks.json",
+        "client_id": "REPLACE_WITH_PLATFORM_AUTH0_CLIENT_ID",
+        "audience": "https://porth-api.ems.estynsoftware.cloud",
+        "protocol": "auth0"
+      },
+      "admin": {
+        "email": "admin@globex.ems.estynsoftware.test",
+        "password_secret": "porth/testbed/tenants/globex/password"
+      }
+    },
+    {
+      "_comment": [
+        "A second provider. No provider_org_id — Keycloak has no Auth0 Organization",
+        "equivalent, so this tenant resolves by issuer alone. Note the issuer has NO",
+        "trailing slash."
+      ],
+      "tenant_id": "initech",
+      "display_name": "Initech",
+      "tenant_tier": "enterprise",
+      "porth_org_id": "ems",
+      "idp": {
+        "issuer": "https://kc.ems.estynsoftware.test/realms/porth",
+        "jwks_uri": "https://kc.ems.estynsoftware.test/realms/porth/protocol/openid-connect/certs",
+        "client_id": "porth-initech",
+        "audience": "porth-api",
+        "protocol": "oidc",
+        "end_session_endpoint": "https://kc.ems.estynsoftware.test/realms/porth/protocol/openid-connect/logout"
+      },
+      "admin": {
+        "email": "admin@initech.ems.estynsoftware.test",
+        "password_secret": "porth/testbed/tenants/initech/password"
+      }
+    },
+    {
+      "_comment": [
+        "Documents the slot the Tier 2 e2e suite owns. Nothing is written for it — the test",
+        "creates this tenant itself in beforeAll and tolerates a 409. Needs no idp or admin.",
+        "This is the one place the reserved names are allowed."
+      ],
+      "tenant_id": "demo-tenant",
+      "display_name": "Demo Corp",
+      "reserved_for_e2e": true
+    }
+  ]
+}

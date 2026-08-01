@@ -3,9 +3,10 @@ name: Porth — seed testbed tenants
 # Refills the Porth tables with the deterministic synthetic tenants that BOTH the Tier 2 e2e
 # suite and the PORTH-494 security lab run against — one manifest, so the two cannot drift.
 #
-# The workflow holds NO testbed configuration. The tenant manifest lives in SSM at
+# The workflow holds NO testbed configuration. The manifest lives in SSM at
 # /porth/config/testbed and is read by the Lambda in-account; this job passes only the
-# environment slot. That keeps the testbed's configuration in the account it configures —
+# environment slot. Test-tenant passwords are in Secrets Manager, referenced from the
+# manifest by name — the seeder only calls DescribeSecret and cannot read a value. That keeps the testbed's configuration in the account it configures —
 # versioned and audited by SSM — rather than in a public repo's variables, where it is
 # neither, and where GitHub masks only exact registered secret values anyway.
 #
@@ -70,13 +71,16 @@ jobs:
       - name: Show the manifest
         run: |
           set -euo pipefail
-          MANIFEST=$(aws ssm get-parameter --name "$MANIFEST_PARAM" \
+          # --with-decryption so the parameter works as String or SecureString. Without it a
+          # SecureString returns KMS ciphertext and the JSON parse fails on something that
+          # looks nothing like the real problem.
+          MANIFEST=$(aws ssm get-parameter --name "$MANIFEST_PARAM" --with-decryption \
             --query Parameter.Value --output text --region "$AWS_REGION" 2>/dev/null || echo "")
 
           if [ -z "$MANIFEST" ]; then
             echo "::error::$MANIFEST_PARAM does not exist. The tenant manifest lives in SSM,"
             echo "::error::not in this repo. Create it with:"
-            echo "::error::  aws ssm put-parameter --name $MANIFEST_PARAM --type String --value file://manifest.json"
+            echo "::error::  aws ssm put-parameter --name $MANIFEST_PARAM --type SecureString --value file://manifest.json"
             exit 1
           fi
 
@@ -101,7 +105,7 @@ jobs:
           def credential_keys(node, path="manifest"):
               if isinstance(node, dict):
                   for key, value in node.items():
-                      if "password" in key.lower() and key != "password_ssm":
+                      if "password" in key.lower() and key != "password_secret":
                           yield f"{path}.{key}"
                       yield from credential_keys(value, f"{path}.{key}")
               elif isinstance(node, list):
@@ -110,15 +114,19 @@ jobs:
 
           offenders = list(credential_keys(manifest))
           if offenders:
-              print(f"::error::{param} contains credential fields — use password_ssm (a path):")
+              print(f"::error::{param} contains credential fields — use password_secret (a name):")
               for field in offenders:
                   print(f"::error::  {field}")
               sys.exit(1)
 
+          platform = manifest.get("platform") if isinstance(manifest, dict) else None
+          if platform:
+              print(f"  platform — {platform.get('admin', {}).get('email', '<no email>')}")
+
           for t in tenants:
               flag = " [reserved_for_e2e]" if t.get("reserved_for_e2e") else ""
-              org = t.get("provider_org_id") or "<no provider_org_id>"
-              print(f"  {t.get('tenant_id', '<missing>')}{flag} — org={org}")
+              issuer = (t.get("idp") or {}).get("issuer", "<no idp>")
+              print(f"  {t.get('tenant_id', '<missing>')}{flag} — issuer={issuer}")
           print(f"{len(tenants)} tenant(s) in {param}")
           PY
 
