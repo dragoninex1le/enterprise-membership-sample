@@ -1,0 +1,213 @@
+name: Porth — seed testbed tenants
+
+# Refills the Porth tables with the deterministic synthetic tenants that BOTH the Tier 2 e2e
+# suite and the PORTH-494 security lab run against — one manifest, so the two cannot drift.
+#
+# Deliberately thin: it holds no credentials and contains no seeding logic. It reads a
+# non-secret manifest, assumes the OIDC role, and invokes QaSeedFunction. Everything that
+# touches data happens inside this account.
+#
+# Why no passwords here: this repo is PUBLIC, and Actions logs on a public repo are
+# world-readable. GitHub masks only the EXACT registered secret value — not one embedded in a
+# JSON body, URL-encoded, base64'd, or surfaced by `set -x` or an error trace. So the manifest
+# carries `admin.password_ssm`, a PATH to an SSM SecureString, never a value. The Lambda only
+# checks the parameter exists (WithDecryption=False) and never reads it.
+#
+# Order of operations:
+#   reset-env  →  porth-seed-testbed  →  Tier 2 e2e / PORTH-494
+#
+# Tier 2 creates its own `demo-tenant` / `Demo Corp` in beforeAll and tolerates a 409. The
+# seeder refuses those names, and any name CONTAINING them: the test finds its row with
+# getByRole('row').filter({hasText}).first() — a substring match in DOM order — and the next
+# action writes IdP config onto whatever row matched.
+#
+# Requires the porth-qa-tools stack (Actions → Deploy Porth QA Tools).
+
+on:
+  workflow_dispatch:
+    inputs:
+      env_scope:
+        description: >
+          ADR-Z8 slot to seed under (ENV#{scope}#…). Must match the Porth install's
+          FixedEnvironment or the authorizer will never resolve these tenants.
+        required: false
+        default: 'prod'
+      dry_run:
+        description: 'Validate the manifest and report the plan without writing anything'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: porth-seed-testbed
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  QA_STACK: porth-qa-tools
+  ENV_SCOPE: ${{ inputs.env_scope || 'prod' }}
+  DRY_RUN: ${{ inputs.dry_run || false }}
+
+jobs:
+  seed:
+    name: Seed testbed tenants
+    runs-on: ubuntu-latest
+    # Deliberately its own environment: the tenant manifest is testbed configuration and has
+    # nothing to do with installing Porth. Needs PORTH_SEED_TENANTS and AWS_ROLE_ARN.
+    environment: porth-testbed
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail on a malformed manifest here rather than in the Lambda, so the error names the
+      # var the operator has to fix.
+      - name: Validate the manifest
+        env:
+          PORTH_SEED_TENANTS: ${{ vars.PORTH_SEED_TENANTS }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PORTH_SEED_TENANTS:-}" ]; then
+            echo "::error::vars.PORTH_SEED_TENANTS is not set on the porth-testbed environment."
+            echo "::error::Expected: {\"tenants\":[{\"tenant_id\":…,\"provider_org_id\":\"org_…\",\"admin\":{\"email\":…,\"password_ssm\":\"/porth/testbed/tenants/<id>/password\"}}]}"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json, os, sys
+
+          try:
+              manifest = json.loads(os.environ["PORTH_SEED_TENANTS"])
+          except json.JSONDecodeError as e:
+              print(f"::error::PORTH_SEED_TENANTS is not valid JSON: {e}")
+              sys.exit(1)
+
+          tenants = manifest.get("tenants") if isinstance(manifest, dict) else None
+          if not isinstance(tenants, list) or not tenants:
+              print("::error::PORTH_SEED_TENANTS must be an object with a non-empty 'tenants' array")
+              sys.exit(1)
+
+          # A password in the manifest would be published to a world-readable log the moment
+          # anything echoes it. Refuse before it can reach one. Match on the KEY, never the
+          # value — the SSM path conventionally ends in `/password`, so a substring scan of
+          # the serialised manifest flags every correct manifest.
+          def secret_keys(node, path="manifest"):
+              if isinstance(node, dict):
+                  for key, value in node.items():
+                      if "password" in key.lower() and key != "password_ssm":
+                          yield f"{path}.{key}"
+                      yield from secret_keys(value, f"{path}.{key}")
+              elif isinstance(node, list):
+                  for i, value in enumerate(node):
+                      yield from secret_keys(value, f"{path}[{i}]")
+
+          offenders = list(secret_keys(manifest))
+          if offenders:
+              print("::error::PORTH_SEED_TENANTS contains credential fields. Use password_ssm (a path) instead.")
+              for field in offenders:
+                  print(f"::error::  {field}")
+              sys.exit(1)
+
+          for t in tenants:
+              tid = t.get("tenant_id", "<missing>")
+              flag = " [reserved_for_e2e]" if t.get("reserved_for_e2e") else ""
+              org = t.get("provider_org_id") or "<no provider_org_id>"
+              print(f"  {tid}{flag} — org={org}")
+          print(f"{len(tenants)} tenant(s) in the manifest")
+          PY
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve the seed function
+        run: |
+          set -euo pipefail
+          SEED_FN=$(aws cloudformation describe-stacks \
+            --stack-name "$QA_STACK" \
+            --query "Stacks[0].Outputs[?OutputKey=='QaSeedFunctionArn'].OutputValue | [0]" \
+            --output text --region "$AWS_REGION" 2>/dev/null || echo "")
+
+          if [ -z "$SEED_FN" ] || [ "$SEED_FN" = "None" ]; then
+            echo "::error::No QaSeedFunction in stack '$QA_STACK'. Deploy it first:"
+            echo "::error::  Actions → Deploy Porth QA Tools"
+            exit 1
+          fi
+          echo "SEED_FN=$SEED_FN" >> "$GITHUB_ENV"
+
+      - name: Seed
+        env:
+          PORTH_SEED_TENANTS: ${{ vars.PORTH_SEED_TENANTS }}
+        run: |
+          set -euo pipefail
+          PAYLOAD=$(python3 -c '
+          import json, os
+          manifest = json.loads(os.environ["PORTH_SEED_TENANTS"])
+          manifest["env_scope"] = os.environ["ENV_SCOPE"]
+          manifest["dry_run"] = os.environ["DRY_RUN"].lower() == "true"
+          print(json.dumps(manifest))')
+
+          aws lambda invoke \
+            --function-name "$SEED_FN" \
+            --cli-binary-format raw-in-base64-out \
+            --payload "$PAYLOAD" \
+            --region "$AWS_REGION" \
+            /tmp/seed-response.json > /tmp/seed-meta.json
+
+          if grep -q '"FunctionError"' /tmp/seed-meta.json; then
+            echo "::error::QaSeedFunction raised an unhandled error"
+            cat /tmp/seed-response.json
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json, sys
+
+          envelope = json.load(open("/tmp/seed-response.json"))
+          status = envelope.get("statusCode", 500)
+          body = json.loads(envelope.get("body", "{}"))
+
+          if status not in (200, 207):
+              print(f"::error::Seeding failed ({status}): {body.get('error', body)}")
+              for detail in body.get("details", []):
+                  print(f"::error::  {detail}")
+              sys.exit(1)
+
+          lines = ["## Testbed seeded", "",
+                   f"- **Env scope:** `{body['env_scope']}` (records at `ENV#{body['env_scope']}#…`)",
+                   f"- **Dry run:** {body['dry_run']}", "",
+                   "| Tenant | Status | Porth org | Role |", "|---|---|---|---|"]
+
+          failed = False
+          for r in body["results"]:
+              lines.append(
+                  f"| `{r['tenant_id']}` | {r['status']} | "
+                  f"`{r.get('porth_org_uuid', '—')}` | `{r.get('role_id', '—')}` |"
+              )
+              for w in r.get("warnings", []):
+                  print(f"::warning::{r['tenant_id']}: {w}")
+              if r["status"] == "error":
+                  print(f"::error::{r['tenant_id']}: {r.get('error')}")
+                  failed = True
+
+          lines += ["", "Manifest published to SSM `/porth/testbed/tenants` — the PORTH-494",
+                    "config is generated from it, not hand-maintained."]
+          with open(__import__("os").environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write("\n".join(lines) + "\n")
+
+          print("\n".join(lines))
+          sys.exit(1 if failed else 0)
+          PY
+
+      - name: Next steps
+        if: success()
+        run: |
+          {
+            echo ""
+            echo "Next: Tier 2 E2E (**E2E Tests** → run workflow) or the PORTH-494 lab."
+            echo "Tier 2 creates its own \`demo-tenant\` — the seeder leaves that slot alone."
+          } >> "$GITHUB_STEP_SUMMARY"
