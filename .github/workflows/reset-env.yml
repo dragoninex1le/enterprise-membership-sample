@@ -14,8 +14,13 @@ name: Reset Dev Environment
 #     invisible to it (PORTH-514).
 #   * idp_config_override uses neutral OIDC (issuer + jwks_uri), not the legacy
 #     Auth0 {domain, client_id} shape (PORTH-488)
-#   * the bootstrap is the shared scripts/bootstrap_platform_tenant.py rather than
-#     an inline copy, so the scoping fix cannot drift between workflows
+#   * the bootstrap is an in-account Lambda invoked through the shared
+#     .github/actions/porth-bootstrap composite (PORTH-536), so the scoping fix
+#     cannot drift between workflows and this public repo's job needs no DynamoDB
+#     write credentials and no Auth0 secret
+#
+# Requires the porth-qa-tools stack in this account — deploy it from the Components
+# repo: Actions → Deploy Porth QA Tools → target=ems.
 #
 # Trigger:  Actions → Reset Dev Environment → Run workflow
 
@@ -157,67 +162,19 @@ jobs:
           sys.exit(1 if failed else 0)
           EOF
 
-      # Shared with porth-install.yml — one implementation, so the ADR-Z8 scoping
-      # cannot drift between the install path and the reset path.
+      # PORTH-536: in-account Lambda, shared with porth-install.yml. It also does the
+      # IdP config patch that used to be a separate step here — /porth/auth already holds
+      # issuer / jwks_uri / client id / audience, so no Auth0 secret reaches this public
+      # repo's workflow, and the reset path cannot drift from the install path.
       - name: Bootstrap platform tenant
-        env:
-          PORTH_TENANTS_TABLE: ${{ env.PORTH_TENANTS_TABLE }}
-          PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
-          PORTH_ROLES_TABLE: ${{ env.PORTH_ROLES_TABLE }}
-          PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
-          PORTH_ENV_SCOPE: ${{ env.ENV_SCOPE }}
-        run: |
-          python3 scripts/bootstrap_platform_tenant.py
-          echo "✅ Platform tenant bootstrapped under ENV#${ENV_SCOPE}#"
-
-      - name: Patch platform tenant IdP config (direct DynamoDB)
-        # PORTH-532: was `PATCH /tenants/platform` with a retry loop. That is
-        # chicken-and-egg during a reset — the API needs a working authorizer,
-        # which is exactly what a missing/misscoped platform tenant prevents.
-        # Writing DynamoDB directly is what porth-install already does.
-        env:
-          PORTH_TENANT_CONFIG: ${{ secrets.PORTH_TENANT_CONFIG }}
-        run: |
-          set -euo pipefail
-          AUDIENCE=$(echo "$PORTH_TENANT_CONFIG" | python3 -c \
-            "import json,sys; raw=sys.stdin.read().strip(); d=json.loads(raw) if raw else {}; d=d if isinstance(d,dict) else json.loads(d); print(d.get('audience',''),end='')" \
-            2>/dev/null || true)
-          if [ -z "$AUDIENCE" ]; then
-            AUDIENCE="${{ secrets.PLATFORM_AUTH0_AUDIENCE }}"
-          fi
-          DOMAIN="${{ secrets.PLATFORM_AUTH0_DOMAIN }}"
-          CLIENT_ID="${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}"
-          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-          if [ -z "$DOMAIN" ]; then
-            echo "::warning::PLATFORM_AUTH0_DOMAIN not set — skipping IdP config patch"
-            exit 0
-          fi
-
-          # PORTH-488: SAR 0.1.16 resolves tenants on a NEUTRAL OIDC config —
-          # issuer + jwks_uri — not the legacy Auth0 {domain, client_id} pair.
-          ISSUER="https://${DOMAIN}/"
-          JWKS_URI="https://${DOMAIN}/.well-known/jwks.json"
-          PLATFORM_PK="ENV#${ENV_SCOPE}#TENANT#platform"
-
-          echo "Writing neutral idp_config_override (pk=${PLATFORM_PK} issuer=${ISSUER} audience-len=${#AUDIENCE})"
-          aws dynamodb update-item \
-            --table-name "$PORTH_TENANTS_TABLE" \
-            --key "{\"PK\":{\"S\":\"${PLATFORM_PK}\"},\"SK\":{\"S\":\"METADATA\"}}" \
-            --update-expression "SET idp_config_override = :idp, tenant_tier = :tier, updated_at = :ua" \
-            --expression-attribute-values "{
-              \":idp\":{\"M\":{
-                \"issuer\":{\"S\":\"${ISSUER}\"},
-                \"jwks_uri\":{\"S\":\"${JWKS_URI}\"},
-                \"client_id\":{\"S\":\"${CLIENT_ID}\"},
-                \"audience\":{\"S\":\"${AUDIENCE}\"},
-                \"protocol\":{\"S\":\"auth0\"}
-              }},
-              \":tier\":{\"S\":\"production\"},
-              \":ua\":{\"S\":\"${NOW}\"}
-            }" \
-            --region "$AWS_REGION"
-          echo "✅ Platform tenant IdP config + tenant_tier updated (direct DynamoDB)"
+        uses: ./.github/actions/porth-bootstrap
+        with:
+          env_scope: ${{ env.ENV_SCOPE }}
+          tenants_table: ${{ env.PORTH_TENANTS_TABLE }}
+          permissions_table: ${{ env.PORTH_PERMISSIONS_TABLE }}
+          roles_table: ${{ env.PORTH_ROLES_TABLE }}
+          claim_mapping_table: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
+          aws_region: ${{ env.AWS_REGION }}
 
       - name: Done
         run: |

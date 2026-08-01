@@ -32,8 +32,14 @@ name: Porth components — install + upgrade
 #   vars.PORTH_SPA_ORIGINS            CSV of SPA origins, e.g. https://app.ems.estynsoftware.cloud
 #   secrets.ACM_CERTIFICATE_ARN       cert for the custom domain (us-east-1)
 #   secrets.PLATFORM_AUTH0_DOMAIN / _CLIENT_ID / _AUDIENCE
+#                                     used ONLY to seed the /porth/auth blob. The platform
+#                                     tenant's idp_config_override is then derived from that
+#                                     blob in-account (PORTH-536) — these values no longer
+#                                     reach any DynamoDB-writing step in this public repo.
 #   secrets.PORTH_AUTH_TEST_TOKEN     (optional) authorizer test-token bypass
-#   secrets.PORTH_TENANT_CONFIG       (optional) audience override
+#
+# Also requires the porth-qa-tools stack in this account, which provides the platform-tenant
+# bootstrap Lambda. Deploy it from the Components repo: Deploy Porth QA Tools → target=ems.
 #
 on:
   workflow_dispatch:
@@ -562,68 +568,26 @@ jobs:
           echo
           echo "✅ Seeded /porth/auth"
 
-      # Bootstrap runs on every successful install/upgrade (and on no-op) — the
-      # platform tenant is independent of the CloudFormation stack and the
-      # script is fully idempotent.
+      # Bootstrap runs on every successful install/upgrade (and on no-op) — the platform
+      # tenant is independent of the CloudFormation stack and the Lambda is idempotent.
+      #
+      # PORTH-536: this was scripts/bootstrap_platform_tenant.py plus a separate
+      # "Patch platform tenant IdP config" step. Both now run in-account, so this public
+      # repo's workflow needs no DynamoDB write grant and no Auth0 secret — the Lambda
+      # reads issuer / jwks_uri / client id / audience from the /porth/auth blob seeded
+      # above. Requires the porth-qa-tools stack in this account (Components repo →
+      # Deploy Porth QA Tools → target=ems); it fails loudly if it is absent.
       - name: Bootstrap platform tenant
-        env:
-          PORTH_TENANTS_TABLE: ${{ env.PORTH_TENANTS_TABLE }}
-          PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
-          PORTH_ROLES_TABLE: ${{ env.PORTH_ROLES_TABLE }}
-          PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
+        uses: ./.github/actions/porth-bootstrap
+        with:
           # ADR-Z8 (PORTH-532): the install pins FixedEnvironment, so the bootstrap must
           # write ENV#{scope}#… or the authorizer will never resolve the platform tenant.
-          PORTH_ENV_SCOPE: ${{ env.EFF_FIXED_ENV }}
-        run: |
-          python3 scripts/bootstrap_platform_tenant.py
-          echo "✅ Platform tenant bootstrapped under ENV#${EFF_FIXED_ENV}#"
-
-      - name: Patch platform tenant IdP config (direct DynamoDB)
-        # Writes idp_config_override directly to DynamoDB — same pattern as the
-        # bootstrap script — bypassing the Porth API (which requires EventBridge
-        # PutEvents that the Lambda execution role may be missing in this account).
-        # The authorizer reads idp_config from DynamoDB and will pick this up on
-        # the next cache miss (PORTH-471).
-        env:
-          PORTH_TENANT_CONFIG: ${{ secrets.PORTH_TENANT_CONFIG }}
-        run: |
-          set -euo pipefail
-          # Audience: prefer PORTH_TENANT_CONFIG JSON, fall back to secret.
-          AUDIENCE=$(echo "$PORTH_TENANT_CONFIG" | python3 -c \
-            "import json,sys; raw=sys.stdin.read().strip(); d=json.loads(raw); d=d if isinstance(d,dict) else json.loads(d); print(d.get('audience',''),end='')" \
-            2>/dev/null || true)
-          if [ -z "$AUDIENCE" ]; then
-            AUDIENCE="${{ secrets.PLATFORM_AUTH0_AUDIENCE }}"
-          fi
-          DOMAIN="${{ secrets.PLATFORM_AUTH0_DOMAIN }}"
-          CLIENT_ID="${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}"
-          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-          # PORTH-488: 0.1.16 resolves tenants on a NEUTRAL OIDC config (issuer + jwks_uri),
-          # not the legacy Auth0 {domain, client_id} pair. PORTH-514: the record must sit at
-          # the env-scoped key the authorizer actually reads.
-          ISSUER="https://${DOMAIN}/"
-          JWKS_URI="https://${DOMAIN}/.well-known/jwks.json"
-          PLATFORM_PK="ENV#${EFF_FIXED_ENV}#TENANT#platform"
-
-          echo "Writing neutral idp_config_override (pk=${PLATFORM_PK} issuer=${ISSUER} audience-len=${#AUDIENCE})"
-          aws dynamodb update-item \
-            --table-name "$PORTH_TENANTS_TABLE" \
-            --key "{\"PK\":{\"S\":\"${PLATFORM_PK}\"},\"SK\":{\"S\":\"METADATA\"}}" \
-            --update-expression "SET idp_config_override = :idp, tenant_tier = :tier, updated_at = :ua" \
-            --expression-attribute-values "{
-              \":idp\":{\"M\":{
-                \"issuer\":{\"S\":\"${ISSUER}\"},
-                \"jwks_uri\":{\"S\":\"${JWKS_URI}\"},
-                \"client_id\":{\"S\":\"${CLIENT_ID}\"},
-                \"audience\":{\"S\":\"${AUDIENCE}\"},
-                \"protocol\":{\"S\":\"auth0\"}
-              }},
-              \":tier\":{\"S\":\"production\"},
-              \":ua\":{\"S\":\"${NOW}\"}
-            }" \
-            --region "$AWS_REGION"
-          echo "✅ Platform tenant IdP config + tenant_tier updated (direct DynamoDB)"
+          env_scope: ${{ env.EFF_FIXED_ENV }}
+          tenants_table: ${{ env.PORTH_TENANTS_TABLE }}
+          permissions_table: ${{ env.PORTH_PERMISSIONS_TABLE }}
+          roles_table: ${{ env.PORTH_ROLES_TABLE }}
+          claim_mapping_table: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
+          aws_region: ${{ env.AWS_REGION }}
 
       # ── Seed SSM auth-policy + session-policy templates ─────────────────────
       # Components deploy.yml seeds these after every deploy, but porth-install

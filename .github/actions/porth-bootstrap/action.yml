@@ -1,0 +1,131 @@
+name: Bootstrap Porth platform tenant
+description: >
+  Invokes QaBootstrapFunction in this account to create-or-adopt the reserved `platform`
+  tenant: org, tenant, permissions, platform-admin role, role-permission links, claim-mapping
+  config and the neutral-OIDC idp_config_override.
+
+# Why an in-account Lambda rather than scripts/bootstrap_platform_tenant.py (PORTH-536):
+#
+#   * This repo is PUBLIC. The script needed DynamoDB write credentials and the Auth0
+#     domain / client id / audience in the job environment. The Lambda needs none of it —
+#     the caller only needs lambda:InvokeFunction, and the IdP values are read in-account
+#     from /porth/auth.
+#   * It was invoked from two workflows with a third inline copy elsewhere. PORTH-532 was
+#     one of those copies writing an unscoped TENANT#platform while the authorizer resolved
+#     ENV#prod#TENANT#platform — the install passed, and login silently did not work.
+#     One implementation, one call site shape, no drift.
+#
+# The Lambda ships from the private Components repo (qa-tools/lambdas/provisioning) and is
+# deployed into this account by Components → "Deploy Porth QA Tools" with target=ems.
+
+inputs:
+  env_scope:
+    description: >
+      ADR-Z8 slot to write under (ENV#{scope}#…). Must match the Porth install's
+      FixedEnvironment or the authorizer will not resolve these records (PORTH-514).
+    required: true
+  tenants_table:
+    description: Tenants table name, resolved from the Porth stack outputs
+    required: true
+  permissions_table:
+    description: Permissions table name
+    required: true
+  roles_table:
+    description: Roles table name
+    required: true
+  claim_mapping_table:
+    description: Claim-mapping-configs table name
+    required: true
+  aws_region:
+    description: AWS region
+    required: false
+    default: us-east-1
+  qa_tools_stack:
+    description: CloudFormation stack holding the QA tools Lambdas
+    required: false
+    default: porth-qa-tools
+
+runs:
+  using: composite
+  steps:
+    - name: Bootstrap platform tenant
+      shell: bash
+      env:
+        ENV_SCOPE: ${{ inputs.env_scope }}
+        AWS_REGION: ${{ inputs.aws_region }}
+        QA_STACK: ${{ inputs.qa_tools_stack }}
+        TENANTS_TABLE: ${{ inputs.tenants_table }}
+        PERMISSIONS_TABLE: ${{ inputs.permissions_table }}
+        ROLES_TABLE: ${{ inputs.roles_table }}
+        CLAIM_TABLE: ${{ inputs.claim_mapping_table }}
+      run: |
+        set -euo pipefail
+
+        BOOTSTRAP_FN=$(aws cloudformation describe-stacks \
+          --stack-name "$QA_STACK" \
+          --query "Stacks[0].Outputs[?OutputKey=='QaBootstrapFunctionArn'].OutputValue | [0]" \
+          --output text --region "$AWS_REGION" 2>/dev/null || echo "")
+
+        if [ -z "$BOOTSTRAP_FN" ] || [ "$BOOTSTRAP_FN" = "None" ]; then
+          echo "::error::No QaBootstrapFunction in stack '$QA_STACK'. Deploy it first:"
+          echo "::error::  Components repo → Actions → Deploy Porth QA Tools → target=ems"
+          exit 1
+        fi
+
+        # Table names come from the Porth stack outputs, so a rename surfaces as a failure
+        # here rather than as a silent write to a table nothing reads.
+        PAYLOAD=$(python3 -c '
+        import json, os
+        print(json.dumps({
+            "env_scope": os.environ["ENV_SCOPE"],
+            "tables": {
+                "tenants":     os.environ["TENANTS_TABLE"],
+                "permissions": os.environ["PERMISSIONS_TABLE"],
+                "roles":       os.environ["ROLES_TABLE"],
+                "claims":      os.environ["CLAIM_TABLE"],
+            },
+        }))')
+
+        echo "Invoking $(basename "$BOOTSTRAP_FN") for ENV#${ENV_SCOPE}#…"
+        aws lambda invoke \
+          --function-name "$BOOTSTRAP_FN" \
+          --cli-binary-format raw-in-base64-out \
+          --payload "$PAYLOAD" \
+          --region "$AWS_REGION" \
+          /tmp/bootstrap-response.json > /tmp/bootstrap-meta.json
+
+        if grep -q '"FunctionError"' /tmp/bootstrap-meta.json; then
+          echo "::error::QaBootstrapFunction raised an unhandled error"
+          cat /tmp/bootstrap-response.json
+          exit 1
+        fi
+
+        python3 - <<'PY'
+        import json, sys
+
+        envelope = json.load(open("/tmp/bootstrap-response.json"))
+        status = envelope.get("statusCode", 500)
+        body = json.loads(envelope.get("body", "{}"))
+
+        if status != 200:
+            print(f"::error::Bootstrap failed ({status}): {body.get('error', body)}")
+            sys.exit(1)
+
+        for warning in body.get("warnings", []):
+            print(f"::warning::{warning}")
+
+        print(f"  platform_pk        {body['platform_pk']}")
+        print(f"  org_id             {body['org_id']} (created={body['org_created']})")
+        print(f"  role_id            {body['role_id']} (created={body['role_created']})")
+        print(f"  permissions        {body['permissions']}")
+        print(f"  claim mapping      v{body['claim_mapping_version']}")
+        print(f"  idp_config_written {body['idp_config_written']}")
+
+        # An unwritten IdP config means no login resolves. The tenant records are correct,
+        # so this is a warning above rather than a hard failure — but it must not read as
+        # a clean success either.
+        if not body["idp_config_written"]:
+            print("::warning::platform tenant has no idp_config_override — no login will resolve")
+
+        print("✅ Platform tenant bootstrapped")
+        PY
