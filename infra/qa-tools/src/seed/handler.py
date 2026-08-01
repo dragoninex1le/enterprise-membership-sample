@@ -67,6 +67,15 @@ logger.setLevel(logging.INFO)
 RESERVED_NAMES = ("demo-tenant", "demo corp")
 
 AUTH_BLOB_PARAM = "/porth/auth"
+
+# INPUT: the tenant manifest, authored by the operator. It lives in SSM rather than as a
+# GitHub variable so the testbed's configuration lives in the account it configures — this
+# repo is public, and config there is neither versioned, audited, nor reliably masked in
+# logs. The invoking workflow passes only `env_scope`; the manifest never transits CI.
+TESTBED_CONFIG_PARAM = "/porth/config/testbed"
+
+# OUTPUT: the resolved set, with the org/role UUIDs Porth assigned. The PORTH-494 config is
+# generated from this. Ids and SSM paths only — never a credential.
 TESTBED_MANIFEST_PARAM = "/porth/testbed/tenants"
 
 _TENANT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
@@ -92,11 +101,33 @@ def handler(event, context):
     if not env_scope:
         return _response(400, {"error": "env_scope is required (or set PORTH_ENV_SCOPE)"})
 
+    dry_run = bool(body.get("dry_run"))
+
+    region = os.environ.get("AWS_REGION", "us-east-1")
+    dynamodb = boto3.resource("dynamodb", region_name=region)
+    ssm = boto3.client("ssm", region_name=region)
+
+    # The manifest normally comes from SSM, so the caller passes nothing but env_scope and no
+    # testbed configuration transits CI. An inline `tenants` array overrides it — used by the
+    # tests and for a one-off dry run against a candidate manifest.
     tenants = body.get("tenants")
+    if tenants is None:
+        try:
+            tenants = _load_manifest(ssm)
+        except ClientError as e:
+            if e.response["Error"]["Code"] in ("ParameterNotFound", "AccessDeniedException"):
+                return _response(400, {
+                    "error": f"{TESTBED_CONFIG_PARAM} is absent — the tenant manifest lives "
+                             f"there, not in the workflow. Create it with: aws ssm "
+                             f"put-parameter --name {TESTBED_CONFIG_PARAM} --type String "
+                             f"--value file://manifest.json"
+                })
+            raise
+        except (json.JSONDecodeError, TypeError) as e:
+            return _response(400, {"error": f"{TESTBED_CONFIG_PARAM} is not valid JSON: {e}"})
+
     if not isinstance(tenants, list) or not tenants:
         return _response(400, {"error": "tenants must be a non-empty array"})
-
-    dry_run = bool(body.get("dry_run"))
 
     # --- Validate the whole manifest before writing anything ------------------
     errors = []
@@ -104,10 +135,6 @@ def handler(event, context):
         errors.extend(f"tenants[{i}]: {e}" for e in _validate_tenant(t))
     if errors:
         return _response(400, {"error": "Manifest validation failed", "details": errors})
-
-    region = os.environ.get("AWS_REGION", "us-east-1")
-    dynamodb = boto3.resource("dynamodb", region_name=region)
-    ssm = boto3.client("ssm", region_name=region)
 
     tables = {
         "tenants": dynamodb.Table(f"porth-tenants-{porth_env}"),
@@ -395,6 +422,22 @@ def _load_idp_defaults(ssm) -> dict:
         "client_id": blob.get("interactive_client_id", ""),
         "audience": blob.get("audience", ""),
     }
+
+
+def _load_manifest(ssm) -> list:
+    """Read the tenant manifest from SSM.
+
+    This is the bootstrap's configuration, and it lives in the account it configures rather
+    than as a GitHub variable: this repo is public, so config held there is unversioned,
+    unaudited, and only masked in logs if it happens to be a registered secret. Keeping it
+    here also means the invoking workflow needs to know nothing about the testbed beyond
+    which environment slot to write.
+
+    Accepts either ``{"tenants": [...]}`` or a bare array.
+    """
+    raw = ssm.get_parameter(Name=TESTBED_CONFIG_PARAM)["Parameter"]["Value"]
+    manifest = json.loads(raw)
+    return manifest.get("tenants") if isinstance(manifest, dict) else manifest
 
 
 def _ssm_param_exists(ssm, name) -> bool:

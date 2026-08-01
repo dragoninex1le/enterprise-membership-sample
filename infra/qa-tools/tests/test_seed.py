@@ -114,8 +114,9 @@ def _matches(item, condition) -> bool:
 
 
 class FakeSSM:
-    def __init__(self, blob, existing_params=()):
+    def __init__(self, blob, existing_params=(), manifest=None):
         self.blob = blob
+        self.manifest = manifest
         self.params = dict.fromkeys(existing_params, "unused")
         self.written = {}
 
@@ -124,6 +125,8 @@ class FakeSSM:
 
         if Name == "/porth/auth" and self.blob is not None:
             return {"Parameter": {"Value": json.dumps(self.blob)}}
+        if Name == "/porth/config/testbed" and self.manifest is not None:
+            return {"Parameter": {"Value": self.manifest}}
         if Name in self.params:
             # WithDecryption=False is the point — the seeder must never read a password value.
             assert kwargs.get("WithDecryption") is False, "password value must not be decrypted"
@@ -142,7 +145,11 @@ def env(monkeypatch):
     import handler
 
     store = {}
-    ssm = FakeSSM(dict(AUTH_BLOB), existing_params=[TENANT["admin"]["password_ssm"]])
+    ssm = FakeSSM(
+        dict(AUTH_BLOB),
+        existing_params=[TENANT["admin"]["password_ssm"]],
+        manifest=json.dumps({"tenants": [TENANT]}),
+    )
     monkeypatch.setattr(
         boto3, "resource",
         lambda *a, **k: types.SimpleNamespace(Table=lambda name: FakeTable(store, name)),
@@ -158,6 +165,51 @@ def env(monkeypatch):
 def _seed(env, **overrides):
     tenant = {**TENANT, **overrides}
     return env.run(env_scope="prod", tenants=[tenant])
+
+
+# --------------------------------------------------------------------------- #
+# The manifest lives in SSM, not in the caller
+# --------------------------------------------------------------------------- #
+def test_reads_the_manifest_from_ssm_when_the_caller_supplies_none(env):
+    """The invoking workflow passes only env_scope. The testbed's configuration lives in the
+    account it configures, so it never transits a public repo's CI."""
+    result = env.run(env_scope="prod")
+
+    assert [r["tenant_id"] for r in result["results"]] == ["acme"]
+    assert ("ENV#prod#TENANT#acme", "METADATA") in env.store["porth-tenants-dev"]
+
+
+def test_accepts_a_bare_array_manifest(env):
+    """Tolerate `[...]` as well as `{"tenants": [...]}` — an operator hand-writing the
+    parameter should not have to guess."""
+    env.ssm.manifest = json.dumps([TENANT])
+
+    assert env.run(env_scope="prod")["results"][0]["status"] == "created"
+
+
+def test_an_inline_manifest_overrides_ssm(env):
+    """Used by these tests and for a one-off dry run against a candidate manifest."""
+    override = {**TENANT, "tenant_id": "globex", "display_name": "Globex"}
+
+    result = env.run(env_scope="prod", tenants=[override])
+
+    assert [r["tenant_id"] for r in result["results"]] == ["globex"]
+
+
+def test_names_the_ssm_parameter_when_the_manifest_is_absent(env):
+    """The operator has to know *where* to put it, and it is not in this repo."""
+    env.ssm.manifest = None
+
+    error = env.run(env_scope="prod")["error"]
+
+    assert "/porth/config/testbed" in error
+    assert "put-parameter" in error
+
+
+def test_reports_a_malformed_manifest_clearly(env):
+    env.ssm.manifest = "{not json"
+
+    assert "not valid JSON" in env.run(env_scope="prod")["error"]
 
 
 # --------------------------------------------------------------------------- #
