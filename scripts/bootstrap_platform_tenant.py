@@ -13,17 +13,29 @@ Direct DynamoDB writes are required because the Porth API itself calls
 assert_active(tenant_id) which requires TENANT#platform to already exist —
 bootstrapping via the API would be circular.
 
+ADR-Z8 environment scoping (PORTH-532)
+--------------------------------------
+When ``PORTH_ENV_SCOPE`` is set, every **partition** key is written as
+``ENV#{scope}#…``. This must match the Porth install's ``FixedEnvironment``
+(single-env) or the target slot (multi-env): an authorizer pinned to ``prod``
+resolves ``ENV#prod#TENANT#platform`` and simply will not see an unscoped record
+(PORTH-514 — the failure is silent, the tenant just appears not to exist).
+
+Leaving it unset preserves the previous unscoped behaviour byte-for-byte.
+
 Table names are resolved from env vars:
     PORTH_TENANTS_TABLE
     PORTH_PERMISSIONS_TABLE
     PORTH_ROLES_TABLE
     PORTH_CLAIM_MAPPING_CONFIGS_TABLE
+    PORTH_ENV_SCOPE   (optional; e.g. "prod")
 
 Usage (local):
     PORTH_TENANTS_TABLE=porth-tenants-dev \\
     PORTH_PERMISSIONS_TABLE=porth-permissions-dev \\
     PORTH_ROLES_TABLE=porth-roles-dev \\
     PORTH_CLAIM_MAPPING_CONFIGS_TABLE=porth-claim-mapping-configs-dev \\
+    PORTH_ENV_SCOPE=prod \\
     AWS_REGION=us-east-1 python3 scripts/bootstrap_platform_tenant.py
 """
 
@@ -42,6 +54,10 @@ from boto3.dynamodb.conditions import Key
 
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 APP_NS = "porth-platform"
+
+# ADR-Z8 data axis. Distinct from the table-name suffix (dev/staging) — conflating
+# the two writes records the authorizer never looks for.
+ENV_SCOPE = os.environ.get("PORTH_ENV_SCOPE", "").strip()
 
 PERMISSIONS = [
     {"key": "platform.tenants.read",   "display_name": "View Tenants",           "category": "Tenants",       "sort_order": 10},
@@ -132,6 +148,25 @@ COMPILED_HASH = "55016a468cbb18927879e32725927fc3d501a7887918f05eed50911918fd685
 
 
 # ---------------------------------------------------------------------------
+# ADR-Z8 key scoping
+# ---------------------------------------------------------------------------
+
+def env_key(base: str) -> str:
+    """Apply the ADR-Z8 environment prefix to a *partition* key string.
+
+    Mirrors ``porth_common.providers.aws.repositories.base._env_key``: the environment is
+    folded into the **content** of the partition key attribute (``PK``/``pk`` and
+    ``gsiNpk``) — never the table ``KeySchema`` — so it triggers no table replace.
+
+    Apply only to partition (hash) keys, never sort keys: environment is an outer
+    partition axis, so prefixing a sort key would be wrong.
+
+    Returns ``base`` unchanged when no scope is bound, preserving single-env behaviour.
+    """
+    return f"ENV#{ENV_SCOPE}#{base}" if ENV_SCOPE else base
+
+
+# ---------------------------------------------------------------------------
 # Bootstrap helpers
 # ---------------------------------------------------------------------------
 
@@ -140,27 +175,29 @@ def utc_now() -> str:
 
 
 def bootstrap_platform_org_and_tenant(tenants_tbl, now: str) -> str:
-    existing = tenants_tbl.get_item(Key={"PK": "TENANT#platform", "SK": "METADATA"})
+    platform_pk = env_key("TENANT#platform")
+    existing = tenants_tbl.get_item(Key={"PK": platform_pk, "SK": "METADATA"})
     if "Item" in existing:
         org_id = existing["Item"]["org_id"]
-        print(f"    exists   TENANT#platform (org_id={org_id})")
+        print(f"    exists   {platform_pk} (org_id={org_id})")
         return org_id
 
     org_id = str(uuid.uuid4())
     tenants_tbl.put_item(Item={
-        "PK": f"ORG#{org_id}", "SK": "METADATA",
-        "gsi1pk": "ORG_SLUG#platform", "gsi1sk": "METADATA",
+        "PK": env_key(f"ORG#{org_id}"), "SK": "METADATA",
+        "gsi1pk": env_key("ORG_SLUG#platform"), "gsi1sk": "METADATA",
         "id": org_id, "name": "Platform", "slug": "platform",
         "status": "active", "created_at": now, "updated_at": now,
     })
     tenants_tbl.put_item(Item={
-        "PK": "TENANT#platform", "SK": "METADATA",
-        "gsi1pk": f"ORG#{org_id}", "gsi1sk": "TENANT#platform",
+        "PK": platform_pk, "SK": "METADATA",
+        "gsi1pk": env_key(f"ORG#{org_id}"), "gsi1sk": "TENANT#platform",
         "tenant_id": "platform", "org_id": org_id, "org_name": "Platform",
-        "display_name": "Platform", "environment_type": "production",
+        # PORTH-502: environment_type was renamed tenant_tier.
+        "display_name": "Platform", "tenant_tier": "production",
         "status": "active", "created_at": now, "updated_at": now,
     })
-    print(f"    created  ORG#{org_id} + TENANT#platform")
+    print(f"    created  {env_key(f'ORG#{org_id}')} + {platform_pk}")
     return org_id
 
 
@@ -168,8 +205,8 @@ def bootstrap_permissions(perms_tbl, now: str) -> list[str]:
     permission_keys: list[str] = []
     for p in PERMISSIONS:
         perms_tbl.put_item(Item={
-            "pk": f"TENANT#platform#NS#{APP_NS}", "sk": f"PERM#{p['key']}",
-            "gsi1pk": "TENANT#platform", "gsi1sk": f"CAT#{p['category']}#PERM#{p['key']}",
+            "pk": env_key(f"TENANT#platform#NS#{APP_NS}"), "sk": f"PERM#{p['key']}",
+            "gsi1pk": env_key("TENANT#platform"), "gsi1sk": f"CAT#{p['category']}#PERM#{p['key']}",
             "id": str(uuid.uuid4()), "key": p["key"], "display_name": p["display_name"],
             "category": p["category"], "app_namespace": APP_NS,
             "tenant_id": "platform", "sort_order": p["sort_order"],
@@ -181,15 +218,16 @@ def bootstrap_permissions(perms_tbl, now: str) -> list[str]:
 
 
 def bootstrap_role(roles_tbl, now: str) -> str:
+    platform_pk = env_key("TENANT#platform")
     resp = roles_tbl.query(
-        KeyConditionExpression=Key("pk").eq("TENANT#platform") & Key("sk").begins_with("ROLE#")
+        KeyConditionExpression=Key("pk").eq(platform_pk) & Key("sk").begins_with("ROLE#")
     )
     for item in resp.get("Items", []):
         if item.get("name") == "platform-admin":
             role_id = item["id"]
             if item.get("source_key") != "platform-admin":
                 roles_tbl.update_item(
-                    Key={"pk": "TENANT#platform", "sk": f"ROLE#{role_id}"},
+                    Key={"pk": platform_pk, "sk": f"ROLE#{role_id}"},
                     UpdateExpression="SET source_key = :sk, updated_at = :ua",
                     ExpressionAttributeValues={":sk": "platform-admin", ":ua": now},
                 )
@@ -200,7 +238,7 @@ def bootstrap_role(roles_tbl, now: str) -> str:
 
     role_id = str(uuid.uuid4())
     roles_tbl.put_item(Item={
-        "pk": "TENANT#platform", "sk": f"ROLE#{role_id}",
+        "pk": platform_pk, "sk": f"ROLE#{role_id}",
         "id": role_id, "tenant_id": "platform", "name": "platform-admin",
         "is_system": True, "source_key": "platform-admin",
         "description": "System role for platform-level tenant administration",
@@ -211,9 +249,10 @@ def bootstrap_role(roles_tbl, now: str) -> str:
 
 
 def bootstrap_role_permissions(roles_tbl, role_id: str, permission_keys: list[str], now: str) -> None:
+    role_pk = env_key(f"ROLE#{role_id}")
     # Remove old links
     old = roles_tbl.query(
-        KeyConditionExpression=Key("pk").eq(f"ROLE#{role_id}") & Key("sk").begins_with("PERM#")
+        KeyConditionExpression=Key("pk").eq(role_pk) & Key("sk").begins_with("PERM#")
     )
     for item in old.get("Items", []):
         roles_tbl.delete_item(Key={"pk": item["pk"], "sk": item["sk"]})
@@ -221,7 +260,7 @@ def bootstrap_role_permissions(roles_tbl, role_id: str, permission_keys: list[st
     # Write new links
     for pkey in permission_keys:
         roles_tbl.put_item(Item={
-            "pk": f"ROLE#{role_id}", "sk": f"PERM#{pkey}",
+            "pk": role_pk, "sk": f"PERM#{pkey}",
             "role_id": role_id, "permission_key": pkey,
             "tenant_id": "platform", "assigned_at": now,
         })
@@ -229,8 +268,9 @@ def bootstrap_role_permissions(roles_tbl, role_id: str, permission_keys: list[st
 
 
 def bootstrap_claim_mapping_config(claim_tbl, now: str) -> None:
+    platform_pk = env_key("TENANT#platform")
     existing_cfg = claim_tbl.query(
-        KeyConditionExpression=Key("PK").eq("TENANT#platform"),
+        KeyConditionExpression=Key("PK").eq(platform_pk),
         ScanIndexForward=False,
         Limit=1,
     )
@@ -244,8 +284,8 @@ def bootstrap_claim_mapping_config(claim_tbl, now: str) -> None:
         version = 1
 
     claim_tbl.put_item(Item={
-        "PK": "TENANT#platform", "SK": f"VERSION#{version:06d}",
-        "gsi1pk": "TENANT#platform", "gsi1sk": f"VERSION#{version:06d}",
+        "PK": platform_pk, "SK": f"VERSION#{version:06d}",
+        "gsi1pk": platform_pk, "gsi1sk": f"VERSION#{version:06d}",
         "id": str(uuid.uuid4()), "tenant_id": "platform", "version": version,
         "mapping_source": MAPPING_SOURCE, "compiled_source": COMPILED_SOURCE,
         "compiled_hash": COMPILED_HASH,
@@ -268,7 +308,10 @@ def main() -> None:
 
     now = utc_now()
 
-    print("Bootstrapping platform tenant")
+    if ENV_SCOPE:
+        print(f"Bootstrapping platform tenant (ADR-Z8 scope: ENV#{ENV_SCOPE}#…)")
+    else:
+        print("Bootstrapping platform tenant (unscoped — PORTH_ENV_SCOPE not set)")
 
     print("\n0. Platform org + tenant")
     bootstrap_platform_org_and_tenant(tenants_tbl, now)
