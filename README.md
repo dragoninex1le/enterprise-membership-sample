@@ -62,7 +62,7 @@ long-lived AWS credentials in this repo.
 | **Porth components — install + upgrade** | `porth-install` | Installs/upgrades the Porth SAR app and bootstraps the platform tenant |
 | **Deploy Porth QA Tools** | `porth-install` | Deploys the cleanup + seed Lambdas (`porth-qa-tools`) |
 | **Reset Dev Environment** | `porth-install` | Clears all tenant data, re-bootstraps the platform tenant |
-| **Porth — seed testbed tenants** | `porth-testbed` | Seeds the synthetic tenants used by Tier 2 e2e and the PORTH-494 lab |
+| **Porth — seed testbed tenants** | `porth-install` | Seeds the synthetic tenants used by Tier 2 e2e and the PORTH-494 lab |
 | **E2E Tests** | — | Tier 1 (mocked) on every push; Tier 2 (live) after a successful deploy |
 
 Typical order after a reset:
@@ -86,7 +86,6 @@ Set on the GitHub Environment named above, not at repo level unless stated.
 | `API_DOMAIN_NAME` | `porth-install` | Porth API custom domain FQDN |
 | `PORTH_SPA_ORIGINS` | `porth-install` | CSV of allowed SPA origins |
 | `PORTH_STACK_NAME` | `sample-app-deploy` | Defaults to `serverlessrepo-porth-components` |
-| `PORTH_SEED_TENANTS` | `porth-testbed` | Tenant manifest (JSON). Carries `password_ssm` **paths**, never passwords |
 
 **Secrets**
 
@@ -98,12 +97,27 @@ Set on the GitHub Environment named above, not at repo level unless stated.
 | `PORTH_AUTH_TEST_TOKEN` | `porth-install`, repo | Optional authorizer test-token bypass |
 | Tier 2 e2e secrets | repo | `PLAYWRIGHT_BASE_URL`, `PORTH_PLATFORM_BASE_URL`, `PORTH_API_URL`, and the platform-admin / tenant-user email+password pairs |
 
-> **This repository is public.** Actions logs are world-readable and GitHub masks only the
-> *exact* registered secret value — not one embedded in a JSON body, URL-encoded, or surfaced
-> by an error trace. Test-tenant passwords therefore live in **SSM SecureString** under
-> `/porth/testbed/tenants/<id>/password` and are referenced by path. Migrating the remaining
-> Tier 2 password secrets to the same pattern is tracked in
-> [PORTH-533](https://estynsoftware.atlassian.net/browse/PORTH-533).
+### Testbed configuration lives in AWS, not here
+
+**This repository is public.** Actions logs are world-readable and GitHub masks only the
+*exact* registered secret value — not one embedded in a JSON body, URL-encoded, or surfaced by
+an error trace. Configuration held in repo variables is also unversioned and unaudited.
+
+So everything the **bootstrap** needs lives in SSM in account `195950944420`, and the seed
+workflow's only GitHub reference is `AWS_ROLE_ARN`:
+
+| Parameter | Type | |
+|---|---|---|
+| `/porth/config/testbed` | String | The tenant manifest — operator-authored. Read by the seed Lambda directly, so it never transits CI |
+| `/porth/testbed/tenants/<id>/password` | SecureString | Test-tenant admin passwords. The seeder checks these exist but never decrypts them |
+| `/porth/testbed/tenants` | String | The **resolved** set the seeder publishes, with the org/role UUIDs Porth assigned. The PORTH-494 config is generated from this |
+| `/porth/auth` | String | The BFF proxy's runtime config blob, written by `porth-install` from the stack outputs and the Auth0 secrets above |
+
+**Install** configuration stays in the pipeline — the tables above are the testbed's data, not
+the stack's shape.
+
+Migrating the remaining Tier 2 password secrets to the same pattern is tracked in
+[PORTH-533](https://estynsoftware.atlassian.net/browse/PORTH-533).
 
 ## Jira
 
