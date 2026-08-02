@@ -51,9 +51,16 @@ jobs:
   reset:
     name: Clear tenant data
     runs-on: ubuntu-latest
-    environment: porth-install
-    # Passed to the bootstrap job, which runs under its own role and so cannot see the
-    # env vars this job sets.
+    # Shares the bootstrap role rather than having one of its own. That role already holds
+    # dynamodb:DeleteItem on porth-* — it rewrites role-permission links wholesale — so it
+    # can already destroy every tenant record one call at a time. Invoking the cleanup
+    # Lambda grants no new capability, only a faster route to the same one, and a separate
+    # role would have drawn a boundary that does not exist.
+    #
+    # It gets cleanup ONLY, never the seed function: adding tenants stays with porth-seed.
+    environment: porth-bootstrap
+    # Passed to the bootstrap job, which runs on a fresh runner and so cannot see the env
+    # vars this job sets.
     outputs:
       tenants_table: ${{ steps.outputs.outputs.tenants_table }}
       permissions_table: ${{ steps.outputs.outputs.permissions_table }}
