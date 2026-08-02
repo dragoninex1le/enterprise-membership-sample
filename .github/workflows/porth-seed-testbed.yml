@@ -56,9 +56,9 @@ jobs:
   seed:
     name: Seed testbed tenants
     runs-on: ubuntu-latest
-    # Same environment as the install: the only thing this job needs from GitHub is the role
-    # to assume. Everything about the testbed itself comes from SSM.
-    environment: porth-install
+    # Its own environment, so its role's OIDC `sub` pins it here. That role can invoke the
+    # seed Lambda and read the manifest — it cannot delete stacks or read credentials.
+    environment: porth-seed
 
     steps:
       - name: Configure AWS credentials (OIDC)

@@ -49,10 +49,16 @@ env:
 
 jobs:
   reset:
-    name: Reset Dev Environment
+    name: Clear tenant data
     runs-on: ubuntu-latest
     environment: porth-install
-
+    # Passed to the bootstrap job, which runs under its own role and so cannot see the
+    # env vars this job sets.
+    outputs:
+      tenants_table: ${{ steps.outputs.outputs.tenants_table }}
+      permissions_table: ${{ steps.outputs.outputs.permissions_table }}
+      roles_table: ${{ steps.outputs.outputs.roles_table }}
+      claim_mapping_table: ${{ steps.outputs.outputs.claim_mapping_table }}
     steps:
       - uses: actions/checkout@v4
 
@@ -71,6 +77,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Resolve stack outputs
+        id: outputs
         run: |
           set -euo pipefail
           get_porth() {
@@ -111,6 +118,15 @@ jobs:
           echo "PORTH_CLAIM_MAPPING_CONFIGS_TABLE=$CLAIM_TABLE"                  >> $GITHUB_ENV
           echo "PORTH_SESSIONS_TABLE=$SESSIONS_TABLE"                            >> $GITHUB_ENV
           echo "CLEANUP_FN=$CLEANUP_FN"                                          >> $GITHUB_ENV
+
+          # Step outputs for the bootstrap job — it runs under a different role and gets a
+          # fresh runner, so GITHUB_ENV does not reach it.
+          {
+            echo "tenants_table=$TENANTS_TABLE"
+            echo "permissions_table=$PERMISSIONS_TABLE"
+            echo "roles_table=$ROLES_TABLE"
+            echo "claim_mapping_table=$CLAIM_TABLE"
+          } >> "$GITHUB_OUTPUT"
           echo "✅ Resolved outputs from $PORTH_STACK (sessions: ${SESSIONS_TABLE:-<absent>})"
 
       - name: Cleanup all tenant data
@@ -159,70 +175,24 @@ jobs:
 
       # Shared with porth-install.yml — one implementation, so the ADR-Z8 scoping
       # cannot drift between the install path and the reset path.
-      - name: Bootstrap platform tenant
-        env:
-          PORTH_TENANTS_TABLE: ${{ env.PORTH_TENANTS_TABLE }}
-          PORTH_PERMISSIONS_TABLE: ${{ env.PORTH_PERMISSIONS_TABLE }}
-          PORTH_ROLES_TABLE: ${{ env.PORTH_ROLES_TABLE }}
-          PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ env.PORTH_CLAIM_MAPPING_CONFIGS_TABLE }}
-          PORTH_ENV_SCOPE: ${{ env.ENV_SCOPE }}
-        run: |
-          python3 scripts/bootstrap_platform_tenant.py
-          echo "✅ Platform tenant bootstrapped under ENV#${ENV_SCOPE}#"
+  # Own job so it can run under the bootstrap role — a job has exactly one environment, and
+  # this one deliberately cannot delete stacks or read testbed credentials.
+  bootstrap:
+    name: Bootstrap platform tenant
+    needs: reset
+    uses: ./.github/workflows/porth-bootstrap.yml
+    with:
+      env_scope: ${{ inputs.env_scope || 'prod' }}
+      tenants_table: ${{ needs.reset.outputs.tenants_table }}
+      permissions_table: ${{ needs.reset.outputs.permissions_table }}
+      roles_table: ${{ needs.reset.outputs.roles_table }}
+      claim_mapping_table: ${{ needs.reset.outputs.claim_mapping_table }}
 
-      - name: Patch platform tenant IdP config (direct DynamoDB)
-        # PORTH-532: was `PATCH /tenants/platform` with a retry loop. That is chicken-and-egg
-        # during a reset — the API needs a working authorizer, which is exactly what a
-        # missing or misscoped platform tenant prevents.
-        #
-        # PORTH-530: sourced from /porth/auth (written by porth-install from the manifest's
-        # `platform.idp`) rather than from repo secrets. Reading the same blob the proxy uses
-        # means the authorizer and the proxy cannot disagree on the issuer.
-        run: |
-          set -euo pipefail
-          BLOB=$(aws ssm get-parameter --name /porth/auth \
-            --query Parameter.Value --output text --region "$AWS_REGION" 2>/dev/null || echo "")
-          if [ -z "$BLOB" ]; then
-            echo "::error::/porth/auth is absent — run porth-install first; it builds the blob"
-            echo "::error::from /porth/config/testbed and this step reads it back."
-            exit 1
-          fi
-
-          PLATFORM_PK="ENV#${ENV_SCOPE}#TENANT#platform" BLOB="$BLOB" python3 - <<'PY'
-          import json, os
-          from datetime import datetime, timezone
-
-          blob = json.loads(os.environ["BLOB"])
-          idp = {
-              "issuer": blob["issuer"],
-              "jwks_uri": blob["jwks_uri"],
-              "client_id": blob.get("interactive_client_id", ""),
-              "audience": blob.get("audience", ""),
-              "protocol": blob.get("protocol", "oidc"),
-          }
-          json.dump(
-              {
-                  ":idp": {"M": {k: {"S": v} for k, v in idp.items()}},
-                  ":tier": {"S": "production"},
-                  ":ua": {"S": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
-              },
-              open("/tmp/idp-values.json", "w"),
-          )
-          json.dump(
-              {"PK": {"S": os.environ["PLATFORM_PK"]}, "SK": {"S": "METADATA"}},
-              open("/tmp/idp-key.json", "w"),
-          )
-          print(f"Writing idp_config_override (pk={os.environ['PLATFORM_PK']} issuer={idp['issuer']})")
-          PY
-
-          aws dynamodb update-item \
-            --table-name "$PORTH_TENANTS_TABLE" \
-            --key file:///tmp/idp-key.json \
-            --update-expression "SET idp_config_override = :idp, tenant_tier = :tier, updated_at = :ua" \
-            --expression-attribute-values file:///tmp/idp-values.json \
-            --region "$AWS_REGION"
-          echo "✅ Platform tenant IdP config + tenant_tier updated"
-
+  summary:
+    name: Done
+    needs: [reset, bootstrap]
+    runs-on: ubuntu-latest
+    steps:
       - name: Done
         run: |
           {

@@ -1,0 +1,181 @@
+name: Porth — bootstrap platform tenant
+
+# Creates the reserved `platform` tenant: org, tenant, permissions, the platform-admin role
+# with its source_key, the role-permission links, the claim-mapping config, and the
+# idp_config_override the authorizer resolves against.
+#
+# A REUSABLE workflow rather than steps inlined into its callers, for two reasons:
+#
+#   1. Identity. A GitHub job has exactly one environment, so a bootstrap role whose OIDC
+#      `sub` is pinned to `porth-bootstrap` cannot be assumed from a job running as
+#      `porth-install`. Giving the bootstrap its own workflow gives it its own role — one
+#      that can write the Porth tables and nothing else. The install role does not need
+#      DynamoDB write at all once this lands.
+#   2. Drift. porth-install and reset-env both need this, and PORTH-532 was two copies of it
+#      disagreeing: one wrote an unscoped TENANT#platform while the authorizer resolved
+#      ENV#prod#TENANT#platform, so the install reported success and login silently did not
+#      work. One implementation, two callers.
+#
+# The Porth SAR ships no platform bootstrap, so every consumer provides its own. Replacing
+# this with a product-side implementation is PORTH-536; when that lands, this workflow and
+# scripts/bootstrap_platform_tenant.py both go away.
+
+on:
+  workflow_call:
+    inputs:
+      env_scope:
+        description: >
+          ADR-Z8 slot to write under (ENV#{scope}#…). Must match the install's
+          FixedEnvironment or the authorizer will never resolve the platform tenant
+          (PORTH-514 — the failure is silent; the tenant just appears not to exist).
+        required: true
+        type: string
+      tenants_table:
+        required: true
+        type: string
+      permissions_table:
+        required: true
+        type: string
+      roles_table:
+        required: true
+        type: string
+      claim_mapping_table:
+        required: true
+        type: string
+      aws_region:
+        required: false
+        type: string
+        default: us-east-1
+
+jobs:
+  bootstrap:
+    name: Bootstrap platform tenant
+    runs-on: ubuntu-latest
+    environment: porth-bootstrap
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install --quiet boto3
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Bootstrap platform tenant
+        env:
+          PORTH_TENANTS_TABLE: ${{ inputs.tenants_table }}
+          PORTH_PERMISSIONS_TABLE: ${{ inputs.permissions_table }}
+          PORTH_ROLES_TABLE: ${{ inputs.roles_table }}
+          PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ inputs.claim_mapping_table }}
+          PORTH_ENV_SCOPE: ${{ inputs.env_scope }}
+          AWS_REGION: ${{ inputs.aws_region }}
+        run: |
+          python3 scripts/bootstrap_platform_tenant.py
+          echo "✅ Platform tenant bootstrapped under ENV#${PORTH_ENV_SCOPE}#"
+
+      - name: Patch platform tenant IdP config
+        # Sourced from /porth/auth, which porth-install builds from the manifest's
+        # `platform.idp`. Reading it back rather than re-deriving guarantees the authorizer
+        # (which reads this DynamoDB record) and the BFF proxy (which reads the blob) agree
+        # on the issuer — a mismatch between them is an opaque token-validation rejection.
+        #
+        # Written directly to DynamoDB rather than through the Porth API, which requires
+        # EventBridge PutEvents the Lambda execution role may not have — and which is
+        # circular anyway, since the API asserts the platform tenant already exists.
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          PORTH_TENANTS_TABLE: ${{ inputs.tenants_table }}
+          ENV_SCOPE: ${{ inputs.env_scope }}
+        run: |
+          set -euo pipefail
+          BLOB=$(aws ssm get-parameter --name /porth/auth \
+            --query Parameter.Value --output text --region "$AWS_REGION" 2>/dev/null || echo "")
+          if [ -z "$BLOB" ]; then
+            echo "::error::/porth/auth is absent. porth-install builds it from"
+            echo "::error::/porth/config/testbed (platform.idp) — run the install first."
+            exit 1
+          fi
+
+          # Built in Python and passed by file: the DynamoDB attribute-value JSON is too
+          # quoting-hostile to assemble inline, and a shell heredoc that silently produces
+          # the wrong string writes nothing while reporting success.
+          PLATFORM_PK="ENV#${ENV_SCOPE}#TENANT#platform" BLOB="$BLOB" python3 - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
+
+          blob = json.loads(os.environ["BLOB"])
+          idp = {
+              "issuer": blob["issuer"],
+              "jwks_uri": blob["jwks_uri"],
+              "client_id": blob.get("interactive_client_id", ""),
+              "audience": blob.get("audience", ""),
+              "protocol": blob.get("protocol", "oidc"),
+          }
+          json.dump(
+              {
+                  ":idp": {"M": {k: {"S": v} for k, v in idp.items()}},
+                  ":tier": {"S": "production"},
+                  ":ua": {"S": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
+              },
+              open("/tmp/idp-values.json", "w"),
+          )
+          json.dump(
+              {"PK": {"S": os.environ["PLATFORM_PK"]}, "SK": {"S": "METADATA"}},
+              open("/tmp/idp-key.json", "w"),
+          )
+          print(f"pk={os.environ['PLATFORM_PK']} issuer={idp['issuer']}")
+          PY
+
+          aws dynamodb update-item \
+            --table-name "$PORTH_TENANTS_TABLE" \
+            --key file:///tmp/idp-key.json \
+            --update-expression "SET idp_config_override = :idp, tenant_tier = :tier, updated_at = :ua" \
+            --expression-attribute-values file:///tmp/idp-values.json \
+            --region "$AWS_REGION"
+          echo "✅ Platform tenant IdP config + tenant_tier updated"
+
+      - name: Verify the authorizer can resolve it
+        # The whole failure mode this guards against is silent: a record at the wrong key
+        # writes successfully and the tenant simply appears not to exist. Reading it back at
+        # the exact key the authorizer uses is the only thing that proves the scope is right.
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          PORTH_TENANTS_TABLE: ${{ inputs.tenants_table }}
+          ENV_SCOPE: ${{ inputs.env_scope }}
+        run: |
+          set -euo pipefail
+          PK="ENV#${ENV_SCOPE}#TENANT#platform"
+          FOUND=$(aws dynamodb get-item \
+            --table-name "$PORTH_TENANTS_TABLE" \
+            --key "{\"PK\":{\"S\":\"$PK\"},\"SK\":{\"S\":\"METADATA\"}}" \
+            --query "Item.idp_config_override.M.issuer.S" --output text \
+            --region "$AWS_REGION" 2>/dev/null || echo "")
+
+          if [ -z "$FOUND" ] || [ "$FOUND" = "None" ]; then
+            echo "::error::No platform tenant with an idp_config_override at $PK."
+            echo "::error::Records written at a different scope are invisible to an authorizer"
+            echo "::error::pinned to '${ENV_SCOPE}' — check FixedEnvironment matches."
+            exit 1
+          fi
+          echo "✅ $PK resolves, issuer=$FOUND"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Platform tenant"
+            echo ""
+            echo "- **Key:** \`ENV#${{ inputs.env_scope }}#TENANT#platform\`"
+            echo "- **Tables:** \`${{ inputs.tenants_table }}\` and friends"
+          } >> "$GITHUB_STEP_SUMMARY"

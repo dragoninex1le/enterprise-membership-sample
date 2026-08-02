@@ -54,7 +54,9 @@ jobs:
   deploy:
     name: Deploy QA tools stack
     runs-on: ubuntu-latest
-    environment: porth-install
+    # Own environment: this role can create and DELETE the qa-tools stack and pass the
+    # CloudFormation execution role. Nothing else should be able to assume it.
+    environment: porth-qa-tools
 
     steps:
       - uses: actions/checkout@v4
