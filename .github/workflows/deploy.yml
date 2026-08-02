@@ -127,9 +127,25 @@ jobs:
             --output text 2>/dev/null || echo "")
           echo "SAMPLE_APP_API_URL=${SAMPLE_API_URL}" >> $GITHUB_ENV
 
+      # @estyn/porth-admin (the BFF auth SDK, PORTH-531) is served from the Porth
+      # CodeArtifact npm repo in the Components account, not the public registry.
+      # frontend/.npmrc points the @estyn scope there and reads the token from this
+      # env var. Same pattern as the Style Classifier admin build.
+      - name: Authenticate npm to CodeArtifact (porth-npm for @estyn/porth-admin)
+        run: |
+          set -euo pipefail
+          TOKEN=$(aws codeartifact get-authorization-token \
+            --domain porth --domain-owner 084847995635 \
+            --query authorizationToken --output text --region "$AWS_REGION")
+          echo "::add-mask::${TOKEN}"
+          echo "CODEARTIFACT_AUTH_TOKEN=${TOKEN}" >> "$GITHUB_ENV"
+
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm ci
+        # npm install rather than ci: @estyn/porth-admin is a new dependency and is
+        # not yet in package-lock.json, which `npm ci` refuses to reconcile. Revert
+        # to `npm ci` once the lockfile is regenerated against CodeArtifact.
+        run: npm install
 
       - name: Build frontend
         working-directory: frontend
