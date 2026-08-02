@@ -57,7 +57,9 @@ jobs:
         run: |
           MISSING=()
           [ -z "${{ vars.ACM_CERTIFICATE_ARN }}" ] && MISSING+=("ACM_CERTIFICATE_ARN (env var)")
-          [ -z "${{ secrets.GH_PAT }}" ]           && MISSING+=("GH_PAT (secret)")
+          # PORTH-540: the GH_PAT check is gone. It was never used by this workflow, and its
+          # only consumer anywhere in the repo was bootstrap.yml's `pip install git+https://…`,
+          # which is deleted. Requiring a secret nothing reads just blocks deploys.
           if [ ${#MISSING[@]} -gt 0 ]; then
             echo "❌ Missing required config: ${MISSING[*]}"
             exit 1

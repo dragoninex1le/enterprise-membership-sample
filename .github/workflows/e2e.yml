@@ -11,8 +11,10 @@ on:
     types: [completed]
     branches: [main]
 
+# PORTH-540: no id-token here. This workflow never calls configure-aws-credentials, so the
+# OIDC grant was vestigial — and on a public repo an unnecessary token permission is worth
+# not having. Restore it if the suite ever needs to read credentials from SSM (PORTH-533).
 permissions:
-  id-token: write
   contents: read
 
 jobs:
