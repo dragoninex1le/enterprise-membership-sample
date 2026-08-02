@@ -84,16 +84,65 @@ jobs:
       - name: SAM build
         run: sam build --template-file infra/qa-tools/template.yml
 
+      # A stack left in ROLLBACK_FAILED or ROLLBACK_COMPLETE cannot be updated — it has to be
+      # deleted before it can be recreated. --retain-resources is what makes that possible
+      # when the failure was itself a permissions error: without it, DELETE re-attempts the
+      # operation that was denied and fails again, and the stack stays wedged forever.
+      - name: Clear a wedged stack
+        run: |
+          set -euo pipefail
+          STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query "Stacks[0].StackStatus" --output text --region "$AWS_REGION" 2>/dev/null || echo "NONE")
+          echo "$STACK_NAME: $STATUS"
+
+          case "$STATUS" in
+            ROLLBACK_COMPLETE|ROLLBACK_FAILED|CREATE_FAILED|DELETE_FAILED|REVIEW_IN_PROGRESS)
+              STUCK=$(aws cloudformation list-stack-resources --stack-name "$STACK_NAME" \
+                --query "StackResourceSummaries[?ResourceStatus=='DELETE_FAILED'].LogicalResourceId" \
+                --output text --region "$AWS_REGION" 2>/dev/null || echo "")
+              echo "Deleting (retaining: ${STUCK:-none})"
+              if [ -n "$STUCK" ]; then
+                aws cloudformation delete-stack --stack-name "$STACK_NAME" \
+                  --retain-resources $STUCK --region "$AWS_REGION"
+              else
+                aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$AWS_REGION"
+              fi
+              aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" \
+                --region "$AWS_REGION"
+              echo "Deleted — will be recreated cleanly"
+              ;;
+            *)
+              echo "No cleanup needed"
+              ;;
+          esac
+
       - name: SAM deploy
         run: |
+          set -euo pipefail
+          # CloudFormation must act as the EXECUTION role, not the orchestration role this job
+          # assumed. porth-install-role only calls the CFN/SAR APIs — it deliberately has no
+          # iam:CreateRole, so without this the Lambda execution roles cannot be created.
+          ROLE_ARG=()
+          if [ -n "${CFN_EXECUTION_ROLE:-}" ]; then
+            ROLE_ARG=(--role-arn "$CFN_EXECUTION_ROLE")
+            echo "CloudFormation will act as $CFN_EXECUTION_ROLE"
+          else
+            echo "::warning::AWS_CFN_EXECUTION_ROLE_ARN is unset — CloudFormation will act as the"
+            echo "::warning::job's own role, which needs iam:CreateRole/DeleteRole/PutRolePolicy"
+            echo "::warning::and friends to manage the two Lambda execution roles."
+          fi
+
           sam deploy \
             --stack-name "$STACK_NAME" \
             --resolve-s3 \
             --capabilities CAPABILITY_IAM \
+            "${ROLE_ARG[@]}" \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
             --region "$AWS_REGION" \
             --parameter-overrides "Environment=$ENVIRONMENT" "EnvScope=$ENV_SCOPE"
+        env:
+          CFN_EXECUTION_ROLE: ${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}
 
       - name: Smoke test — both routes must reject an unsigned request
         run: |
