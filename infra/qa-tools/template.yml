@@ -34,16 +34,11 @@ Parameters:
       names — conflating the two writes records the authorizer never looks for (PORTH-514).
       Must match the Porth install's FixedEnvironment.
 
+# No API Gateway. Both workflows invoke these by ARN over the AWS API, so an HTTP surface
+# would exist only to be defended: these functions wipe tables and write tenant IdP config,
+# and the cheapest way to secure an endpoint nobody calls is not to create one. It also keeps
+# apigateway:* out of the CloudFormation execution role.
 Resources:
-
-  # REST (not HTTP) API: AWS_IAM auth is native here. Both routes are destructive or
-  # privileged, so an unauthenticated one would let anyone wipe or rewrite tenant data.
-  QaToolsRestApi:
-    Type: AWS::Serverless::Api
-    Properties:
-      StageName: !Ref Environment
-      Auth:
-        DefaultAuthorizer: AWS_IAM
 
   QaCleanupFunction:
     Type: AWS::Serverless::Function
@@ -67,14 +62,6 @@ Resources:
                 - dynamodb:DeleteItem
                 - dynamodb:DescribeTable
               Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-*
-      Events:
-        CleanupPost:
-          Type: Api
-          Properties:
-            RestApiId: !Ref QaToolsRestApi
-            Path: /qa/cleanup
-            Method: POST
-
   # Refills what QaCleanupFunction empties. Writes DynamoDB directly rather than calling the
   # Porth API: the API path needs EventBridge PutEvents (which this role deliberately lacks)
   # and an auth token, so writing records directly means no Porth API credential has to exist.
@@ -133,27 +120,10 @@ Resources:
               Condition:
                 StringEquals:
                   kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
-      Events:
-        SeedPost:
-          Type: Api
-          Properties:
-            RestApiId: !Ref QaToolsRestApi
-            Path: /qa/seed
-            Method: POST
-
 Outputs:
-  QaToolsApiEndpoint:
-    Description: QA tools API Gateway endpoint
-    Value: !Sub "https://${QaToolsRestApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
-  QaCleanupUrl:
-    Description: QA cleanup endpoint
-    Value: !Sub "https://${QaToolsRestApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/qa/cleanup"
   QaCleanupFunctionArn:
     Description: Invoked by reset-env.yml, once per table
     Value: !GetAtt QaCleanupFunction.Arn
-  QaSeedUrl:
-    Description: QA seed endpoint
-    Value: !Sub "https://${QaToolsRestApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/qa/seed"
   QaSeedFunctionArn:
     Description: Invoked by porth-seed-testbed.yml with the tenant manifest
     Value: !GetAtt QaSeedFunction.Arn

@@ -89,27 +89,46 @@ jobs:
       # when the failure was itself a permissions error: without it, DELETE re-attempts the
       # operation that was denied and fails again, and the stack stays wedged forever.
       - name: Clear a wedged stack
+        env:
+          CFN_EXECUTION_ROLE: ${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}
         run: |
           set -euo pipefail
+          ROLE_ARG=()
+          [ -n "${CFN_EXECUTION_ROLE:-}" ] && ROLE_ARG=(--role-arn "$CFN_EXECUTION_ROLE")
+
           STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
             --query "Stacks[0].StackStatus" --output text --region "$AWS_REGION" 2>/dev/null || echo "NONE")
           echo "$STACK_NAME: $STATUS"
 
           case "$STATUS" in
             ROLLBACK_COMPLETE|ROLLBACK_FAILED|CREATE_FAILED|DELETE_FAILED|REVIEW_IN_PROGRESS)
-              STUCK=$(aws cloudformation list-stack-resources --stack-name "$STACK_NAME" \
-                --query "StackResourceSummaries[?ResourceStatus=='DELETE_FAILED'].LogicalResourceId" \
-                --output text --region "$AWS_REGION" 2>/dev/null || echo "")
-              echo "Deleting (retaining: ${STUCK:-none})"
-              if [ -n "$STUCK" ]; then
-                aws cloudformation delete-stack --stack-name "$STACK_NAME" \
-                  --retain-resources $STUCK --region "$AWS_REGION"
+              # --retain-resources is only accepted from DELETE_FAILED, so the first attempt
+              # is always a plain delete. If resources are stuck it lands in DELETE_FAILED,
+              # and only then can we retry retaining them.
+              echo "Deleting so the stack can be recreated cleanly"
+              aws cloudformation delete-stack --stack-name "$STACK_NAME" \
+                "${ROLE_ARG[@]}" --region "$AWS_REGION"
+
+              if aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" \
+                   --region "$AWS_REGION" 2>/dev/null; then
+                echo "Deleted"
               else
-                aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$AWS_REGION"
+                STUCK=$(aws cloudformation list-stack-resources --stack-name "$STACK_NAME" \
+                  --query "StackResourceSummaries[?ResourceStatus=='DELETE_FAILED'].LogicalResourceId" \
+                  --output text --region "$AWS_REGION" 2>/dev/null || echo "")
+                if [ -z "$STUCK" ]; then
+                  echo "::error::Delete failed and no resource is in DELETE_FAILED — inspect the stack events"
+                  exit 1
+                fi
+                echo "Retrying, retaining: $STUCK"
+                echo "::warning::Retaining $STUCK — these are orphaned in the account and safe to"
+                echo "::warning::delete by hand; the redeploy creates new ones with fresh suffixes."
+                aws cloudformation delete-stack --stack-name "$STACK_NAME" \
+                  --retain-resources $STUCK "${ROLE_ARG[@]}" --region "$AWS_REGION"
+                aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" \
+                  --region "$AWS_REGION"
+                echo "Deleted (with retained resources)"
               fi
-              aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" \
-                --region "$AWS_REGION"
-              echo "Deleted — will be recreated cleanly"
               ;;
             *)
               echo "No cleanup needed"
@@ -144,30 +163,8 @@ jobs:
         env:
           CFN_EXECUTION_ROLE: ${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}
 
-      - name: Smoke test — both routes must reject an unsigned request
-        run: |
-          set -euo pipefail
-          get_output() {
-            aws cloudformation describe-stacks \
-              --stack-name "$STACK_NAME" \
-              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue | [0]" \
-              --output text --region "$AWS_REGION"
-          }
-          FAILED=0
-          for OUT in QaCleanupUrl QaSeedUrl; do
-            URL=$(get_output "$OUT")
-            CODE=$(curl -s -o /tmp/qa-response.json -w "%{http_code}" \
-              -X POST "$URL" -H "Content-Type: application/json" -d '{}')
-            echo "$OUT → HTTP $CODE"
-            if [ "$CODE" != "403" ]; then
-              echo "::error::$OUT returned $CODE (expected 403 for an unsigned request)"
-              cat /tmp/qa-response.json || true
-              FAILED=1
-            fi
-          done
-          [ "$FAILED" -eq 0 ] || exit 1
-          echo "IAM auth active on both routes"
-
+      # No smoke test: there is no HTTP surface left to probe. The functions are invoked by
+      # ARN over the AWS API, where authorisation is IAM by construction.
       - name: Summary
         run: |
           {
@@ -178,6 +175,6 @@ jobs:
             echo ""
             aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
               --region "$AWS_REGION" \
-              --query "Stacks[0].Outputs[?OutputKey=='QaCleanupFunctionArn' || OutputKey=='QaSeedFunctionArn'].[OutputKey,OutputValue]" \
+              --query "Stacks[0].Outputs[?ends_with(OutputKey, 'FunctionArn')].[OutputKey,OutputValue]" \
               --output text | while read -r k v; do echo "- \`$k\` = \`$v\`"; done
           } >> "$GITHUB_STEP_SUMMARY"
