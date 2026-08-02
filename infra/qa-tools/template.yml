@@ -107,12 +107,19 @@ Resources:
             # GetSecretValue: the seeder has no reason to hold a password, and the boundary
             # is enforced by the API rather than by a WithDecryption flag staying false.
             #
-            # The trailing `*` is REQUIRED, and not just a prefix wildcard: Secrets Manager
-            # appends a random six-character suffix to every secret ARN, so a pattern ending
-            # at the secret name matches nothing (same trap as PORTH-532).
+            # Two patterns because Secrets Manager permits a leading slash in a name and the
+            # account uses it, matching the SSM paths alongside. `/porth/testbed/x` and
+            # `porth/testbed/x` are different secrets with different ARNs, and a policy
+            # written for one silently matches nothing for the other.
+            #
+            # The trailing `*` is REQUIRED, and not just prefix-matching: Secrets Manager
+            # appends a random six-character suffix to every ARN, so a pattern ending at the
+            # secret name matches nothing (same trap as PORTH-532).
             - Effect: Allow
               Action: secretsmanager:DescribeSecret
-              Resource: !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:porth/testbed/*
+              Resource:
+                - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/porth/testbed/*
+                - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:porth/testbed/*
             # For the manifest parameter when it is a SecureString.
             - Effect: Allow
               Action: kms:Decrypt

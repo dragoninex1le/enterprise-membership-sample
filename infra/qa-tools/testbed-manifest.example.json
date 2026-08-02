@@ -10,7 +10,7 @@
     "Passwords are NEVER in here. 'password_secret' is a Secrets Manager name; the seeder",
     "only calls DescribeSecret and cannot read the value. Create each one alongside the IdP",
     "user, which needs that provider's management API:",
-    "  aws secretsmanager create-secret --name porth/testbed/tenants/acme/password \\",
+    "  aws secretsmanager create-secret --name /porth/testbed/tenants/acme/password \\",
     "    --secret-string '<password>' --region us-east-1",
     "",
     "Get the three IdP URLs from the provider's discovery document rather than by hand —",
@@ -35,7 +35,7 @@
     },
     "admin": {
       "email": "platform-admin@ems.estynsoftware.test",
-      "password_secret": "porth/testbed/platform/password"
+      "password_secret": "/porth/testbed/platform/password"
     }
   },
 
@@ -55,7 +55,7 @@
       },
       "admin": {
         "email": "admin@acme.ems.estynsoftware.test",
-        "password_secret": "porth/testbed/tenants/acme/password"
+        "password_secret": "/porth/testbed/tenants/acme/password"
       }
     },
     {
@@ -73,7 +73,7 @@
       },
       "admin": {
         "email": "admin@globex.ems.estynsoftware.test",
-        "password_secret": "porth/testbed/tenants/globex/password"
+        "password_secret": "/porth/testbed/tenants/globex/password"
       }
     },
     {
@@ -96,7 +96,7 @@
       },
       "admin": {
         "email": "admin@initech.ems.estynsoftware.test",
-        "password_secret": "porth/testbed/tenants/initech/password"
+        "password_secret": "/porth/testbed/tenants/initech/password"
       }
     },
     {

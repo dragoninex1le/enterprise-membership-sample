@@ -119,9 +119,9 @@ jobs:
               print(f"::error::{param} has credential fields that should be password_secret:")
               for field in offenders:
                   print(f"::error::  {field}")
-              print("::error::password_secret is a Secrets Manager NAME, not a path or a value —")
-              print("::error::e.g. porth/testbed/tenants/acme/password, with no leading slash")
-              print("::error::(the IAM grant matches secret:porth/testbed/*).")
+              print("::error::password_secret is a Secrets Manager NAME, never a value —")
+              print("::error::e.g. /porth/testbed/tenants/acme/password. Renaming the field is")
+              print("::error::usually all that is needed; the value itself does not change.")
               sys.exit(1)
 
           platform = manifest.get("platform") if isinstance(manifest, dict) else None
