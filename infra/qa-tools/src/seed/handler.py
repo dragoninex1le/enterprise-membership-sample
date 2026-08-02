@@ -290,7 +290,9 @@ def _seed_tenant(t, tables, secrets, env_scope, dry_run) -> dict:
         )
 
     if dry_run:
-        return {"tenant_id": tid, "status": "adopted", "dry_run": True, "warnings": warnings}
+        # "planned", not "adopted" — nothing was written, and a dry run that reports the
+        # same word as a real one is a dry run nobody can read.
+        return {"tenant_id": tid, "status": "planned", "dry_run": True, "warnings": warnings}
 
     now = _utc_now()
     tenants_tbl = tables["tenants"]

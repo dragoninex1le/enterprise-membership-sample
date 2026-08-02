@@ -192,6 +192,11 @@ jobs:
                    f"- **Dry run:** {body['dry_run']}", "",
                    "| Tenant | Status | Porth org | Role |", "|---|---|---|---|"]
 
+          # The platform block's secret check lives outside the per-tenant results; without
+          # this its warnings were computed and then silently dropped.
+          for w in body.get("platform_warnings", []):
+              print(f"::warning::platform: {w}")
+
           failed = False
           for r in body["results"]:
               lines.append(
@@ -204,8 +209,12 @@ jobs:
                   print(f"::error::{r['tenant_id']}: {r.get('error')}")
                   failed = True
 
-          lines += ["", "Resolved set published to SSM `/porth/testbed/tenants` — the",
-                    "PORTH-494 config is generated from it, not hand-maintained."]
+          if body["dry_run"]:
+              lines += ["", "**Nothing was written.** `planned` means the entry validated and its",
+                        "secret exists. Re-run with `dry_run: false` to apply."]
+          else:
+              lines += ["", "Resolved set published to SSM `/porth/testbed/tenants` — the",
+                        "PORTH-494 config is generated from it, not hand-maintained."]
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
               fh.write("\n".join(lines) + "\n")
 
