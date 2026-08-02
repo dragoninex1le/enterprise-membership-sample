@@ -1,0 +1,162 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Porth QA tools for the EMS testbed — clears and refills the Porth tables between test runs.
+
+# These are EMS's tooling, deployed into EMS's own account. They were in the Components repo
+# (since PORTH-228) purely by inheritance, which meant a cross-account deploy role would have
+# been needed for Components CI to reach account 195950944420 — across a boundary that is
+# purposefully independent (ADR-Z1). Nothing about them is shared: the seeder's reserved-name
+# guard exists to protect frontend/tests/e2e/tier2/acceptance.spec.ts, a path in THIS repo.
+#
+# Cleanup empties the tables; seed refills them with the deterministic synthetic tenants that
+# both the Tier 2 e2e suite and the PORTH-494 security lab need — one manifest, so the two
+# cannot drift apart.
+#
+# Deployed by .github/workflows/deploy-qa-tools.yml.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging]
+    Description: >
+      Porth table-name suffix — must match the Porth install's `Environment` parameter, so the
+      Lambdas resolve porth-tenants-${Environment} and friends. `prod` is deliberately not an
+      allowed value: these functions delete data.
+
+  EnvScope:
+    Type: String
+    Default: prod
+    Description: >
+      ADR-Z8 environment slot the seeded records are written under (ENV#{EnvScope}#…). This is
+      the DATA axis and is deliberately distinct from Environment, which only suffixes table
+      names — conflating the two writes records the authorizer never looks for (PORTH-514).
+      Must match the Porth install's FixedEnvironment.
+
+Resources:
+
+  # REST (not HTTP) API: AWS_IAM auth is native here. Both routes are destructive or
+  # privileged, so an unauthenticated one would let anyone wipe or rewrite tenant data.
+  QaToolsRestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Environment
+      Auth:
+        DefaultAuthorizer: AWS_IAM
+
+  QaCleanupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub porth-qa-cleanup-${Environment}
+      Handler: handler.handler
+      Runtime: python3.13
+      CodeUri: src/cleanup/
+      Timeout: 120
+      MemorySize: 256
+      Environment:
+        Variables:
+          PORTH_ENV: !Ref Environment
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Scan
+                - dynamodb:BatchWriteItem
+                - dynamodb:DeleteItem
+                - dynamodb:DescribeTable
+              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-*
+      Events:
+        CleanupPost:
+          Type: Api
+          Properties:
+            RestApiId: !Ref QaToolsRestApi
+            Path: /qa/cleanup
+            Method: POST
+
+  # Refills what QaCleanupFunction empties. Writes DynamoDB directly rather than calling the
+  # Porth API: the API path needs EventBridge PutEvents (which this role deliberately lacks)
+  # and an auth token, so writing records directly means no Porth API credential has to exist.
+  # Reads the /porth/auth blob for the tenant IdP config, so no Auth0 credential is passed in.
+  # Passwords are never generated or read here — only the SSM path is recorded.
+  QaSeedFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub porth-qa-seed-${Environment}
+      Handler: handler.handler
+      Runtime: python3.13
+      CodeUri: src/seed/
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          PORTH_ENV: !Ref Environment
+          PORTH_ENV_SCOPE: !Ref EnvScope
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:Query
+                - dynamodb:Scan
+                - dynamodb:DescribeTable
+              Resource:
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-*/index/*
+            # Read the operator-authored manifest; publish the resolved set.
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource:
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/config/testbed
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/testbed/*
+            - Effect: Allow
+              Action: ssm:PutParameter
+              Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/testbed/*
+            # DescribeSecret only — metadata, never the value. Deliberately NOT
+            # GetSecretValue: the seeder has no reason to hold a password, and the boundary
+            # is enforced by the API rather than by a WithDecryption flag staying false.
+            #
+            # The trailing `*` is REQUIRED, and not just a prefix wildcard: Secrets Manager
+            # appends a random six-character suffix to every secret ARN, so a pattern ending
+            # at the secret name matches nothing (same trap as PORTH-532).
+            - Effect: Allow
+              Action: secretsmanager:DescribeSecret
+              Resource: !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:porth/testbed/*
+            # For the manifest parameter when it is a SecureString.
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: '*'
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+      Events:
+        SeedPost:
+          Type: Api
+          Properties:
+            RestApiId: !Ref QaToolsRestApi
+            Path: /qa/seed
+            Method: POST
+
+Outputs:
+  QaToolsApiEndpoint:
+    Description: QA tools API Gateway endpoint
+    Value: !Sub "https://${QaToolsRestApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+  QaCleanupUrl:
+    Description: QA cleanup endpoint
+    Value: !Sub "https://${QaToolsRestApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/qa/cleanup"
+  QaCleanupFunctionArn:
+    Description: Invoked by reset-env.yml, once per table
+    Value: !GetAtt QaCleanupFunction.Arn
+  QaSeedUrl:
+    Description: QA seed endpoint
+    Value: !Sub "https://${QaToolsRestApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/qa/seed"
+  QaSeedFunctionArn:
+    Description: Invoked by porth-seed-testbed.yml with the tenant manifest
+    Value: !GetAtt QaSeedFunction.Arn
+  QaSeedEnvScope:
+    Description: ADR-Z8 slot the seeder writes under (ENV#{scope}#…)
+    Value: !Ref EnvScope

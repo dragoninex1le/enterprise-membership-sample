@@ -31,9 +31,12 @@ name: Porth components — install + upgrade
 #   vars.API_DOMAIN_NAME              (or legacy vars.PORTH_API_DOMAIN_NAME)
 #   vars.PORTH_SPA_ORIGINS            CSV of SPA origins, e.g. https://app.ems.estynsoftware.cloud
 #   secrets.ACM_CERTIFICATE_ARN       cert for the custom domain (us-east-1)
-#   secrets.PLATFORM_AUTH0_DOMAIN / _CLIENT_ID / _AUDIENCE
 #   secrets.PORTH_AUTH_TEST_TOKEN     (optional) authorizer test-token bypass
-#   secrets.PORTH_TENANT_CONFIG       (optional) audience override
+#
+# Everything above describes the STACK's shape. Identity configuration is not here — it lives
+# in SSM at /porth/config/testbed under `platform.idp`, in the account it authenticates
+# against (PORTH-530). PLATFORM_AUTH0_DOMAIN / _CLIENT_ID / _AUDIENCE and PORTH_TENANT_CONFIG
+# are no longer read by this workflow and can be deleted from the repo's secrets.
 #
 on:
   workflow_dispatch:
@@ -522,27 +525,53 @@ jobs:
       # cookie). sessions_table + kms come from the stack outputs above. spa_origins is
       # sourced from the SAME PORTH_SPA_ORIGINS var as the authorizer's SpaOrigins param,
       # so the two cannot drift.
+      # PORTH-530: the IdP half of this blob comes from SSM /porth/config/testbed
+      # (`platform.idp`), not from GitHub secrets. Identity configuration belongs in the
+      # account it authenticates against — this repo is public, and a repo secret is
+      # unversioned, unaudited, and masked in logs only when it is the exact literal value.
+      # The rest of the blob stays derived from the stack outputs and the install vars,
+      # because it describes the stack's shape rather than the identity provider.
+      #
+      # NOT continue-on-error. Without this blob the BFF proxy is completely inert — no
+      # browser login completes — so swallowing a failure here produces a green install that
+      # cannot authenticate anyone, with nothing in the log saying so.
       - name: Seed OAuth-proxy config blob (/porth/auth)
-        continue-on-error: true
-        env:
-          A0_DOMAIN: ${{ secrets.PLATFORM_AUTH0_DOMAIN }}
-          A0_CLIENT_ID: ${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}
-          A0_AUDIENCE: ${{ secrets.PLATFORM_AUTH0_AUDIENCE }}
         run: |
           set -euo pipefail
-          if [ -z "${A0_DOMAIN:-}" ] || [ -z "${PORTH_DNS_ZONE:-}" ] || [ -z "${PORTH_DOMAIN:-}" ]; then
-            echo "::warning::Missing PLATFORM_AUTH0_DOMAIN / DNS_ZONE / API domain — skipping /porth/auth seed (proxy stays inert)"
-            exit 0
+          if [ -z "${PORTH_DNS_ZONE:-}" ] || [ -z "${PORTH_DOMAIN:-}" ]; then
+            echo "::error::DNS_ZONE / API domain are unset — /porth/auth cannot be built and the proxy would stay inert"
+            exit 1
           fi
-          BLOB=$(python3 -c '
-          import json, os
-          d = os.environ["A0_DOMAIN"].rstrip("."); z = os.environ["PORTH_DNS_ZONE"].rstrip(".")
-          print(json.dumps({
-              "issuer": f"https://{d}/",
-              "jwks_uri": f"https://{d}/.well-known/jwks.json",
-              "interactive_client_id": os.environ.get("A0_CLIENT_ID", ""),
-              "audience": os.environ.get("A0_AUDIENCE", ""),
-              "protocol": "auth0",
+
+          # --with-decryption so the parameter works as String or SecureString.
+          MANIFEST=$(aws ssm get-parameter --name /porth/config/testbed --with-decryption \
+            --query Parameter.Value --output text --region "$AWS_REGION" 2>/dev/null || echo "")
+          if [ -z "$MANIFEST" ]; then
+            echo "::error::/porth/config/testbed is absent — it holds the platform IdP config."
+            echo "::error::Create it with:"
+            echo "::error::  aws ssm put-parameter --name /porth/config/testbed --type SecureString --value file://manifest.json"
+            exit 1
+          fi
+
+          BLOB=$(MANIFEST="$MANIFEST" python3 -c '
+          import json, os, sys
+          manifest = json.loads(os.environ["MANIFEST"])
+          idp = (manifest.get("platform") or {}).get("idp") or {}
+          missing = [k for k in ("issuer", "jwks_uri") if not idp.get(k)]
+          if missing:
+              print(f"::error::platform.idp is missing {missing} (PORTH-488 needs both)", file=sys.stderr)
+              raise SystemExit(1)
+
+          z = os.environ["PORTH_DNS_ZONE"].rstrip(".")
+          blob = {
+              # Identity — from the manifest, verbatim. `client_id` is named
+              # interactive_client_id here because that is what the proxy reads.
+              "issuer": idp["issuer"],
+              "jwks_uri": idp["jwks_uri"],
+              "interactive_client_id": idp.get("client_id", ""),
+              "audience": idp.get("audience", ""),
+              "protocol": idp.get("protocol", "oidc"),
+              # Stack shape — derived, stays in the pipeline.
               "custom_domain": os.environ.get("PORTH_DOMAIN", ""),
               "cookie_domain": f".{z}",
               "dns_zone": z,
@@ -551,16 +580,17 @@ jobs:
               "environment": os.environ.get("EFF_FIXED_ENV", ""),
               "sessions_table": os.environ.get("PORTH_SESSIONS_TABLE", ""),
               "session_kms_key_id": os.environ.get("PORTH_SESSION_KMS", ""),
-              "end_session_endpoint": f"https://{d}/v2/logout",
-          }))
+          }
+          # Providers without RP-initiated logout simply omit it.
+          if idp.get("end_session_endpoint"):
+              blob["end_session_endpoint"] = idp["end_session_endpoint"]
+          print(json.dumps(blob))
           ')
+
           echo "→ writing /porth/auth blob"
           aws ssm put-parameter --name /porth/auth --type String --overwrite \
             --value "$BLOB" --region "$AWS_REGION"
-          echo "← read-back /porth/auth:"
-          aws ssm get-parameter --name /porth/auth --query Parameter.Value --output text --region "$AWS_REGION" 2>&1 | head -c 800 || true
-          echo
-          echo "✅ Seeded /porth/auth"
+          echo "✅ Seeded /porth/auth (issuer $(echo "$BLOB" | python3 -c 'import json,sys; print(json.load(sys.stdin)["issuer"])'))"
 
       # Bootstrap runs on every successful install/upgrade (and on no-op) — the
       # platform tenant is independent of the CloudFormation stack and the
@@ -579,51 +609,55 @@ jobs:
           echo "✅ Platform tenant bootstrapped under ENV#${EFF_FIXED_ENV}#"
 
       - name: Patch platform tenant IdP config (direct DynamoDB)
-        # Writes idp_config_override directly to DynamoDB — same pattern as the
-        # bootstrap script — bypassing the Porth API (which requires EventBridge
-        # PutEvents that the Lambda execution role may be missing in this account).
-        # The authorizer reads idp_config from DynamoDB and will pick this up on
-        # the next cache miss (PORTH-471).
-        env:
-          PORTH_TENANT_CONFIG: ${{ secrets.PORTH_TENANT_CONFIG }}
+        # Sourced from /porth/auth, written in the step above from the manifest's
+        # `platform.idp`. Reading it back rather than re-deriving guarantees the authorizer
+        # (which reads this DynamoDB record) and the BFF proxy (which reads the blob) agree
+        # on the issuer — a mismatch between them surfaces as an opaque token rejection.
+        #
+        # Written directly to DynamoDB rather than through the Porth API, which requires
+        # EventBridge PutEvents the Lambda execution role may not have. PORTH-514: the record
+        # must sit at the env-scoped key the authorizer actually reads.
         run: |
           set -euo pipefail
-          # Audience: prefer PORTH_TENANT_CONFIG JSON, fall back to secret.
-          AUDIENCE=$(echo "$PORTH_TENANT_CONFIG" | python3 -c \
-            "import json,sys; raw=sys.stdin.read().strip(); d=json.loads(raw); d=d if isinstance(d,dict) else json.loads(d); print(d.get('audience',''),end='')" \
-            2>/dev/null || true)
-          if [ -z "$AUDIENCE" ]; then
-            AUDIENCE="${{ secrets.PLATFORM_AUTH0_AUDIENCE }}"
-          fi
-          DOMAIN="${{ secrets.PLATFORM_AUTH0_DOMAIN }}"
-          CLIENT_ID="${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}"
-          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          BLOB=$(aws ssm get-parameter --name /porth/auth \
+            --query Parameter.Value --output text --region "$AWS_REGION")
 
-          # PORTH-488: 0.1.16 resolves tenants on a NEUTRAL OIDC config (issuer + jwks_uri),
-          # not the legacy Auth0 {domain, client_id} pair. PORTH-514: the record must sit at
-          # the env-scoped key the authorizer actually reads.
-          ISSUER="https://${DOMAIN}/"
-          JWKS_URI="https://${DOMAIN}/.well-known/jwks.json"
-          PLATFORM_PK="ENV#${EFF_FIXED_ENV}#TENANT#platform"
+          # Built in Python and passed by file — the DynamoDB attribute-value JSON is far too
+          # quoting-hostile to assemble inline in shell.
+          PLATFORM_PK="ENV#${EFF_FIXED_ENV}#TENANT#platform" BLOB="$BLOB" python3 - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
 
-          echo "Writing neutral idp_config_override (pk=${PLATFORM_PK} issuer=${ISSUER} audience-len=${#AUDIENCE})"
+          blob = json.loads(os.environ["BLOB"])
+          idp = {
+              "issuer": blob["issuer"],
+              "jwks_uri": blob["jwks_uri"],
+              "client_id": blob.get("interactive_client_id", ""),
+              "audience": blob.get("audience", ""),
+              "protocol": blob.get("protocol", "oidc"),
+          }
+          json.dump(
+              {
+                  ":idp": {"M": {k: {"S": v} for k, v in idp.items()}},
+                  ":tier": {"S": "production"},
+                  ":ua": {"S": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
+              },
+              open("/tmp/idp-values.json", "w"),
+          )
+          json.dump(
+              {"PK": {"S": os.environ["PLATFORM_PK"]}, "SK": {"S": "METADATA"}},
+              open("/tmp/idp-key.json", "w"),
+          )
+          print(f"Writing idp_config_override (pk={os.environ['PLATFORM_PK']} issuer={idp['issuer']})")
+          PY
+
           aws dynamodb update-item \
             --table-name "$PORTH_TENANTS_TABLE" \
-            --key "{\"PK\":{\"S\":\"${PLATFORM_PK}\"},\"SK\":{\"S\":\"METADATA\"}}" \
+            --key file:///tmp/idp-key.json \
             --update-expression "SET idp_config_override = :idp, tenant_tier = :tier, updated_at = :ua" \
-            --expression-attribute-values "{
-              \":idp\":{\"M\":{
-                \"issuer\":{\"S\":\"${ISSUER}\"},
-                \"jwks_uri\":{\"S\":\"${JWKS_URI}\"},
-                \"client_id\":{\"S\":\"${CLIENT_ID}\"},
-                \"audience\":{\"S\":\"${AUDIENCE}\"},
-                \"protocol\":{\"S\":\"auth0\"}
-              }},
-              \":tier\":{\"S\":\"production\"},
-              \":ua\":{\"S\":\"${NOW}\"}
-            }" \
+            --expression-attribute-values file:///tmp/idp-values.json \
             --region "$AWS_REGION"
-          echo "✅ Platform tenant IdP config + tenant_tier updated (direct DynamoDB)"
+          echo "✅ Platform tenant IdP config + tenant_tier updated"
 
       # ── Seed SSM auth-policy + session-policy templates ─────────────────────
       # Components deploy.yml seeds these after every deploy, but porth-install

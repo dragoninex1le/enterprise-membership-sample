@@ -1,0 +1,134 @@
+name: Deploy Porth QA Tools
+
+# Deploys infra/qa-tools into THIS account (195950944420) under EMS's own OIDC role.
+#
+# The stack is a prerequisite for two other workflows:
+#   * reset-env.yml     — resolves QaCleanupFunctionArn to wipe the Porth tables
+#   * porth-seed-testbed.yml — resolves QaSeedFunctionArn to refill them
+#
+# Both fail with an actionable message if it is absent.
+#
+# These Lambdas previously lived in the private Components repo, which would have required a
+# cross-account deploy role for Components CI to reach this account. They are EMS's tooling —
+# the seeder's reserved-name guard protects an e2e spec in this repo — so they live here and
+# no cross-account credential exists.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/qa-tools/**'
+      - '.github/workflows/deploy-qa-tools.yml'
+  workflow_dispatch:
+    inputs:
+      environment_name:
+        description: 'Porth table-name suffix (must match the Porth install Environment)'
+        required: false
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+      env_scope:
+        description: >
+          ADR-Z8 slot the seeder writes under (ENV#{scope}#…). DATA axis — must match the Porth
+          install's FixedEnvironment. Distinct from the table-name suffix above.
+        required: false
+        default: 'prod'
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: porth-qa-tools-deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  STACK_NAME: porth-qa-tools
+  ENVIRONMENT: ${{ inputs.environment_name || 'dev' }}
+  ENV_SCOPE: ${{ inputs.env_scope || 'prod' }}
+
+jobs:
+  deploy:
+    name: Deploy QA tools stack
+    runs-on: ubuntu-latest
+    environment: porth-install
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Offline, no AWS. Gates the deploy because a regression in the seeder's key scoping is
+      # a silent failure: records land where the authorizer never looks and everything reports
+      # success (PORTH-514).
+      - name: Test the QA tools Lambdas
+        run: |
+          python3 -m pip install --quiet pytest boto3
+          python3 -m pytest infra/qa-tools/tests -q
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: SAM build
+        run: sam build --template-file infra/qa-tools/template.yml
+
+      - name: SAM deploy
+        run: |
+          sam deploy \
+            --stack-name "$STACK_NAME" \
+            --resolve-s3 \
+            --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --region "$AWS_REGION" \
+            --parameter-overrides "Environment=$ENVIRONMENT" "EnvScope=$ENV_SCOPE"
+
+      - name: Smoke test — both routes must reject an unsigned request
+        run: |
+          set -euo pipefail
+          get_output() {
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue | [0]" \
+              --output text --region "$AWS_REGION"
+          }
+          FAILED=0
+          for OUT in QaCleanupUrl QaSeedUrl; do
+            URL=$(get_output "$OUT")
+            CODE=$(curl -s -o /tmp/qa-response.json -w "%{http_code}" \
+              -X POST "$URL" -H "Content-Type: application/json" -d '{}')
+            echo "$OUT → HTTP $CODE"
+            if [ "$CODE" != "403" ]; then
+              echo "::error::$OUT returned $CODE (expected 403 for an unsigned request)"
+              cat /tmp/qa-response.json || true
+              FAILED=1
+            fi
+          done
+          [ "$FAILED" -eq 0 ] || exit 1
+          echo "IAM auth active on both routes"
+
+      - name: Summary
+        run: |
+          {
+            echo "## QA tools deployed"
+            echo ""
+            echo "- **Tables:** \`porth-*-${ENVIRONMENT}\`"
+            echo "- **Env scope:** \`${ENV_SCOPE}\` (records at \`ENV#${ENV_SCOPE}#…\`)"
+            echo ""
+            aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" \
+              --query "Stacks[0].Outputs[?OutputKey=='QaCleanupFunctionArn' || OutputKey=='QaSeedFunctionArn'].[OutputKey,OutputValue]" \
+              --output text | while read -r k v; do echo "- \`$k\` = \`$v\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"

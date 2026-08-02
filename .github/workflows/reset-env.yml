@@ -171,53 +171,57 @@ jobs:
           echo "✅ Platform tenant bootstrapped under ENV#${ENV_SCOPE}#"
 
       - name: Patch platform tenant IdP config (direct DynamoDB)
-        # PORTH-532: was `PATCH /tenants/platform` with a retry loop. That is
-        # chicken-and-egg during a reset — the API needs a working authorizer,
-        # which is exactly what a missing/misscoped platform tenant prevents.
-        # Writing DynamoDB directly is what porth-install already does.
-        env:
-          PORTH_TENANT_CONFIG: ${{ secrets.PORTH_TENANT_CONFIG }}
+        # PORTH-532: was `PATCH /tenants/platform` with a retry loop. That is chicken-and-egg
+        # during a reset — the API needs a working authorizer, which is exactly what a
+        # missing or misscoped platform tenant prevents.
+        #
+        # PORTH-530: sourced from /porth/auth (written by porth-install from the manifest's
+        # `platform.idp`) rather than from repo secrets. Reading the same blob the proxy uses
+        # means the authorizer and the proxy cannot disagree on the issuer.
         run: |
           set -euo pipefail
-          AUDIENCE=$(echo "$PORTH_TENANT_CONFIG" | python3 -c \
-            "import json,sys; raw=sys.stdin.read().strip(); d=json.loads(raw) if raw else {}; d=d if isinstance(d,dict) else json.loads(d); print(d.get('audience',''),end='')" \
-            2>/dev/null || true)
-          if [ -z "$AUDIENCE" ]; then
-            AUDIENCE="${{ secrets.PLATFORM_AUTH0_AUDIENCE }}"
-          fi
-          DOMAIN="${{ secrets.PLATFORM_AUTH0_DOMAIN }}"
-          CLIENT_ID="${{ secrets.PLATFORM_AUTH0_CLIENT_ID }}"
-          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-          if [ -z "$DOMAIN" ]; then
-            echo "::warning::PLATFORM_AUTH0_DOMAIN not set — skipping IdP config patch"
-            exit 0
+          BLOB=$(aws ssm get-parameter --name /porth/auth \
+            --query Parameter.Value --output text --region "$AWS_REGION" 2>/dev/null || echo "")
+          if [ -z "$BLOB" ]; then
+            echo "::error::/porth/auth is absent — run porth-install first; it builds the blob"
+            echo "::error::from /porth/config/testbed and this step reads it back."
+            exit 1
           fi
 
-          # PORTH-488: SAR 0.1.16 resolves tenants on a NEUTRAL OIDC config —
-          # issuer + jwks_uri — not the legacy Auth0 {domain, client_id} pair.
-          ISSUER="https://${DOMAIN}/"
-          JWKS_URI="https://${DOMAIN}/.well-known/jwks.json"
-          PLATFORM_PK="ENV#${ENV_SCOPE}#TENANT#platform"
+          PLATFORM_PK="ENV#${ENV_SCOPE}#TENANT#platform" BLOB="$BLOB" python3 - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
 
-          echo "Writing neutral idp_config_override (pk=${PLATFORM_PK} issuer=${ISSUER} audience-len=${#AUDIENCE})"
+          blob = json.loads(os.environ["BLOB"])
+          idp = {
+              "issuer": blob["issuer"],
+              "jwks_uri": blob["jwks_uri"],
+              "client_id": blob.get("interactive_client_id", ""),
+              "audience": blob.get("audience", ""),
+              "protocol": blob.get("protocol", "oidc"),
+          }
+          json.dump(
+              {
+                  ":idp": {"M": {k: {"S": v} for k, v in idp.items()}},
+                  ":tier": {"S": "production"},
+                  ":ua": {"S": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
+              },
+              open("/tmp/idp-values.json", "w"),
+          )
+          json.dump(
+              {"PK": {"S": os.environ["PLATFORM_PK"]}, "SK": {"S": "METADATA"}},
+              open("/tmp/idp-key.json", "w"),
+          )
+          print(f"Writing idp_config_override (pk={os.environ['PLATFORM_PK']} issuer={idp['issuer']})")
+          PY
+
           aws dynamodb update-item \
             --table-name "$PORTH_TENANTS_TABLE" \
-            --key "{\"PK\":{\"S\":\"${PLATFORM_PK}\"},\"SK\":{\"S\":\"METADATA\"}}" \
+            --key file:///tmp/idp-key.json \
             --update-expression "SET idp_config_override = :idp, tenant_tier = :tier, updated_at = :ua" \
-            --expression-attribute-values "{
-              \":idp\":{\"M\":{
-                \"issuer\":{\"S\":\"${ISSUER}\"},
-                \"jwks_uri\":{\"S\":\"${JWKS_URI}\"},
-                \"client_id\":{\"S\":\"${CLIENT_ID}\"},
-                \"audience\":{\"S\":\"${AUDIENCE}\"},
-                \"protocol\":{\"S\":\"auth0\"}
-              }},
-              \":tier\":{\"S\":\"production\"},
-              \":ua\":{\"S\":\"${NOW}\"}
-            }" \
+            --expression-attribute-values file:///tmp/idp-values.json \
             --region "$AWS_REGION"
-          echo "✅ Platform tenant IdP config + tenant_tier updated (direct DynamoDB)"
+          echo "✅ Platform tenant IdP config + tenant_tier updated"
 
       - name: Done
         run: |
