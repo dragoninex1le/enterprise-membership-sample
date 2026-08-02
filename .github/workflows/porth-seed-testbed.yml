@@ -5,10 +5,12 @@ name: Porth — seed testbed tenants
 #
 # The workflow holds NO testbed configuration. The manifest lives in SSM at
 # /porth/config/testbed and is read by the Lambda in-account; this job passes only the
-# environment slot. Test-tenant passwords are in Secrets Manager, referenced from the
-# manifest by name — the seeder only calls DescribeSecret and cannot read a value. That keeps the testbed's configuration in the account it configures —
+# environment slot. That keeps the testbed's configuration in the account it configures —
 # versioned and audited by SSM — rather than in a public repo's variables, where it is
 # neither, and where GitHub masks only exact registered secret values anyway.
+#
+# Test-tenant passwords are in Secrets Manager, referenced from the manifest by name. The
+# seeder only calls DescribeSecret and is structurally incapable of reading a value.
 #
 # Order of operations:
 #   reset-env  →  porth-seed-testbed  →  Tier 2 e2e / PORTH-494
@@ -66,8 +68,8 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       # Read-only pre-check, so a missing or malformed manifest names the SSM parameter to fix
-      # rather than surfacing as a Lambda error. The manifest is non-secret by construction —
-      # it carries `password_ssm` paths, never values.
+      # rather than surfacing as a Lambda error. What it prints is non-secret by construction —
+      # the manifest carries `password_secret` names, never values.
       - name: Show the manifest
         run: |
           set -euo pipefail
