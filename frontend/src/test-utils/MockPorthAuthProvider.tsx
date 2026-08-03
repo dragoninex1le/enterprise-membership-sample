@@ -28,7 +28,7 @@ const FAKE_SESSION = {
   csrf_token: 'e2e-fake-csrf',
 }
 
-const AUTH_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
+const AUTH_BASE = ''
 
 // GUARDED. main.tsx imports this module unconditionally and only guards the
 // render, so an unguarded side effect here would install the stub in the

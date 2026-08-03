@@ -189,11 +189,40 @@ Resources:
           AllowedMethods: [GET, HEAD, OPTIONS]
           CachedMethods: [GET, HEAD]
           Compress: true
+        # PORTH-531 / ADR-Z9 "Path B" — serve the BFF auth routes SAME-ORIGIN.
+        #
+        # The SPA and the Porth API are different subdomains, so calling
+        # /auth/me cross-origin with credentials:'include' is rejected outright:
+        # a credentialed request may not receive Access-Control-Allow-Origin: *,
+        # which is what Porth answers by default. Routing /auth/* through this
+        # distribution removes the cross-origin hop entirely and makes the
+        # session cookie host-only. Same arrangement as the Style Classifier
+        # admin app.
+        CacheBehaviors:
+          - PathPattern: /auth/*
+            TargetOriginId: PorthApiOrigin
+            ViewerProtocolPolicy: https-only
+            # CachingDisabled — these are auth redirects and session reads;
+            # caching any of them would serve one user's session to another.
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            # AllViewerExceptHostHeader — forwards cookies, query strings and
+            # viewer headers, but sends the ORIGIN's Host, which API Gateway's
+            # custom domain needs to route the request.
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            Compress: true
         Origins:
           - Id: S3Origin
             DomainName: !GetAtt AdminUIBucket.RegionalDomainName
             OriginAccessControlId: !GetAtt CloudFrontOAC.Id
             S3OriginConfig: {}
+          - Id: PorthApiOrigin
+            # PorthApiUrl is "https://host" — index 2 of the "/"-split is the host.
+            DomainName: !Select [2, !Split ["/", !Ref PorthApiUrl]]
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: [TLSv1.2]
 
 Outputs:
 

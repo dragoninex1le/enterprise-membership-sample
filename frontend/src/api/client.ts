@@ -29,7 +29,7 @@ let _csrf: string | null = null
 async function getCsrf(): Promise<string | null> {
   if (_csrf) return _csrf
   try {
-    const r = await fetch(`${import.meta.env.VITE_API_BASE_URL ?? ''}/auth/me`, {
+    const r = await fetch('/auth/me', {
       credentials: 'include',
       headers: { Accept: 'application/json' },
     })

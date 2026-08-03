@@ -10,12 +10,16 @@ import './index.css'
 import { MockPorthAuthProvider } from './test-utils/MockPorthAuthProvider'
 const E2E_AUTH = import.meta.env.VITE_E2E_AUTH === 'true'
 
-// PORTH-531 / ADR-Z9. The /auth/* routes live on the same account-level Porth API
-// as everything else (`/auth/{proxy+}` in the Porth template), so the auth base is
-// the API base — there is no second host and no extra stack output. Override with
-// VITE_AUTH_BASE_URL only if they ever diverge (e.g. a local proxy in dev).
-const authBaseUrl =
-  import.meta.env.VITE_AUTH_BASE_URL ?? import.meta.env.VITE_API_BASE_URL ?? ''
+// PORTH-531 / ADR-Z9 "Path B": CloudFront routes /auth/* on the SPA's OWN host to
+// the Porth API (see CacheBehaviors in template.yml), so the auth base is empty and
+// the SDK calls relative /auth/login|me|logout.
+//
+// This is not a preference. A credentialed cross-origin fetch may not receive
+// Access-Control-Allow-Origin: *, which is what Porth answers — so calling the API
+// host directly is refused by the browser before the request is even sent. Serving
+// the routes same-origin removes the cross-origin hop and makes the session cookie
+// host-only. Override with VITE_AUTH_BASE_URL only for local dev against a proxy.
+const authBaseUrl = import.meta.env.VITE_AUTH_BASE_URL ?? ''
 
 function TenantBootstrap() {
   const { config, loading, error } = useTenantConfig()
