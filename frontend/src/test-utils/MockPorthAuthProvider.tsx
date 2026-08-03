@@ -30,19 +30,26 @@ const FAKE_SESSION = {
 
 const AUTH_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
 
-// Installed once at module load, before the provider's first effect runs.
-const realFetch = globalThis.fetch.bind(globalThis)
-globalThis.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
-  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-  if (url.startsWith(`${AUTH_BASE}/auth/me`) || url.startsWith('/auth/me')) {
-    return Promise.resolve(
-      new Response(JSON.stringify(FAKE_SESSION), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }),
-    )
+// GUARDED. main.tsx imports this module unconditionally and only guards the
+// render, so an unguarded side effect here would install the stub in the
+// PRODUCTION bundle and fake an authenticated session for real users. That is
+// exactly what happened on the first deploy of this migration: the live admin UI
+// came up as `e2e|platform-admin`. The env check must live here, next to the side
+// effect — not only at the call site.
+if (import.meta.env.VITE_E2E_AUTH === 'true') {
+  const realFetch = globalThis.fetch.bind(globalThis)
+  globalThis.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    if (url.startsWith(`${AUTH_BASE}/auth/me`) || url.startsWith('/auth/me')) {
+      return Promise.resolve(
+        new Response(JSON.stringify(FAKE_SESSION), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+    }
+    return realFetch(input, init)
   }
-  return realFetch(input, init)
 }
 
 export function MockPorthAuthProvider({ children }: { children: ReactNode }) {
