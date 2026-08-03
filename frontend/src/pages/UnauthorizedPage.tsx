@@ -1,16 +1,19 @@
 import { useAuth } from '@estyn/porth-admin/auth'
 import { usePorthContext } from '../context/PorthContext'
 
-const ROLES_CLAIM = 'https://porth.io/roles'
-
 export default function UnauthorizedPage() {
   const { isAuthenticated, signoutRedirect, user } = useAuth()
   const { currentUser, userError, tenantConfig } = usePorthContext()
 
   // Roles claim as resolved server-side and passed through on the session
   // profile. The browser never sees a JWT under the BFF (ADR-Z9), so this
-  // reads from `user.claims`, not a decoded token.
-  const jwtRolesClaim: string[] = (user?.claims?.[ROLES_CLAIM] as string[]) ?? []
+  // reads from `user.claims`, not a decoded token. The claim KEY is the
+  // install's namespace ({audience}/roles) from useTenantConfig — a hardcoded
+  // key here once showed https://porth.io/roles on an install whose real
+  // namespace is https://porth.ems.estynsoftware.io/roles, which is actively
+  // misleading when the thing being debugged IS the namespace.
+  const rolesClaim = tenantConfig?.rolesNamespace ?? ''
+  const jwtRolesClaim: string[] = (rolesClaim ? (user?.claims?.[rolesClaim] as string[]) : undefined) ?? []
 
   return (
     <div className="flex h-screen items-center justify-center bg-gray-50 p-6">
@@ -43,7 +46,7 @@ export default function UnauthorizedPage() {
 
             <div>
               <span className="text-gray-500">JWT roles claim </span>
-              <span className="text-gray-400">({ROLES_CLAIM}): </span>
+              <span className="text-gray-400">({rolesClaim || 'namespace unknown'}): </span>
               {jwtRolesClaim.length > 0
                 ? <span className="text-green-700">[{jwtRolesClaim.join(', ')}]</span>
                 : <span className="text-red-500">[ ] (missing or empty — check the claim mapping)</span>
