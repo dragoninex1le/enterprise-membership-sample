@@ -54,7 +54,7 @@ export default function UnauthorizedPage() {
               <span className="text-gray-500">Tenant: </span>
               <span className="text-gray-900">{tenantConfig?.tenantId ?? '—'}</span>
               <span className="text-gray-400"> / org: </span>
-              <span className="text-gray-900">{tenantConfig?.organizationId ?? '—'}</span>
+              <span className="text-gray-900">{currentUser?.porthUser?.organization_id ?? '—'}</span>
             </div>
 
             <div>
