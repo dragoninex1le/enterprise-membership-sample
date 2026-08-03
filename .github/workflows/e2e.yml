@@ -11,15 +11,25 @@ on:
     types: [completed]
     branches: [main]
 
-# PORTH-540: no id-token here. This workflow never calls configure-aws-credentials, so the
-# OIDC grant was vestigial — and on a public repo an unnecessary token permission is worth
-# not having. Restore it if the suite ever needs to read credentials from SSM (PORTH-533).
+# PORTH-540 removed the OIDC grant as vestigial, noting to restore it when the suite
+# needs credentials. That moment is PORTH-531: @estyn/porth-admin resolves from the Porth
+# CodeArtifact repo (frontend/.npmrc reads CODEARTIFACT_AUTH_TOKEN), so installing
+# dependencies now requires an AWS role — without it npm dies with E401 before any test
+# starts. Fork PRs cannot reach the environment's role and will fail at the credentials
+# step; acceptable for this sample repo.
 permissions:
+  id-token: write
   contents: read
+
+env:
+  AWS_REGION: us-east-1
 
 jobs:
   e2e:
     runs-on: ubuntu-latest
+    # Same environment as deploy.yml: its role provably holds the CodeArtifact
+    # permissions (every green deploy runs the identical token step).
+    environment: sample-app-deploy
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,7 +39,27 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '20', cache: 'npm', cache-dependency-path: 'frontend/package-lock.json' }
 
-      - run: npm ci
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Same pattern as deploy.yml — frontend/.npmrc points the @estyn scope at the
+      # porth-npm CodeArtifact repo and reads the token from this env var.
+      - name: Authenticate npm to CodeArtifact (porth-npm for @estyn/porth-admin)
+        run: |
+          set -euo pipefail
+          TOKEN=$(aws codeartifact get-authorization-token \
+            --domain porth --domain-owner 084847995635 \
+            --query authorizationToken --output text --region "$AWS_REGION")
+          echo "::add-mask::${TOKEN}"
+          echo "CODEARTIFACT_AUTH_TOKEN=${TOKEN}" >> "$GITHUB_ENV"
+
+      # npm install rather than ci: @estyn/porth-admin is not yet in package-lock.json,
+      # which `npm ci` refuses to reconcile. Revert alongside deploy.yml once the
+      # lockfile is regenerated against CodeArtifact.
+      - run: npm install
         working-directory: frontend
 
       - name: Cache Playwright browsers
