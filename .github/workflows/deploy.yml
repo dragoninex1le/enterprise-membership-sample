@@ -151,7 +151,14 @@ jobs:
         working-directory: frontend
         run: npm run build
         env:
-          VITE_API_BASE_URL: ${{ env.PORTH_API_URL }}
+          # PORTH-531: the SPA calls the Porth API same-origin under the /porth
+          # prefix (a CloudFront behaviour strips it — see template.yml). The
+          # absolute PorthApiUrl must NOT be baked into the bundle: a
+          # credentialed cross-origin call cannot pass Porth's preflight
+          # (ACAO * without credentials, no X-CSRF-Token in the allow-list).
+          # PORTH_API_URL is still resolved above — SAM needs it as the
+          # CloudFront origin.
+          VITE_API_BASE_URL: /porth
           VITE_SAMPLE_APP_API_URL: ${{ env.SAMPLE_APP_API_URL }}
           VITE_PLATFORM_APEX: porth-sample
 
