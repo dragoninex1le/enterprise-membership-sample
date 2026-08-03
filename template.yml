@@ -212,6 +212,33 @@ Resources:
             AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
             CachedMethods: [GET, HEAD]
             Compress: true
+          # PORTH-531 — the API must be same-origin too, not only /auth/*.
+          #
+          # A credentialed cross-origin call to the Porth API can never pass the
+          # browser's preflight: the API answers Access-Control-Allow-Origin: *
+          # with no Allow-Credentials, and its allowed headers do not include
+          # X-CSRF-Token (verified against the live API). SpaOrigins does not
+          # change that — it feeds the authorizer's Origin allow-list, a
+          # different layer. So the SPA calls the relative /porth prefix and
+          # this behaviour forwards it to the API, with a CloudFront Function
+          # stripping the prefix. Same arrangement as the Style Classifier
+          # admin app ("the API base is the relative /porth prefix; CloudFront
+          # strips it → the Porth API").
+          - PathPattern: /porth/*
+            TargetOriginId: PorthApiOrigin
+            ViewerProtocolPolicy: https-only
+            # CachingDisabled — authenticated API reads and writes.
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            # AllViewerExceptHostHeader — forwards the empty Authorization
+            # bearer (the authorizer's identity source), cookies and
+            # X-CSRF-Token; sends the origin's Host for the API custom domain.
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt PorthApiPathStripFunction.FunctionMetadata.FunctionARN
         Origins:
           - Id: S3Origin
             DomainName: !GetAtt AdminUIBucket.RegionalDomainName
@@ -223,6 +250,24 @@ Resources:
             CustomOriginConfig:
               OriginProtocolPolicy: https-only
               OriginSSLProtocols: [TLSv1.2]
+
+  # Strips the /porth prefix the SPA uses for same-origin API calls; the Porth
+  # API serves its routes at the root of its custom domain (PORTH-531).
+  PorthApiPathStripFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub porth-admin-porth-strip-${Environment}
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Strip the /porth prefix before forwarding to the Porth API origin
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var request = event.request;
+          request.uri = request.uri.replace(/^\/porth/, '');
+          if (request.uri === '') { request.uri = '/'; }
+          return request;
+        }
 
 Outputs:
 
