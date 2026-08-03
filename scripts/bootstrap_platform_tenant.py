@@ -41,6 +41,7 @@ Usage (local):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import uuid
@@ -179,7 +180,13 @@ COMPILED_SOURCE = (
     "\n"
     "    return result\n"
 )
-COMPILED_HASH = "55016a468cbb18927879e32725927fc3d501a7887918f05eed50911918fd6855"
+# sha256 of COMPILED_SOURCE — the same convention the original codegen used (the
+# previous pasted constant equalled sha256 of the previous source, verified).
+# COMPILED_SOURCE now embeds the derived namespace, so the hash MUST be computed:
+# a stale constant makes the idempotency check above compare the OLD hash, report
+# "no change", and skip the very namespace rewrite this script exists to perform —
+# and any row it did write would carry a hash that doesn't match its source.
+COMPILED_HASH = hashlib.sha256(COMPILED_SOURCE.encode()).hexdigest()
 
 
 # ---------------------------------------------------------------------------
