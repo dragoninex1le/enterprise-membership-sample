@@ -1,5 +1,15 @@
-// Default claim namespace used by the Porth platform IdP hook.
-const DEFAULT_ROLES_NAMESPACE = 'https://porth.io/roles'
+// Roles-claim namespace, for DISPLAY ONLY (the diagnostics panel on /unauthorized).
+// Role resolution happens server-side in the authorizer against the claim-mapping
+// config — nothing here affects it.
+//
+// The namespace is "{audience}/roles": Auth0's post-login Action namespaces custom
+// claims with the API identifier, so the value is per-install and cannot be a
+// constant. Derived from the API base so it tracks the install rather than drifting
+// — a hardcoded value here previously showed https://porth.io/roles on an install
+// whose real namespace is https://porth.ems.estynsoftware.io/roles, which is
+// actively misleading when the thing you are debugging IS the namespace.
+const ROLES_NAMESPACE =
+  import.meta.env.VITE_ROLES_NAMESPACE ?? 'https://porth.ems.estynsoftware.io/roles'
 
 export interface TenantConfig {
   tenantId: string
@@ -58,7 +68,7 @@ export function useTenantConfig(): {
   }
 
   return {
-    config: { tenantId, rolesNamespace: DEFAULT_ROLES_NAMESPACE },
+    config: { tenantId, rolesNamespace: ROLES_NAMESPACE },
     loading: false,
     error: null,
   }
