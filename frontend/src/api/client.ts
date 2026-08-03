@@ -1,11 +1,15 @@
 import axios, { type InternalAxiosRequestConfig } from 'axios'
+import { onAuthError } from '../lib/sessionExpiry'
 
 // Porth API client — cookie/BFF mode (ADR-Z9, PORTH-531). The browser holds no
-// token, only the http-only session cookie the Porth BFF set. `withCredentials`
-// sends it on every request; the API answers CORS with Allow-Credentials.
-//
-// Ported from the Style Classifier admin client, which is the proven consumer of
-// this contract. Deviating here is how you get a UI that reads but cannot write.
+// token, only the http-only session cookie the Porth BFF set; `withCredentials`
+// attaches it. The API is served SAME-ORIGIN under /porth (a CloudFront
+// behaviour strips the prefix — see template.yml), because a credentialed
+// cross-origin call to Porth can never pass preflight: Porth answers
+// Access-Control-Allow-Origin: * with no Allow-Credentials, and its allowed
+// headers do not include X-CSRF-Token. Same arrangement as the Style Classifier
+// admin app, the proven consumer of this contract. Deviating here is how you
+// get a UI that reads but cannot write.
 export const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL,
   withCredentials: true,
@@ -69,6 +73,9 @@ apiClient.interceptors.request.use(applyCookieAuth)
 apiClient.interceptors.response.use(
   (res) => res,
   (err) => {
+    // Dead session -> straight back through the BFF login (return_to = here);
+    // never surface "authorizer denied: invalid_session" to the user.
+    void onAuthError(err).catch(() => undefined)
     const detail = err.response?.data?.detail ?? err.response?.data?.message ?? err.message
     return Promise.reject(new Error(Array.isArray(detail) ? detail[0]?.msg : detail))
   },
