@@ -12,7 +12,7 @@ POST /qa/seed with a JSON body (the manifest):
         {
           "tenant_id": "acme",
           "display_name": "Acme Corp",
-          "tenant_tier": "standard",
+          "tenant_tier": "sandbox",             // optional; one of TENANT_TIERS
           "porth_org_id": "ems",                // org slug — find-or-create, resolved to a UUID
           "provider_org_id": "org_XXXX",        // Auth0 Organization id (required for tenant login)
           "reserved_for_e2e": false,            // true => skipped, the slot is left for the e2e test
@@ -79,6 +79,20 @@ TESTBED_CONFIG_PARAM = "/porth/config/testbed"
 TESTBED_MANIFEST_PARAM = "/porth/testbed/tenants"
 
 _TENANT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
+
+# Must mirror the pattern on porth_common.models.tenant.Tenant.tenant_tier. DynamoDB
+# validates nothing, so a tier outside this set writes cleanly and then fails on every
+# READ — the API cannot build a Tenant from the row and answers 400 on
+# GET /tenants/organization/{id}. The seeder reports `created`, and the tenant is simply
+# invisible in the admin UI with no error anywhere in the chain.
+#
+# PORTH-502 renamed environment_type -> tenant_tier and changed the allowed values with
+# it. The old default "standard" was carried through unchanged, so every tenant this
+# seeder has ever written was unreadable. Validated here as well as defaulted, so a bad
+# value in the manifest fails the dry run rather than surfacing days later as a missing
+# row.
+TENANT_TIERS = ("production", "staging", "development", "sandbox")
+DEFAULT_TENANT_TIER = "sandbox"
 
 
 def handler(event, context):
@@ -266,6 +280,13 @@ def _validate_tenant(t) -> list:
                         f"its row lookup is a substring match and would target the wrong tenant"
                     )
 
+    tier = t.get("tenant_tier")
+    if tier is not None and tier not in TENANT_TIERS:
+        problems.append(
+            f"tenant_tier '{tier}' is not one of {', '.join(TENANT_TIERS)} — the row would "
+            f"write cleanly and then 400 on every read"
+        )
+
     problems.extend(_validate_admin(t.get("admin"), "admin"))
     problems.extend(_validate_idp(t.get("idp"), "idp"))
     return problems
@@ -323,8 +344,9 @@ def _seed_tenant(t, tables, secrets, env_scope, dry_run) -> dict:
         "org_id": org_uuid,
         "org_name": t.get("porth_org_id") or tid,
         "display_name": t.get("display_name") or tid,
-        # PORTH-502 renamed environment_type -> tenant_tier.
-        "tenant_tier": t.get("tenant_tier") or "standard",
+        # PORTH-502 renamed environment_type -> tenant_tier. The default must be a member
+        # of TENANT_TIERS — see the note there; an invalid tier is write-valid, read-fatal.
+        "tenant_tier": t.get("tenant_tier") or DEFAULT_TENANT_TIER,
         "status": "active",
         "idp_config_override": idp_config,
         "admin_email": admin["email"],
