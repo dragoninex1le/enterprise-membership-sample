@@ -1,5 +1,5 @@
 import { Navigate, Outlet } from 'react-router-dom'
-import { useAuth0 } from '@auth0/auth0-react'
+import { useAuth } from '@estyn/porth-admin/auth'
 import { usePorthContext } from '../context/PorthContext'
 import { useHasRole } from '../hooks/useRoles'
 
@@ -11,14 +11,14 @@ interface Props {
 }
 
 export default function ProtectedRoute({ roles }: Props) {
-  const { isAuthenticated, isLoading: auth0Loading } = useAuth0()
+  const { isAuthenticated, isLoading: authLoading } = useAuth()
   // Wait for the Porth user (provision + role-fetch) to complete before
   // making access decisions — without this guard, the route redirects to
   // /unauthorized before currentUser is populated, and the user gets stuck.
   const { userLoading } = usePorthContext()
   const allowed = useHasRole(...roles)
 
-  if (auth0Loading || userLoading) return null
+  if (authLoading || userLoading) return null
   if (!isAuthenticated) return <Navigate to="/" replace />
   if (!allowed) return <Navigate to="/unauthorized" replace />
 

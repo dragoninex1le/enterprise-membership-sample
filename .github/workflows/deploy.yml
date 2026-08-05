@@ -127,15 +127,38 @@ jobs:
             --output text 2>/dev/null || echo "")
           echo "SAMPLE_APP_API_URL=${SAMPLE_API_URL}" >> $GITHUB_ENV
 
+      # @estyn/porth-admin (the BFF auth SDK, PORTH-531) is served from the Porth
+      # CodeArtifact npm repo in the Components account, not the public registry.
+      # frontend/.npmrc points the @estyn scope there and reads the token from this
+      # env var. Same pattern as the Style Classifier admin build.
+      - name: Authenticate npm to CodeArtifact (porth-npm for @estyn/porth-admin)
+        run: |
+          set -euo pipefail
+          TOKEN=$(aws codeartifact get-authorization-token \
+            --domain porth --domain-owner 084847995635 \
+            --query authorizationToken --output text --region "$AWS_REGION")
+          echo "::add-mask::${TOKEN}"
+          echo "CODEARTIFACT_AUTH_TOKEN=${TOKEN}" >> "$GITHUB_ENV"
+
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm ci
+        # npm install rather than ci: @estyn/porth-admin is a new dependency and is
+        # not yet in package-lock.json, which `npm ci` refuses to reconcile. Revert
+        # to `npm ci` once the lockfile is regenerated against CodeArtifact.
+        run: npm install
 
       - name: Build frontend
         working-directory: frontend
         run: npm run build
         env:
-          VITE_API_BASE_URL: ${{ env.PORTH_API_URL }}
+          # PORTH-531: the SPA calls the Porth API same-origin under the /porth
+          # prefix (a CloudFront behaviour strips it — see template.yml). The
+          # absolute PorthApiUrl must NOT be baked into the bundle: a
+          # credentialed cross-origin call cannot pass Porth's preflight
+          # (ACAO * without credentials, no X-CSRF-Token in the allow-list).
+          # PORTH_API_URL is still resolved above — SAM needs it as the
+          # CloudFront origin.
+          VITE_API_BASE_URL: /porth
           VITE_SAMPLE_APP_API_URL: ${{ env.SAMPLE_APP_API_URL }}
           VITE_PLATFORM_APEX: porth-sample
 

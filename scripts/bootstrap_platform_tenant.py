@@ -41,6 +41,8 @@ Usage (local):
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import uuid
 from datetime import datetime, timezone
@@ -72,12 +74,46 @@ PERMISSIONS = [
     {"key": "platform.settings.write", "display_name": "Edit Platform Settings",  "category": "Settings",      "sort_order": 20},
 ]
 
+# The roles-claim namespace is derived from the Auth0 API identifier (the audience),
+# because that is what the post-login Action namespaces its custom claims with. The two
+# MUST agree: the mapping matches the claim key character-for-character, so a namespace
+# that doesn't match the audience means the claim is never found, roles resolve empty,
+# and the admin gets no menu — with nothing in the logs saying why (PORTH-479).
+#
+# It was previously hardcoded to "https://porth.io/roles", which is not this install's
+# audience. Style Classifier uses "https://porth.elegans-dev.estynsoftware.io/roles",
+# matching ITS audience — the value is per-install, so it cannot be a constant.
+def _roles_namespace() -> str:
+    explicit = os.environ.get("PORTH_ROLES_NAMESPACE", "").strip()
+    if explicit:
+        return explicit
+
+    audience = os.environ.get("PORTH_AUTH_AUDIENCE", "").strip()
+    if not audience:
+        # Read it from the same blob the proxy and authorizer use, so there is one
+        # source of truth rather than a second value to keep in step.
+        blob = boto3.client("ssm", region_name=REGION).get_parameter(
+            Name="/porth/auth", WithDecryption=True
+        )["Parameter"]["Value"]
+        audience = (json.loads(blob).get("audience") or "").strip()
+
+    if not audience:
+        raise SystemExit(
+            "Cannot derive the roles-claim namespace: no audience in /porth/auth and "
+            "neither PORTH_AUTH_AUDIENCE nor PORTH_ROLES_NAMESPACE is set. Refusing to "
+            "write a claim mapping that would silently resolve no roles."
+        )
+    return f"{audience.rstrip('/')}/roles"
+
+
+ROLES_NAMESPACE = _roles_namespace()
+
 MAPPING_SOURCE = {
     "schema_version": "2.0",
     "fields": [
         {
             "name": "roles",
-            "source": "https://porth.io/roles",
+            "source": ROLES_NAMESPACE,
             "type": "collection",
             "required": False,
             "ops": [{"op": "resolve_roles"}],
@@ -128,7 +164,7 @@ COMPILED_SOURCE = (
     "    result: dict = {}\n"
     "\n"
     "    # field: roles (collection)\n"
-    "    _v = claims.get('https://porth.io/roles')\n"
+    f"    _v = claims.get('{ROLES_NAMESPACE}')\n"
     "    if _v is not None:\n"
     "        if not isinstance(_v, list):\n"
     "            _v = [_v]\n"
@@ -144,7 +180,13 @@ COMPILED_SOURCE = (
     "\n"
     "    return result\n"
 )
-COMPILED_HASH = "55016a468cbb18927879e32725927fc3d501a7887918f05eed50911918fd6855"
+# sha256 of COMPILED_SOURCE — the same convention the original codegen used (the
+# previous pasted constant equalled sha256 of the previous source, verified).
+# COMPILED_SOURCE now embeds the derived namespace, so the hash MUST be computed:
+# a stale constant makes the idempotency check above compare the OLD hash, report
+# "no change", and skip the very namespace rewrite this script exists to perform —
+# and any row it did write would carry a hash that doesn't match its source.
+COMPILED_HASH = hashlib.sha256(COMPILED_SOURCE.encode()).hexdigest()
 
 
 # ---------------------------------------------------------------------------

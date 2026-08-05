@@ -1,15 +1,20 @@
-import { useState, useEffect } from 'react'
+// Roles-claim namespace, for DISPLAY ONLY (the diagnostics panel on /unauthorized).
+// Role resolution happens server-side in the authorizer against the claim-mapping
+// config — nothing here affects it.
+//
+// The namespace is "{audience}/roles": Auth0's post-login Action namespaces custom
+// claims with the API identifier, so the value is per-install and cannot be a
+// shared constant. VITE_ROLES_NAMESPACE overrides it; the fallback is THIS
+// install's audience-derived value. The old hardcoded https://porth.io/roles
+// showed on an install whose real namespace is
+// https://porth.ems.estynsoftware.io/roles, which is actively misleading when
+// the thing you are debugging IS the namespace.
+const ROLES_NAMESPACE =
+  import.meta.env.VITE_ROLES_NAMESPACE ?? 'https://porth.ems.estynsoftware.io/roles'
 
-// Default claim namespace used by the Porth platform Auth0 Action.
-// Can be overridden per-tenant via idp_config_override.custom_claims.roles_namespace.
-const DEFAULT_ROLES_NAMESPACE = 'https://porth.io/roles'
-
-export interface TenantIdpConfig {
+export interface TenantConfig {
   tenantId: string
-  organizationId: string
-  domain: string
-  clientId: string
-  audience?: string
+  /** Roles-claim namespace — used for display/diagnostics only. */
   rolesNamespace: string
 }
 
@@ -25,9 +30,7 @@ function getTenantIdFromSubdomain(): string | null {
 
   const subdomain = parts[0]
 
-  // If the subdomain matches the platform apex (i.e. we're at the root admin
-  // URL rather than a customer tenant subdomain), use the platform tenant so
-  // the UI picks up platform-level IdP configuration.
+  // Root admin URL rather than a customer tenant subdomain → platform tenant.
   const platformApex = import.meta.env.VITE_PLATFORM_APEX
   if (platformApex && subdomain === platformApex) {
     return 'platform'
@@ -36,61 +39,38 @@ function getTenantIdFromSubdomain(): string | null {
   return subdomain
 }
 
+/**
+ * PORTH-531 (cookie/BFF mode): the tenant is the subdomain. That is the design —
+ * the hostname IS the tenant identity, so nothing needs fetching to know it.
+ *
+ * There is no pre-login API call. Under the BFF the SPA holds no IdP
+ * configuration (the proxy owns the upstream IdP entirely), and everything else
+ * — org, roles, permissions — arrives authenticated from /auth/me and
+ * /users/me after login.
+ *
+ * A pre-login fetch could not work here anyway: tenant records are written
+ * env-scoped (ENV#{slot}#TENANT#…, ADR-Z8) and the public GET /tenants/{id}
+ * route resolves env from the authorizer context, which is empty before login —
+ * so it 404s on every record, platform included.
+ */
 export function useTenantConfig(): {
-  config: TenantIdpConfig | null
+  config: TenantConfig | null
   loading: boolean
   error: string | null
 } {
-  const [config, setConfig] = useState<TenantIdpConfig | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const tenantId = getTenantIdFromSubdomain()
 
-  useEffect(() => {
-    const tenantId = getTenantIdFromSubdomain()
-
-    if (!tenantId) {
-      setError('Cannot determine tenant from hostname. Set VITE_DEV_TENANT_ID for local development.')
-      setLoading(false)
-      return
+  if (!tenantId) {
+    return {
+      config: null,
+      loading: false,
+      error: 'Cannot determine tenant from hostname. Set VITE_DEV_TENANT_ID for local development.',
     }
+  }
 
-    const apiBase = import.meta.env.VITE_API_BASE_URL
-    if (!apiBase) {
-      setError('VITE_API_BASE_URL is not configured.')
-      setLoading(false)
-      return
-    }
-
-    fetch(`${apiBase}/tenants/${encodeURIComponent(tenantId)}`)
-      .then(res => {
-        if (!res.ok) throw new Error(`Tenant lookup failed: ${res.status}`)
-        return res.json()
-      })
-      .then(tenant => {
-        const idp = tenant.idp_config_override ?? null
-        if (!idp?.domain || !idp?.client_id) {
-          throw new Error(`Tenant ${tenantId} has no IdP configuration`)
-        }
-
-        // Read the roles claim namespace from the tenant's IdP config if
-        // the operator has configured it; fall back to the platform default.
-        // The Auth0 Action (or equivalent IdP hook) must use the same namespace.
-        const rolesNamespace =
-          idp.custom_claims?.roles_namespace ?? DEFAULT_ROLES_NAMESPACE
-
-        setConfig({
-          tenantId,
-          // Porth Tenant model uses org_id (not organization_id)
-          organizationId: tenant.org_id,
-          domain: idp.domain,
-          clientId: idp.client_id,
-          audience: idp.audience,
-          rolesNamespace,
-        })
-      })
-      .catch(err => setError(err.message))
-      .finally(() => setLoading(false))
-  }, [])
-
-  return { config, loading, error }
+  return {
+    config: { tenantId, rolesNamespace: ROLES_NAMESPACE },
+    loading: false,
+    error: null,
+  }
 }

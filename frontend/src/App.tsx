@@ -1,28 +1,21 @@
-import { useAuth0 } from '@auth0/auth0-react'
+import { useAuth } from '@estyn/porth-admin/auth'
 import { RouterProvider } from 'react-router-dom'
-import { useEffect } from 'react'
 import { router } from './router'
-import { setTokenProvider } from './api/client'
-import { setSampleTokenProvider } from './api/sampleApp'
 import { useCurrentUser } from './hooks/useCurrentUser'
 import { PorthProvider } from './context/PorthContext'
-import type { TenantIdpConfig } from './hooks/useTenantConfig'
+import type { TenantConfig } from './hooks/useTenantConfig'
 
 interface Props {
-  tenantConfig: TenantIdpConfig
+  tenantConfig: TenantConfig
 }
 
 export default function App({ tenantConfig }: Props) {
-  const { isLoading, error, isAuthenticated, getAccessTokenSilently } = useAuth0()
+  // PORTH-531: no token wiring. Under the BFF the browser holds no token, so
+  // there is nothing to inject into the API clients — they authenticate with the
+  // http-only session cookie (see api/client.ts), and the previous
+  // setTokenProvider / setSampleTokenProvider plumbing is gone.
+  const { isLoading, error, isAuthenticated } = useAuth()
   const { currentUser, loading: userLoading, error: userError } = useCurrentUser(tenantConfig)
-
-  // Wire Auth0 token into both API clients so all API calls are authenticated
-  useEffect(() => {
-    if (isAuthenticated) {
-      setTokenProvider(getAccessTokenSilently)
-      setSampleTokenProvider(getAccessTokenSilently)
-    }
-  }, [isAuthenticated, getAccessTokenSilently])
 
   if (isLoading || (isAuthenticated && userLoading)) {
     return (

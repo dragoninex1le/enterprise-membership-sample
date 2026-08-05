@@ -1,9 +1,9 @@
 import { createContext, useContext, type ReactNode } from 'react'
-import type { TenantIdpConfig } from '../hooks/useTenantConfig'
+import type { TenantConfig } from '../hooks/useTenantConfig'
 import type { CurrentUser } from '../hooks/useCurrentUser'
 
 interface PorthContextValue {
-  tenantConfig: TenantIdpConfig
+  tenantConfig: TenantConfig
   currentUser: CurrentUser | null
   userLoading: boolean
   userError: string | null

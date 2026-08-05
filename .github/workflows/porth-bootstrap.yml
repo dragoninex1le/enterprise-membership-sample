@@ -21,6 +21,24 @@ name: Porth — bootstrap platform tenant
 # scripts/bootstrap_platform_tenant.py both go away.
 
 on:
+  # PORTH-531: dispatchable, so correcting the claim-mapping config does not
+  # require a destructive reset-env. When dispatched, table names are resolved
+  # from the stack outputs below (workflow_call passes them explicitly).
+  workflow_dispatch:
+    inputs:
+      env_scope:
+        description: >
+          ADR-Z8 slot to write under (ENV#{scope}#…). Must match the install's
+          FixedEnvironment or the authorizer will never resolve the platform tenant.
+        required: false
+        default: 'prod'
+      stack_name:
+        description: Porth components CloudFormation stack name
+        required: false
+        default: 'serverlessrepo-porth-components'
+      aws_region:
+        required: false
+        default: 'us-east-1'
   workflow_call:
     inputs:
       env_scope:
@@ -73,12 +91,46 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ inputs.aws_region }}
 
+      - name: Resolve table names from the stack (workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          PORTH_STACK: ${{ inputs.stack_name }}
+          AWS_REGION: ${{ inputs.aws_region }}
+        run: |
+          set -euo pipefail
+          get_porth() {
+            aws cloudformation describe-stacks --stack-name "$PORTH_STACK" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text 2>/dev/null || echo ""
+          }
+          TENANTS=$(get_porth TenantsTableName)
+          PERMISSIONS=$(get_porth PermissionsTableName)
+          ROLES=$(get_porth RolesTableName)
+          CLAIMS=$(get_porth ClaimMappingConfigsTableName)
+          MISSING=""
+          for pair in "TenantsTableName:$TENANTS" "PermissionsTableName:$PERMISSIONS" \
+                      "RolesTableName:$ROLES" "ClaimMappingConfigsTableName:$CLAIMS"; do
+            name="${pair%%:*}"; val="${pair#*:}"
+            if [ -z "$val" ] || [ "$val" = "None" ]; then MISSING="$MISSING $name"; fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::Stack '$PORTH_STACK' is missing expected outputs:$MISSING"
+            exit 1
+          fi
+          {
+            echo "RESOLVED_TENANTS_TABLE=$TENANTS"
+            echo "RESOLVED_PERMISSIONS_TABLE=$PERMISSIONS"
+            echo "RESOLVED_ROLES_TABLE=$ROLES"
+            echo "RESOLVED_CLAIM_MAPPING_TABLE=$CLAIMS"
+          } >> "$GITHUB_ENV"
+          echo "✅ Resolved table names from $PORTH_STACK"
+
       - name: Bootstrap platform tenant
         env:
-          PORTH_TENANTS_TABLE: ${{ inputs.tenants_table }}
-          PORTH_PERMISSIONS_TABLE: ${{ inputs.permissions_table }}
-          PORTH_ROLES_TABLE: ${{ inputs.roles_table }}
-          PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ inputs.claim_mapping_table }}
+          PORTH_TENANTS_TABLE: ${{ inputs.tenants_table || env.RESOLVED_TENANTS_TABLE }}
+          PORTH_PERMISSIONS_TABLE: ${{ inputs.permissions_table || env.RESOLVED_PERMISSIONS_TABLE }}
+          PORTH_ROLES_TABLE: ${{ inputs.roles_table || env.RESOLVED_ROLES_TABLE }}
+          PORTH_CLAIM_MAPPING_CONFIGS_TABLE: ${{ inputs.claim_mapping_table || env.RESOLVED_CLAIM_MAPPING_TABLE }}
           PORTH_ENV_SCOPE: ${{ inputs.env_scope }}
           AWS_REGION: ${{ inputs.aws_region }}
         run: |
@@ -96,7 +148,7 @@ jobs:
         # circular anyway, since the API asserts the platform tenant already exists.
         env:
           AWS_REGION: ${{ inputs.aws_region }}
-          PORTH_TENANTS_TABLE: ${{ inputs.tenants_table }}
+          PORTH_TENANTS_TABLE: ${{ inputs.tenants_table || env.RESOLVED_TENANTS_TABLE }}
           ENV_SCOPE: ${{ inputs.env_scope }}
         run: |
           set -euo pipefail
@@ -152,7 +204,7 @@ jobs:
         # the exact key the authorizer uses is the only thing that proves the scope is right.
         env:
           AWS_REGION: ${{ inputs.aws_region }}
-          PORTH_TENANTS_TABLE: ${{ inputs.tenants_table }}
+          PORTH_TENANTS_TABLE: ${{ inputs.tenants_table || env.RESOLVED_TENANTS_TABLE }}
           ENV_SCOPE: ${{ inputs.env_scope }}
         run: |
           set -euo pipefail
