@@ -61,7 +61,7 @@ PLATFORM = {
 TENANT = {
     "tenant_id": "acme",
     "display_name": "Acme Corp",
-    "tenant_tier": "standard",
+    "tenant_tier": "sandbox",
     "porth_org_id": "ems",
     "provider_org_id": "org_TESTTESTTESTTEST",
     "idp": dict(AUTH0_IDP),
@@ -309,8 +309,44 @@ def test_writes_tenant_tier_not_environment_type(env):
     """PORTH-502 renamed the field."""
     tenant = _seed(env) and env.store["porth-tenants-dev"][("ENV#prod#TENANT#acme", "METADATA")]
 
-    assert tenant["tenant_tier"] == "standard"
+    assert tenant["tenant_tier"] == "sandbox"
     assert "environment_type" not in tenant
+
+
+def test_written_tier_is_one_the_porth_model_accepts(env):
+    """The rename this file already covers changed the allowed VALUES too.
+
+    Asserting only that the field is *named* `tenant_tier` is what let the invalid default
+    "standard" survive PORTH-502. DynamoDB accepted it, the seeder reported `created`, and
+    the row then 400'd on every read because the API could not build a Tenant from it —
+    invisible in the admin UI, no error anywhere in the chain. Pin the value, not the key.
+    """
+    import handler
+
+    _seed(env)
+    tenant = env.store["porth-tenants-dev"][("ENV#prod#TENANT#acme", "METADATA")]
+
+    assert tenant["tenant_tier"] in handler.TENANT_TIERS
+
+
+def test_tier_defaults_to_a_valid_value_when_the_manifest_omits_it(env):
+    """The live manifest sets no tier, so the default is the path that actually runs."""
+    import handler
+
+    _seed(env, tenant_tier=None)
+    tenant = env.store["porth-tenants-dev"][("ENV#prod#TENANT#acme", "METADATA")]
+
+    assert tenant["tenant_tier"] == handler.DEFAULT_TENANT_TIER
+    assert handler.DEFAULT_TENANT_TIER in handler.TENANT_TIERS
+
+
+def test_rejects_a_tier_outside_the_set_the_model_allows(env):
+    """Fail in the dry run, not days later as a row that will not render."""
+    result = _seed(env, tenant_tier="enterprise")
+
+    assert result["error"] == "Manifest validation failed"
+    assert any("tenant_tier" in d for d in result["details"])
+    assert env.store.get("porth-tenants-dev", {}) == {}
 
 
 def test_idp_config_is_written_verbatim_from_the_tenant(env):

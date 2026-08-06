@@ -43,7 +43,7 @@
     {
       "tenant_id": "acme",
       "display_name": "Acme Corporation",
-      "tenant_tier": "standard",
+      "tenant_tier": "sandbox",
       "porth_org_id": "ems",
       "provider_org_id": "org_REPLACE_WITH_AUTH0_ORG_ID",
       "idp": {
@@ -61,7 +61,7 @@
     {
       "tenant_id": "globex",
       "display_name": "Globex Industries",
-      "tenant_tier": "standard",
+      "tenant_tier": "sandbox",
       "porth_org_id": "ems",
       "provider_org_id": "org_REPLACE_WITH_AUTH0_ORG_ID",
       "idp": {
@@ -84,7 +84,7 @@
       ],
       "tenant_id": "initech",
       "display_name": "Initech",
-      "tenant_tier": "enterprise",
+      "tenant_tier": "development",
       "porth_org_id": "ems",
       "idp": {
         "issuer": "https://kc.ems.estynsoftware.test/realms/porth",
