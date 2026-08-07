@@ -176,7 +176,11 @@ Resources:
   PorthUatRunnerRole:
     Type: AWS::IAM::Role
     Properties:
-      Description: Porth ADR-Z11 UAT runner — invoke/read ffug from the Components repo's UAT workflow.
+      # ASCII only: the IAM API rejects any character outside the Latin-1
+      # printable range, which excludes the em dash this codebase uses freely
+      # in prose. Cost of learning that: one rolled-back stack (run
+      # 31216080066). The guard in ffug-tests.yml now catches it on the PR.
+      Description: "Porth ADR-Z11 UAT runner - invoke/read ffug from the Components repo's UAT workflow."
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
