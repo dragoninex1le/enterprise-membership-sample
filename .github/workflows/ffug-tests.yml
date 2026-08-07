@@ -1,0 +1,37 @@
+name: ffug — unit tests
+
+# ffug is the ADR-Z11 UAT compute target (PORTH-555). Its suite has to be green
+# on the PR, not only on the merge-to-main deploy — the epic's review model
+# gates each slice on a linked green run (evidence checkpoint).
+#
+# Deliberately separate from deploy.yml: that workflow deploys, and PR-triggering
+# a deploy would be the wrong fix. This job needs no AWS credentials.
+
+on:
+  pull_request:
+    paths:
+      - 'lambdas/ffug/**'
+      - '.github/workflows/ffug-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ffug unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test dependencies
+        run: python -m pip install --quiet pytest boto3
+
+      - name: Run ffug tests
+        working-directory: lambdas
+        run: python -m pytest ffug/tests -q
