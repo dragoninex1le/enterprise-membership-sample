@@ -30,8 +30,43 @@ jobs:
           python-version: '3.12'
 
       - name: Install test dependencies
-        run: python -m pip install --quiet pytest boto3
+        # pyyaml is for the template guard below, not the tests — the runner
+        # image doesn't ship it, which is how this step earned its own commit.
+        run: python -m pip install --quiet pytest boto3 pyyaml
 
       - name: Run ffug tests
         working-directory: lambdas
         run: python -m pytest ffug/tests -q
+
+      # IAM rejects any character outside the Latin-1 printable range in a
+      # role Description, notably the em dash. CloudFormation only finds out
+      # mid-deploy and rolls the whole stack back, so catch it here instead.
+      - name: Guard - IAM role descriptions are IAM-legal
+        run: |
+          python - <<'PY'
+          import re, sys, yaml
+
+          class L(yaml.SafeLoader):
+              pass
+          for tag in ('!Sub', '!Ref', '!GetAtt', '!Equals', '!If', '!Join',
+                      '!Select', '!Split', '!FindInMap', '!Not', '!And', '!Or',
+                      '!Base64', '!Condition', '!ImportValue'):
+              L.add_constructor(tag, lambda loader, node: None)
+
+          doc = yaml.load(open('template.yml'), Loader=L)
+          legal = re.compile('^[\t\n\r\x20-\x7e\xa1-\xff]*$')
+          bad = []
+          for name, res in (doc.get('Resources') or {}).items():
+              if res.get('Type') != 'AWS::IAM::Role':
+                  continue
+              desc = (res.get('Properties') or {}).get('Description')
+              if isinstance(desc, str) and not legal.match(desc):
+                  offenders = sorted({hex(ord(c)) for c in desc if not legal.match(c)})
+                  bad.append('%s: illegal %s in %r' % (name, offenders, desc))
+          if bad:
+              print('IAM role Description must be ASCII/Latin-1 only:')
+              for b in bad:
+                  print('   ' + b)
+              sys.exit(1)
+          print('OK: IAM role descriptions are IAM-legal')
+          PY
