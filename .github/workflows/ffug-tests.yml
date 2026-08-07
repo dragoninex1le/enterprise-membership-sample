@@ -30,7 +30,9 @@ jobs:
           python-version: '3.12'
 
       - name: Install test dependencies
-        run: python -m pip install --quiet pytest boto3
+        # pyyaml is for the template guard below, not the tests — the runner
+        # image doesn't ship it, which is how this step earned its own commit.
+        run: python -m pip install --quiet pytest boto3 pyyaml
 
       - name: Run ffug tests
         working-directory: lambdas
