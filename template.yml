@@ -45,6 +45,16 @@ Parameters:
       Environment name passed to Lambda functions as PORTH_ENVIRONMENT.
       Used to resolve DynamoDB table names (e.g. porth-sample-app-dev).
 
+  UatRunnerSubjectClaim:
+    Type: String
+    Default: 'repo:dragoninex1le/Components:*'
+    Description: >
+      GitHub OIDC subject claim allowed to assume the Porth UAT runner role
+      (ADR-Z11 PORTH-553, Richard's Q13 ruling). The UAT suite lives in the
+      Components repo and calls ffug in this account. Tighten to a specific
+      environment or ref when the UAT workflow's identity is fixed, e.g.
+      'repo:dragoninex1le/Components:environment:porth-uat'.
+
 Resources:
 
   # ── DynamoDB table for sample app data ───────────────────────────────────
@@ -117,6 +127,84 @@ Resources:
                 - porth.components
               detail-type:
                 - EntityEvent
+
+  # ── ffug — deliberately dumb consuming service (ADR-Z11 PORTH-555) ───────
+  # A test fixture, not a product. Echo-with-storage only; see lambdas/ffug/README.md
+  # for the boundary rules. Phase A: plain IAM invoke, no porth-common.
+
+  FfugTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub porth-ffug-${PorthEnvironment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        # ADR-Z8 shape — rows sit under ENV#{env}#TENANT#{tenant}, so tenant
+        # isolation is a property of the key rather than of a code check.
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  FfugFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub porth-ffug-${PorthEnvironment}
+      CodeUri: lambdas/
+      Handler: ffug.handler.handler
+      Runtime: python3.12
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          PORTH_ENVIRONMENT: !Ref PorthEnvironment
+          FFUG_TABLE_NAME: !Ref FfugTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FfugTable
+      # No Events — ffug is invoked directly (IAM/SigV4), never through a
+      # public HTTP route. The internal plane is the whole point.
+
+  # Role the Components-repo UAT suite assumes to reach ffug in this account
+  # (Q13 ruling, 2026-08-05). Unnamed deliberately: the deploy runs with
+  # CAPABILITY_IAM, and a named role would require CAPABILITY_NAMED_IAM.
+  # Consumers read the ARN from the stack output below.
+  PorthUatRunnerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Porth ADR-Z11 UAT runner — invoke/read ffug from the Components repo's UAT workflow.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Ref UatRunnerSubjectClaim
+      Policies:
+        - PolicyName: invoke-and-read-ffug
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt FfugFunction.Arn
+              # Read-only on the table so UAT journeys can prove isolation and
+              # residue-free teardown by inspection. Never write.
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt FfugTable.Arn
 
   # ── S3 bucket for React SPA static assets ────────────────────────────────
 
@@ -294,3 +382,21 @@ Outputs:
     Value: !Sub https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com
     Export:
       Name: !Sub ${AWS::StackName}-SampleAppApiUrl
+
+  FfugFunctionArn:
+    Description: ffug Lambda ARN — the ADR-Z11 UAT compute target (PORTH-555)
+    Value: !GetAtt FfugFunction.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-FfugFunctionArn
+
+  FfugTableName:
+    Description: ffug tenant-keyed DynamoDB table
+    Value: !Ref FfugTable
+    Export:
+      Name: !Sub ${AWS::StackName}-FfugTableName
+
+  PorthUatRunnerRoleArn:
+    Description: Role the Components-repo UAT workflow assumes to reach ffug (Q13)
+    Value: !GetAtt PorthUatRunnerRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-PorthUatRunnerRoleArn
