@@ -73,6 +73,12 @@ on:
         description: 'ACM certificate ARN for the custom domain. Blank = use the secret.'
         required: false
         default: ''
+      log_level:
+        description: 'Python log level for the authorizer, API and auth-proxy Lambdas. DEBUG for diagnosis; put it back to INFO afterwards.'
+        required: false
+        type: choice
+        options: [INFO, DEBUG, WARNING, ERROR, CRITICAL]
+        default: 'INFO'
       allow_stack_delete:
         description: 'Permit deleting a failed stack before recreating it. Retained tables/KMS keys SURVIVE and will block the recreate — read the pre-flight error first.'
         required: false
@@ -125,6 +131,7 @@ jobs:
           echo "EFF_SAR_APP_ID=${{ inputs.sar_app_id || 'arn:aws:serverlessrepo:us-east-1:084847995635:applications/porth-user-management' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
           echo "EFF_FIXED_ENV=${{ inputs.fixed_environment || 'prod' }}" >> "$GITHUB_ENV"
+          echo "EFF_LOG_LEVEL=${{ inputs.log_level || 'INFO' }}" >> "$GITHUB_ENV"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -348,6 +355,23 @@ jobs:
           # Passing it is not merely redundant — CloudFormation rejects unknown
           # parameters, so change-set creation fails before anything is touched.
           PARAMS+=( "ParameterKey=FixedEnvironment,ParameterValue=${{ env.EFF_FIXED_ENV }}" )
+
+          # PORTH-585 — log level, passed on EVERY install so the value is always
+          # explicit in the change set rather than inherited from whatever the last
+          # run happened to leave behind. Both template parameters take the same
+          # value: AuthorizerLogLevel drives the authorizer, ApiLogLevel drives BOTH
+          # the API and the auth-proxy Lambdas, and there is no diagnosis where you
+          # want one of the three turned up and not the others.
+          #
+          # LOG_LEVEL is read at MODULE LOAD (lambdas/*/handler.py), so a change
+          # takes effect on the next cold start, not on the next request. The
+          # env-var update replaces the function config, which forces one anyway.
+          #
+          # This is also what stops a same-version re-install being a no-op: the
+          # change set has a real parameter diff, so it will execute.
+          PARAMS+=( "ParameterKey=AuthorizerLogLevel,ParameterValue=${{ env.EFF_LOG_LEVEL }}" )
+          PARAMS+=( "ParameterKey=ApiLogLevel,ParameterValue=${{ env.EFF_LOG_LEVEL }}" )
+          echo "Log level: ${{ env.EFF_LOG_LEVEL }} (authorizer + api + auth-proxy)"
 
           # AuthTestToken enables the Layer 1 JWT bypass in the Lambda authorizer.
           # Only set if the secret is present — otherwise the bypass is disabled.
@@ -813,6 +837,7 @@ jobs:
             echo "- **Stack:** ${{ env.EFF_STACK_NAME }}"
             echo "- **Environment param:** ${{ env.EFF_ENV_NAME }}"
             echo "- **Env mode:** single (FixedEnvironment=\`${{ env.EFF_FIXED_ENV }}\`)"
+            echo "- **Log level:** \`${{ env.EFF_LOG_LEVEL }}\` (authorizer + api + auth-proxy)"
             echo "- **Porth API URL:** ${PORTH_API_URL:-'(unresolved)'}"
             echo "- **Custom domain:** ${PORTH_DOMAIN:-'OFF (execute-api only)'}"
             echo "- **SPA origins:** ${PORTH_SPA_ORIGINS_RAW:-'(unset — origin gate OFF)'}"
