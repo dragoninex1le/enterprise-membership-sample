@@ -1,6 +1,7 @@
 name: Porth components — install + upgrade
 
-# PORTH-471 — Pipeline 1. PORTH-530 — upgraded to SAR 0.1.16 + ADR-Z9 BFF wiring.
+# PORTH-471 — Pipeline 1. PORTH-530 — SAR 0.1.16 + ADR-Z9 BFF wiring.
+# PORTH-582 — upgraded to SAR 0.2.0 (container-image Porth).
 #
 # Installs or upgrades the Porth components stack (serverlessrepo-porth-components) in the EMS
 # account by consuming the porth-user-management SAR application, then
@@ -20,9 +21,12 @@ name: Porth components — install + upgrade
 # Remove or Replace any DynamoDB table (ADR-Z1/Z2 — DDB safety).
 #
 # PORTH-530 — environment model: EMS is a SINGLE-environment instance (no slots), so
-# EnvironmentMode=single + FixedEnvironment=prod. The SAR template's deploy-time Rules
-# require that pair (single => FixedEnvironment non-empty; multi => empty). Note this
-# turns on the ADR-Z8 `ENV#prod#` partition-key prefix for all Porth data.
+# FixedEnvironment=prod. This turns on the ADR-Z8 `ENV#prod#` partition-key prefix
+# for all Porth data.
+#
+# PORTH-557 (SAR 0.2.0): the EnvironmentMode parameter is GONE. A non-empty
+# FixedEnvironment *is* single mode; empty is multi. The two can no longer
+# disagree, so the deploy-time Rule that policed the pair went with it.
 #
 # PORTH-530 — required vars/secrets (GitHub environment: porth-install):
 #   vars.AWS_ROLE_ARN                 OIDC role to assume
@@ -44,7 +48,7 @@ on:
       sar_version:
         description: 'Porth SAR app semantic version to install/upgrade to'
         required: true
-        default: '0.1.16'
+        default: '0.2.0'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
@@ -58,7 +62,7 @@ on:
         required: false
         default: 'dev'
       fixed_environment:
-        description: 'ADR-Z8 environment slot this install is pinned to (EnvironmentMode=single)'
+        description: 'ADR-Z8 environment slot this install is pinned to. Non-empty = single-environment mode.'
         required: false
         default: 'prod'
       api_domain_name:
@@ -69,6 +73,11 @@ on:
         description: 'ACM certificate ARN for the custom domain. Blank = use the secret.'
         required: false
         default: ''
+      allow_stack_delete:
+        description: 'Permit deleting a failed stack before recreating it. Retained tables/KMS keys SURVIVE and will block the recreate — read the pre-flight error first.'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   id-token: write
@@ -83,7 +92,7 @@ env:
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.sar_version || '0.1.16' }}
+    name: Install or upgrade Porth ${{ inputs.sar_version || '0.2.0' }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
@@ -111,7 +120,7 @@ jobs:
       # also works when triggered by the push shim (inputs are empty on push).
       - name: Resolve effective inputs
         run: |
-          echo "EFF_SAR_VERSION=${{ inputs.sar_version || '0.1.16' }}" >> "$GITHUB_ENV"
+          echo "EFF_SAR_VERSION=${{ inputs.sar_version || '0.2.0' }}" >> "$GITHUB_ENV"
           echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
           echo "EFF_SAR_APP_ID=${{ inputs.sar_app_id || 'arn:aws:serverlessrepo:us-east-1:084847995635:applications/porth-user-management' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
@@ -186,6 +195,7 @@ jobs:
         id: preflight
         env:
           STACK: ${{ env.EFF_STACK_NAME }}
+          ALLOW_STACK_DELETE: ${{ inputs.allow_stack_delete }}
         run: |
           set -euo pipefail
           STATUS=$(aws cloudformation describe-stacks \
@@ -224,8 +234,51 @@ jobs:
               echo "🟢 Action: UPGRADE — stack in clean state ($STATUS)"
               echo "action=upgrade" >> "$GITHUB_OUTPUT"
               ;;
-            REVIEW_IN_PROGRESS|ROLLBACK_COMPLETE|ROLLBACK_FAILED|CREATE_FAILED|DELETE_FAILED|UPDATE_ROLLBACK_FAILED)
-              echo "::warning::Stack in recoverable-failure state ($STATUS) — deleting and recreating"
+            REVIEW_IN_PROGRESS)
+              # A CREATE change set was made but never executed, so the stack holds
+              # NO resources. Deleting it is genuinely free and is the documented
+              # recovery — it is the one delete in this block that cannot lose data,
+              # so it needs no opt-in.
+              echo "::warning::Stack is REVIEW_IN_PROGRESS (change set never executed, no resources) — deleting the empty shell"
+              robust_delete "$STACK"
+              echo "🟢 Action: INSTALL"
+              echo "action=install" >> "$GITHUB_OUTPUT"
+              ;;
+            UPDATE_ROLLBACK_FAILED)
+              # NEVER auto-delete this one. It is a stack that was LIVE and healthy,
+              # whose update failed AND whose rollback then also failed. Deleting it
+              # destroys a working installation. The supported recovery is to
+              # continue the rollback, not to start again.
+              echo "::error::Stack is UPDATE_ROLLBACK_FAILED — this workflow will NOT delete it."
+              echo "::error::This state means a live stack failed to update and failed to roll back."
+              echo "::error::Recover it in place:"
+              echo "::error::  aws cloudformation continue-update-rollback --stack-name $STACK"
+              echo "::error::If specific resources block the rollback, add:"
+              echo "::error::  --resources-to-skip <LogicalId> [...]"
+              echo "::error::Then re-run this workflow. Deleting a Porth stack is a ONE-WAY DOOR:"
+              echo "::error::the DynamoDB tables and KMS keys are DeletionPolicy: Retain, so they"
+              echo "::error::survive and their fixed names then block any recreate at"
+              echo "::error::AWS::EarlyValidation::ResourceExistenceCheck."
+              exit 1
+              ;;
+            ROLLBACK_COMPLETE|ROLLBACK_FAILED|CREATE_FAILED|DELETE_FAILED)
+              # These are failed-CREATE states, where deleting is the standard (and
+              # for ROLLBACK_COMPLETE, the only) recovery — CloudFormation refuses to
+              # update a stack in them. But the retained tables and KMS keys outlive
+              # the delete, so a "recreate" afterwards is not clean: the orphaned
+              # fixed names block it. That makes this a decision, not a default.
+              if [ "${ALLOW_STACK_DELETE:-false}" != "true" ]; then
+                echo "::error::Stack is $STATUS. Recovery requires deleting and recreating it,"
+                echo "::error::which this workflow will not do unless you ask for it explicitly."
+                echo "::error::Re-run with allow_stack_delete=true if that is what you want."
+                echo "::error::Before you do: the 8 Porth DynamoDB tables and 2 KMS keys are"
+                echo "::error::DeletionPolicy: Retain. They SURVIVE the delete, and their fixed"
+                echo "::error::names then block the recreate at change-set creation. Either adopt"
+                echo "::error::them with an IMPORT change set, remove them, or install under a"
+                echo "::error::different Environment value so the names do not collide."
+                exit 1
+              fi
+              echo "::warning::Stack in $STATUS and allow_stack_delete=true — deleting and recreating"
               robust_delete "$STACK"
               echo "🟢 Action: INSTALL — recreating after cleanup"
               echo "action=install" >> "$GITHUB_OUTPUT"
@@ -288,8 +341,12 @@ jobs:
 
           # ADR-Z8 (PORTH-530): EMS is a single-environment instance — the authorizer pins
           # every request to FixedEnvironment and IGNORES the X-Porth-Environment header.
-          # The template's deploy-time Rules reject an inconsistent pair.
-          PARAMS+=( "ParameterKey=EnvironmentMode,ParameterValue=single" )
+          #
+          # PORTH-557 (SAR 0.2.0): EnvironmentMode was REMOVED as a parameter. The
+          # presence of a non-empty FixedEnvironment now *is* the mode, so the pair
+          # can no longer disagree and the deploy-time Rule that policed them is gone.
+          # Passing it is not merely redundant — CloudFormation rejects unknown
+          # parameters, so change-set creation fails before anything is touched.
           PARAMS+=( "ParameterKey=FixedEnvironment,ParameterValue=${{ env.EFF_FIXED_ENV }}" )
 
           # AuthTestToken enables the Layer 1 JWT bypass in the Lambda authorizer.
@@ -316,15 +373,20 @@ jobs:
             echo "ℹ️  Custom domain OFF (API domain / ACM cert not both set) — execute-api URL only"
           fi
 
-          # PORTH-479 Path B: SpaOrigins → the authorizer's PORTH_SPA_ORIGINS, the Origin
-          # allow-list for the cookie path's CSRF/Origin defence-in-depth. Cookie-authed
-          # mutating requests are DENIED unless the request Origin is listed. Must match the
-          # proxy's /porth/auth spa_origins — both are sourced from this one var. Commas are
-          # \,-escaped so the aws-cli --parameters shorthand keeps the CSV as one value.
-          if [ -n "${PORTH_SPA_ORIGINS_RAW:-}" ]; then
-            SPA_ORIGINS_ESCAPED="${PORTH_SPA_ORIGINS_RAW//,/\\,}"
-            PARAMS+=( "ParameterKey=SpaOrigins,ParameterValue=${SPA_ORIGINS_ESCAPED}" )
-            echo "SpaOrigins (authorizer Origin allow-list): ${PORTH_SPA_ORIGINS_RAW}"
+          # PORTH-556 (SAR 0.2.0): SpaOrigins was REMOVED as a parameter. The authorizer
+          # now DERIVES its Origin allow-list from root_url + environments in the
+          # /porth/auth blob, which is exactly what the "Seed OAuth-proxy config blob"
+          # step below writes — and it writes spa_origins from this same
+          # PORTH_SPA_ORIGINS var. So the value still reaches the authorizer; it now
+          # travels through the blob instead of through a stack parameter, and the two
+          # can no longer drift apart.
+          #
+          # PORTH_SPA_ORIGINS_RAW is therefore still required. Passing SpaOrigins as a
+          # parameter would fail change-set creation on an unknown parameter.
+          if [ -z "${PORTH_SPA_ORIGINS_RAW:-}" ]; then
+            echo "::warning::PORTH_SPA_ORIGINS is empty — the cookie path's CSRF/Origin gate will be OFF"
+          else
+            echo "SPA origins (via /porth/auth, no longer a stack parameter): ${PORTH_SPA_ORIGINS_RAW}"
           fi
 
           # CFN_EXECUTION_ROLE_ARN is optional. When set, CloudFormation assumes this
@@ -650,8 +712,18 @@ jobs:
             --no-cli-pager
           echo "✅ /porth/${ENV}/auth-policy/index"
 
+          # ── Session-policy templates ────────────────────────────────────────
+          # This block is a COPY of the canonical seeding in the Porth repo's
+          # deploy.yml. It had drifted three releases behind, and every drift was
+          # silent. Kept byte-compatible with the source now; the duplication is
+          # the real defect and belongs in `porth-install auth-config` instead.
           TEMPLATE_NAME="tenant-scoped-default"
-          TENANT_SESSION_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:PutItem","dynamodb:Query","dynamodb:UpdateItem","dynamodb:DeleteItem","dynamodb:BatchGetItem","dynamodb:BatchWriteItem","dynamodb:ConditionCheckItem"],"Resource":"*","Condition":{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["TENANT#$tenant","ORG#$org_id"]}}}]}'
+          PLATFORM_TEMPLATE_NAME="platform-scoped-default"
+
+          # PORTH-514/530 — LeadingKeys must carry the ENV#$env# prefix. EMS pins
+          # FixedEnvironment, so every item is written under ENV#{slot}#…; the old
+          # un-prefixed TENANT#$tenant / ORG#$org_id matched no key that exists.
+          TENANT_SESSION_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:PutItem","dynamodb:Query","dynamodb:UpdateItem","dynamodb:DeleteItem","dynamodb:BatchGetItem","dynamodb:BatchWriteItem","dynamodb:ConditionCheckItem"],"Resource":"*","Condition":{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["ENV#$env#TENANT#$tenant#*"]}}}]}'
           aws ssm put-parameter \
             --name "/porth/${ENV}/auth-session-policy/${TEMPLATE_NAME}" \
             --value "$TENANT_SESSION_POLICY" \
@@ -661,7 +733,37 @@ jobs:
             --no-cli-pager
           echo "✅ /porth/${ENV}/auth-session-policy/${TEMPLATE_NAME}"
 
-          SESSION_INDEX="{\"roles\":{\"tenant\":\"porth-tenant-${ENV}\",\"platform_admin\":\"porth-platform-admin-${ENV}\"},\"context_rules\":[],\"paths\":{\"default\":\"${TEMPLATE_NAME}\"}}"
+          # PORTH-576 — the platform operator's template: cross-TENANT, but NOT
+          # cross-ENVIRONMENT. Without it, a platform admin resolves the tenant
+          # template above with $tenant substituted as the literal "platform" and
+          # can read only TENANT#platform — one partition, for the one operator
+          # whose entire job is cross-tenant.
+          #
+          # Scan is a SEPARATE, unconditioned statement on purpose. A Scan
+          # populates no dynamodb:LeadingKeys, so ForAllValues:StringLike passes
+          # vacuously; folding it in above would read as constrained while
+          # constraining nothing.
+          PLATFORM_SESSION_POLICY='{"Version":"2012-10-17","Statement":[{"Sid":"PlatformOperatorKeyedAccess","Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:PutItem","dynamodb:Query","dynamodb:UpdateItem","dynamodb:DeleteItem","dynamodb:BatchGetItem","dynamodb:BatchWriteItem","dynamodb:ConditionCheckItem"],"Resource":"*","Condition":{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["ENV#$env#*"]}}},{"Sid":"PlatformOperatorScan","Effect":"Allow","Action":["dynamodb:Scan"],"Resource":"*"}]}'
+          aws ssm put-parameter \
+            --name "/porth/${ENV}/auth-session-policy/${PLATFORM_TEMPLATE_NAME}" \
+            --value "$PLATFORM_SESSION_POLICY" \
+            --type String \
+            --overwrite \
+            --region "$AWS_REGION" \
+            --no-cli-pager
+          echo "✅ /porth/${ENV}/auth-session-policy/${PLATFORM_TEMPLATE_NAME}"
+
+          # PORTH-550 — `paths` values are PATH PREFIXES, matched longest-first by
+          # policy_cache._find_template using path.startswith(key). "default" is
+          # not a prefix of any request path, so it matched NOTHING:
+          # get_session_policy returned None for every request and the authorizer
+          # assumed the tenant role with NO session policy at all — i.e. its full
+          # ceiling, reaching every tenant. "/" is the catch-all prefix that
+          # "default" was meant to express.
+          #
+          # PORTH-576 — platform_paths selects the template for the platform-admin
+          # role.
+          SESSION_INDEX="{\"roles\":{\"tenant\":\"porth-tenant-${ENV}\",\"platform_admin\":\"porth-platform-admin-${ENV}\"},\"context_rules\":[],\"paths\":{\"/\":\"${TEMPLATE_NAME}\"},\"platform_paths\":{\"/\":\"${PLATFORM_TEMPLATE_NAME}\"}}"
           aws ssm put-parameter \
             --name "/porth/${ENV}/auth-session-policy/index" \
             --value "$SESSION_INDEX" \
