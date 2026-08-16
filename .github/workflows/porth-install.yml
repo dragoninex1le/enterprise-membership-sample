@@ -73,6 +73,11 @@ on:
         description: 'ACM certificate ARN for the custom domain. Blank = use the secret.'
         required: false
         default: ''
+      adopt_existing_resources:
+        description: 'CREATE only: adopt pre-existing retained resources (the 8 Porth tables) into the new stack instead of failing on their names. Needed after a stack deletion.'
+        required: false
+        type: boolean
+        default: false
       allow_stack_delete:
         description: 'Permit deleting a failed stack before recreating it. Retained tables/KMS keys SURVIVE and will block the recreate — read the pre-flight error first.'
         required: false
@@ -328,6 +333,7 @@ jobs:
         env:
           STACK: ${{ env.EFF_STACK_NAME }}
           CFN_EXECUTION_ROLE_ARN: ${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}
+          ADOPT_EXISTING_RESOURCES: ${{ inputs.adopt_existing_resources }}
         run: |
           set -euo pipefail
           if [ "${{ steps.preflight.outputs.action }}" = "install" ]; then
@@ -400,6 +406,38 @@ jobs:
             echo "ℹ️  AWS_CFN_EXECUTION_ROLE_ARN not set — CloudFormation will use the calling role directly"
           fi
 
+          # PORTH-582 — adopting orphaned retained resources.
+          #
+          # Porth's 8 DynamoDB tables and 2 KMS keys are DeletionPolicy: Retain, so
+          # if the stack is ever deleted they survive with their FIXED names. A
+          # later CREATE then fails at AWS::EarlyValidation::ResourceExistenceCheck
+          # — the names are taken, by resources no stack owns.
+          #
+          # --import-existing-resources tells CloudFormation to ADOPT such resources
+          # into the new stack instead of failing on them. It is off by default:
+          # silently adopting whatever happens to share a name is exactly the
+          # behaviour you do not want as a default.
+          #
+          # PORTH-473 removed this flag from the Porth repo's own deploy.yml after
+          # it produced an immediate ChangeSetNotFound — but that was a stack which
+          # already tracked all of its resources, so there was nothing to import.
+          # That note ends "use explicit IMPORT changesets if orphan adoption is
+          # ever needed", and this is that case. The flag is the one-shot form of
+          # the same thing; the explicit two-phase IMPORT (stripped template of
+          # only the imported resources, then an update adding the rest) remains
+          # the fallback if this errors.
+          IMPORT_ARGS=()
+          if [ "${ADOPT_EXISTING_RESOURCES:-false}" = "true" ]; then
+            if [ "$CS_TYPE" != "CREATE" ]; then
+              echo "::error::adopt_existing_resources only applies to a CREATE change set (this run is $CS_TYPE)."
+              echo "::error::An existing stack already owns its resources — there is nothing to adopt."
+              exit 1
+            fi
+            IMPORT_ARGS=("--import-existing-resources")
+            echo "::warning::Adopting pre-existing resources into the new stack (--import-existing-resources)."
+            echo "::warning::Every resource whose name matches the template will be TAKEN OVER by this stack."
+          fi
+
           echo "Creating $CS_TYPE change set: $CHANGE_SET_NAME"
           CHANGE_SET_ID=$(aws cloudformation create-change-set \
             --stack-name "$STACK" \
@@ -408,6 +446,7 @@ jobs:
             --template-url "${{ steps.render.outputs.template_url }}" \
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
             "${ROLE_ARGS[@]}" \
+            ${IMPORT_ARGS[@]+"${IMPORT_ARGS[@]}"} \
             --parameters "${PARAMS[@]}" \
             --query 'Id' --output text)
           echo "change_set_id=$CHANGE_SET_ID" >> "$GITHUB_OUTPUT"
