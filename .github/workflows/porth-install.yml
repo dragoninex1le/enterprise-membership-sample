@@ -163,6 +163,8 @@ jobs:
           API_DOMAIN_LEGACY_VAR: ${{ vars.PORTH_API_DOMAIN_NAME }}
           DNS_ZONE_VAR: ${{ vars.DNS_ZONE }}
           SPA_ORIGINS_VAR: ${{ vars.PORTH_SPA_ORIGINS }}
+          ROOT_URL_VAR: ${{ vars.PORTH_ROOT_URL }}
+          ENVIRONMENTS_VAR: ${{ vars.PORTH_AUTH_ENVIRONMENTS }}
         run: |
           set -euo pipefail
           APP_ARN="${{ env.EFF_SAR_APP_ID }}"
@@ -197,6 +199,56 @@ jobs:
           if [ -z "${SPA_ORIGINS_VAR:-}" ]; then
             echo "::warning::PORTH_SPA_ORIGINS is empty — the cookie path's CSRF/Origin gate will be OFF"
           fi
+
+          # ── PORTH-587: auth/root_url — the DERIVED-SHAPE origin policy ──────
+          # estyn_platform.oauth_proxy.origins.is_allowed() has two modes, chosen
+          # by whether auth/root_url is present in the /porth/auth blob:
+          #
+          #   root_url ABSENT  → legacy mode. Exact string match against
+          #                      auth/spa_origins. Every tenant subdomain would
+          #                      have to be listed individually, so a wildcard
+          #                      install refuses `return_to` for every tenant
+          #                      host with "return_to not allowed".
+          #   root_url PRESENT → derived mode. decompose() strips the root, the
+          #                      bare root is the platform origin (allowed with
+          #                      no lookup), and one label to its left is a
+          #                      tenant resolved against the tenants table.
+          #
+          # This install is wildcard-shaped — template.yml has
+          # CloudFrontApexAlias (platform) and CloudFrontAlias '*.<apex>'
+          # (tenants) — so derived mode is the only one that can work, and
+          # root_url is the apex.
+          #
+          # spa_origins is written as well and deliberately kept: it is ignored
+          # while root_url is set, and leaving it in place means unsetting the
+          # var is a working rollback to legacy mode rather than an install that
+          # refuses every origin.
+          #
+          # Left unset, this whole block is a no-op and behaviour is unchanged —
+          # single-host consumers stay on the legacy list.
+          ROOT_URL="${ROOT_URL_VAR:-}"
+          if [ -n "$ROOT_URL" ]; then
+            # Fail here rather than write a blob the proxy will reject at request
+            # time. These mirror the package's own validator: a bare host, not a
+            # URL, and lower-case because hosts are compared verbatim.
+            if printf '%s' "$ROOT_URL" | grep -q '://'; then
+              echo "::error::PORTH_ROOT_URL must be a bare host, not a URL — got '$ROOT_URL'"
+              exit 1
+            fi
+            case "$ROOT_URL" in
+              */*) echo "::error::PORTH_ROOT_URL must not contain a path — got '$ROOT_URL'"; exit 1 ;;
+            esac
+            if [ "$ROOT_URL" != "$(printf '%s' "$ROOT_URL" | tr '[:upper:]' '[:lower:]')" ]; then
+              echo "::error::PORTH_ROOT_URL must be lower-case — got '$ROOT_URL'"
+              exit 1
+            fi
+            echo "Resolved root_url:    '$ROOT_URL' (derived-shape origin policy)"
+          else
+            echo "::warning::PORTH_ROOT_URL is unset — the origin policy stays on the LEGACY exact-match list."
+            echo "::warning::Tenant subdomains will be refused with 'return_to not allowed' unless each is in PORTH_SPA_ORIGINS."
+          fi
+          echo "PORTH_ROOT_URL_RESOLVED=$ROOT_URL" >> "$GITHUB_ENV"
+          echo "PORTH_AUTH_ENVIRONMENTS_RAW=${ENVIRONMENTS_VAR:-}" >> "$GITHUB_ENV"
 
       - name: Pre-flight stack-state check
         id: preflight
@@ -682,6 +734,10 @@ jobs:
               "dns_zone": z,
               "spa_origins": os.environ.get("PORTH_SPA_ORIGINS_RAW", ""),
               "platform_tenant_id": "platform",
+              # PORTH-587: see the resolve step. Absent root_url = legacy
+              # exact-match mode; present = derived shape (platform origin at the
+              # root, one tenant label to its left).
+
               "environment": os.environ.get("EFF_FIXED_ENV", ""),
               "sessions_table": os.environ.get("PORTH_SESSIONS_TABLE", ""),
               "session_kms_key_id": os.environ.get("PORTH_SESSION_KMS", ""),
@@ -689,6 +745,26 @@ jobs:
           # Providers without RP-initiated logout simply omit it.
           if idp.get("end_session_endpoint"):
               blob["end_session_endpoint"] = idp["end_session_endpoint"]
+
+          # PORTH-587: only emit these when configured. An EMPTY root_url is not
+          # the same as an absent one — origins._root() reads the key and an empty
+          # string would decompose against nothing, so write the key or omit it.
+          root_url = os.environ.get("PORTH_ROOT_URL_RESOLVED", "").strip()
+          if root_url:
+              blob["root_url"] = root_url
+              # A wildcard install resolves tenants by definition. Declaring it
+              # makes a missing resolver raise loudly at start-up instead of
+              # answering "no" to every tenant — which is indistinguishable from
+              # the legacy-list bug this replaces.
+              blob["tenant_origins"] = "required"
+          environments = [
+              e.strip()
+              for e in os.environ.get("PORTH_AUTH_ENVIRONMENTS_RAW", "").split(",")
+              if e.strip()
+          ]
+          if environments:
+              blob["environments"] = environments
+
           print(json.dumps(blob))
           ')
 
@@ -696,6 +772,7 @@ jobs:
           aws ssm put-parameter --name /porth/auth --type String --overwrite \
             --value "$BLOB" --region "$AWS_REGION"
           echo "✅ Seeded /porth/auth (issuer $(echo "$BLOB" | python3 -c 'import json,sys; print(json.load(sys.stdin)["issuer"])'))"
+          echo "   origin policy: $(echo "$BLOB" | python3 -c 'import json,sys; b=json.load(sys.stdin); print("derived (root_url=%s, environments=%s)" % (b["root_url"], b.get("environments") or "none") if b.get("root_url") else "LEGACY exact-match (spa_origins) — tenant subdomains will be refused")')"
 
       # ── Seed SSM auth-policy + session-policy templates ─────────────────────
       # Components deploy.yml seeds these after every deploy, but porth-install
