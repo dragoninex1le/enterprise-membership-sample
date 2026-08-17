@@ -733,7 +733,10 @@ jobs:
               # PORTH-588: root_url / environments / tenant_origins are NOT written
               # here. They are policy.MANAGED_KEYS, owned by `porth-install
               # auth-config`, which runs as the next step. This step writes only the
-              # consumer's own keys — identity and stack shape.
+              # keys belonging to this consumer — identity and stack shape.
+              # NOTE: this whole block is inside python3 -c '...', a single-quoted
+              # shell string. An apostrophe here ends that string and breaks the
+              # step in bash, not in Python. Do not use one.
               "environment": os.environ.get("EFF_FIXED_ENV", ""),
               "sessions_table": os.environ.get("PORTH_SESSIONS_TABLE", ""),
               "session_kms_key_id": os.environ.get("PORTH_SESSION_KMS", ""),
