@@ -857,10 +857,18 @@ jobs:
           TEMPLATE_NAME="tenant-scoped-default"
           PLATFORM_TEMPLATE_NAME="platform-scoped-default"
 
+          # PORTH-593 — TWO patterns, both required. A tenant record's PK is exactly
+          # ENV#{env}#TENANT#{tenant} with no trailing separator, so the '#*' pattern
+          # alone cannot match it: the tenant role could not read its own tenant and
+          # every tenant route 500d in IAM at Director.assert_readable(), before any
+          # permission was evaluated. Do NOT collapse to ENV#$env#TENANT#$tenant* —
+          # that is a prefix match and tenant 'acme' would reach 'acme-staging'.
+          # `porth-install check-session-policy` asserts both directions.
+          #
           # PORTH-514/530 — LeadingKeys must carry the ENV#$env# prefix. EMS pins
           # FixedEnvironment, so every item is written under ENV#{slot}#…; the old
           # un-prefixed TENANT#$tenant / ORG#$org_id matched no key that exists.
-          TENANT_SESSION_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:PutItem","dynamodb:Query","dynamodb:UpdateItem","dynamodb:DeleteItem","dynamodb:BatchGetItem","dynamodb:BatchWriteItem","dynamodb:ConditionCheckItem"],"Resource":"*","Condition":{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["ENV#$env#TENANT#$tenant#*"]}}}]}'
+          TENANT_SESSION_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:PutItem","dynamodb:Query","dynamodb:UpdateItem","dynamodb:DeleteItem","dynamodb:BatchGetItem","dynamodb:BatchWriteItem","dynamodb:ConditionCheckItem"],"Resource":"*","Condition":{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["ENV#$env#TENANT#$tenant","ENV#$env#TENANT#$tenant#*"]}}}]}'
           aws ssm put-parameter \
             --name "/porth/${ENV}/auth-session-policy/${TEMPLATE_NAME}" \
             --value "$TENANT_SESSION_POLICY" \
