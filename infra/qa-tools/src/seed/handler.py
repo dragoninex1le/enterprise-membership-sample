@@ -57,7 +57,7 @@ import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
-from claim_mapping import COMPILED_HASH, COMPILED_SOURCE, MAPPING_SOURCE
+import claim_mapping
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -454,7 +454,12 @@ def _ensure_claim_mapping(claims_tbl, tid, env_scope, now) -> None:
         KeyConditionExpression=Key("PK").eq(pk), ScanIndexForward=False, Limit=1
     )
     items = existing.get("Items", [])
-    if items and items[0].get("compiled_hash") == COMPILED_HASH:
+    # PORTH-591: the namespace is per-install, so these are derived rather than module
+    # constants. The hash is a hash of the rendered source, which makes the repair
+    # automatic: a tenant seeded under the old hardcoded namespace hashes differently, so
+    # it is rewritten here instead of being skipped as already-current.
+    mapping_source, compiled_source, compiled_hash = claim_mapping.resolved()
+    if items and items[0].get("compiled_hash") == compiled_hash:
         return
 
     version = (items[0]["version"] + 1) if items else 1
@@ -466,9 +471,9 @@ def _ensure_claim_mapping(claims_tbl, tid, env_scope, now) -> None:
         "id": str(uuid.uuid4()),
         "tenant_id": tid,
         "version": version,
-        "mapping_source": MAPPING_SOURCE,
-        "compiled_source": COMPILED_SOURCE,
-        "compiled_hash": COMPILED_HASH,
+        "mapping_source": mapping_source,
+        "compiled_source": compiled_source,
+        "compiled_hash": compiled_hash,
         "compiled_at": now,
         "created_at": now,
         "updated_at": now,
