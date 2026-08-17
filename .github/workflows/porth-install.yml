@@ -226,22 +226,13 @@ jobs:
           #
           # Left unset, this whole block is a no-op and behaviour is unchanged —
           # single-host consumers stay on the legacy list.
+          # PORTH-588: the VALUES are resolved here; the WRITING is not. These three
+          # keys belong to `porth-install auth-config` (policy.MANAGED_KEYS), which
+          # runs after the seed step below. This workflow no longer validates them
+          # either — the package's policy module does, with fatal-vs-warning
+          # semantics and a refusal to write a blob that would still be inert.
           ROOT_URL="${ROOT_URL_VAR:-}"
           if [ -n "$ROOT_URL" ]; then
-            # Fail here rather than write a blob the proxy will reject at request
-            # time. These mirror the package's own validator: a bare host, not a
-            # URL, and lower-case because hosts are compared verbatim.
-            if printf '%s' "$ROOT_URL" | grep -q '://'; then
-              echo "::error::PORTH_ROOT_URL must be a bare host, not a URL — got '$ROOT_URL'"
-              exit 1
-            fi
-            case "$ROOT_URL" in
-              */*) echo "::error::PORTH_ROOT_URL must not contain a path — got '$ROOT_URL'"; exit 1 ;;
-            esac
-            if [ "$ROOT_URL" != "$(printf '%s' "$ROOT_URL" | tr '[:upper:]' '[:lower:]')" ]; then
-              echo "::error::PORTH_ROOT_URL must be lower-case — got '$ROOT_URL'"
-              exit 1
-            fi
             echo "Resolved root_url:    '$ROOT_URL' (derived-shape origin policy)"
           else
             echo "::warning::PORTH_ROOT_URL is unset — the origin policy stays on the LEGACY exact-match list."
@@ -450,12 +441,17 @@ jobs:
           fi
 
           # PORTH-556 (SAR 0.2.0): SpaOrigins was REMOVED as a parameter. The authorizer
-          # now DERIVES its Origin allow-list from root_url + environments in the
-          # /porth/auth blob, which is exactly what the "Seed OAuth-proxy config blob"
-          # step below writes — and it writes spa_origins from this same
-          # PORTH_SPA_ORIGINS var. So the value still reaches the authorizer; it now
-          # travels through the blob instead of through a stack parameter, and the two
-          # can no longer drift apart.
+          # DERIVES its Origin allow-list from root_url + environments in the
+          # /porth/auth blob.
+          #
+          # PORTH-588 — this comment used to claim the "Seed OAuth-proxy config blob"
+          # step writes root_url + environments. It never did, and believing it cost a
+          # broken login and a wrong diagnosis ("the blob must predate 0.2.0" — it did
+          # not; it was rewritten on every install, without those keys). Those three
+          # keys are written by the "Conform the auth config blob" step, via
+          # `porth-install auth-config`. The seed step writes spa_origins from
+          # PORTH_SPA_ORIGINS, which is the LEGACY fallback and is only consulted when
+          # root_url is absent.
           #
           # PORTH_SPA_ORIGINS_RAW is therefore still required. Passing SpaOrigins as a
           # parameter would fail change-set creation on an unknown parameter.
@@ -734,10 +730,10 @@ jobs:
               "dns_zone": z,
               "spa_origins": os.environ.get("PORTH_SPA_ORIGINS_RAW", ""),
               "platform_tenant_id": "platform",
-              # PORTH-587: see the resolve step. Absent root_url = legacy
-              # exact-match mode; present = derived shape (platform origin at the
-              # root, one tenant label to its left).
-
+              # PORTH-588: root_url / environments / tenant_origins are NOT written
+              # here. They are policy.MANAGED_KEYS, owned by `porth-install
+              # auth-config`, which runs as the next step. This step writes only the
+              # consumer's own keys — identity and stack shape.
               "environment": os.environ.get("EFF_FIXED_ENV", ""),
               "sessions_table": os.environ.get("PORTH_SESSIONS_TABLE", ""),
               "session_kms_key_id": os.environ.get("PORTH_SESSION_KMS", ""),
@@ -746,25 +742,6 @@ jobs:
           if idp.get("end_session_endpoint"):
               blob["end_session_endpoint"] = idp["end_session_endpoint"]
 
-          # PORTH-587: only emit these when configured. An EMPTY root_url is not
-          # the same as an absent one — origins._root() reads the key and an empty
-          # string would decompose against nothing, so write the key or omit it.
-          root_url = os.environ.get("PORTH_ROOT_URL_RESOLVED", "").strip()
-          if root_url:
-              blob["root_url"] = root_url
-              # A wildcard install resolves tenants by definition. Declaring it
-              # makes a missing resolver raise loudly at start-up instead of
-              # answering "no" to every tenant — which is indistinguishable from
-              # the legacy-list bug this replaces.
-              blob["tenant_origins"] = "required"
-          environments = [
-              e.strip()
-              for e in os.environ.get("PORTH_AUTH_ENVIRONMENTS_RAW", "").split(",")
-              if e.strip()
-          ]
-          if environments:
-              blob["environments"] = environments
-
           print(json.dumps(blob))
           ')
 
@@ -772,7 +749,63 @@ jobs:
           aws ssm put-parameter --name /porth/auth --type String --overwrite \
             --value "$BLOB" --region "$AWS_REGION"
           echo "✅ Seeded /porth/auth (issuer $(echo "$BLOB" | python3 -c 'import json,sys; print(json.load(sys.stdin)["issuer"])'))"
-          echo "   origin policy: $(echo "$BLOB" | python3 -c 'import json,sys; b=json.load(sys.stdin); print("derived (root_url=%s, environments=%s)" % (b["root_url"], b.get("environments") or "none") if b.get("root_url") else "LEGACY exact-match (spa_origins) — tenant subdomains will be refused")')"
+          echo "   (origin policy keys are written by the next step, not this one)"
+
+      # ── Conform the origin policy — PORTH-588 ───────────────────────────────
+      # root_url / environments / tenant_origins are policy.MANAGED_KEYS, owned by
+      # `porth-install auth-config`. It ships WITH the Porth release, so the rules
+      # for what a given version needs travel with that version instead of being
+      # copied into each consumer's pipeline and drifting — which is exactly how
+      # PORTH-550 happened (a session-policy index three releases stale, silently).
+      #
+      # It reads the blob, changes only the keys it owns, reports the rest as
+      # "left alone", and refuses to write at all if the result would still be
+      # inert. Re-running with no change is a no-op that prints "already conforms",
+      # so this doubles as a conformance check on every install.
+      #
+      # ORDER MATTERS: the step above REWRITES the whole blob, so this must follow
+      # it. Reversed, the seed would erase the managed keys on the next install and
+      # the origin policy would silently revert to legacy.
+      - name: Conform the auth config blob (porth-install auth-config)
+        env:
+          CA_DOMAIN: porth
+          CA_REPO: porth-py
+          # The Porth publisher account, which owns the CodeArtifact domain. Same
+          # account as the SAR app ID default above.
+          CA_OWNER: ${{ vars.PORTH_CODEARTIFACT_OWNER || '084847995635' }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PORTH_ROOT_URL_RESOLVED:-}" ]; then
+            echo "::warning::PORTH_ROOT_URL is unset — skipping auth-config."
+            echo "::warning::The origin policy stays on the LEGACY exact-match list and tenant subdomains will be refused."
+            exit 0
+          fi
+
+          # Cross-account consume from the publisher's CodeArtifact domain. This
+          # is the same package the Porth release itself is built from, so the
+          # consumer cannot end up running upgrade logic from a different version
+          # than the SAR it just installed.
+          aws codeartifact login \
+            --tool pip \
+            --domain "$CA_DOMAIN" \
+            --domain-owner "$CA_OWNER" \
+            --repository "$CA_REPO" \
+            --region "$AWS_REGION"
+          pip install --quiet porth-install
+
+          # Dry run first: the plan is the audit trail. It names every key that
+          # changes, old value to new, and everything deliberately left alone.
+          echo "── plan ──"
+          porth-install auth-config \
+            --root-url "$PORTH_ROOT_URL_RESOLVED" \
+            --environments "${PORTH_AUTH_ENVIRONMENTS_RAW:-}" \
+            --dry-run
+
+          echo "── apply ──"
+          porth-install auth-config \
+            --root-url "$PORTH_ROOT_URL_RESOLVED" \
+            --environments "${PORTH_AUTH_ENVIRONMENTS_RAW:-}"
 
       # ── Seed SSM auth-policy + session-policy templates ─────────────────────
       # Components deploy.yml seeds these after every deploy, but porth-install
