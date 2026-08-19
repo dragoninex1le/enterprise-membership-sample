@@ -118,6 +118,17 @@ jobs:
           echo "PORTH_API_URL=$PORTH_API_URL" >> $GITHUB_ENV
           echo "✅ Resolved PORTH_API_URL=$PORTH_API_URL"
 
+          # PORTH-612: the sample app's API is authorized by Porth's authorizer.
+          PORTH_AUTHORIZER_ARN=$(get_output AuthorizerFunctionArn)
+          if [ -z "$PORTH_AUTHORIZER_ARN" ] || [ "$PORTH_AUTHORIZER_ARN" == "None" ]; then
+            echo "❌ Could not resolve AuthorizerFunctionArn from the $STACK stack outputs."
+            echo "❌ Without it the sample app's API would deploy with no authorizer,"
+            echo "❌ and every one of its routes would 401 before any permission check."
+            exit 1
+          fi
+          echo "PORTH_AUTHORIZER_ARN=$PORTH_AUTHORIZER_ARN" >> $GITHUB_ENV
+          echo "✅ Resolved PORTH_AUTHORIZER_ARN=$PORTH_AUTHORIZER_ARN"
+
       # ── The app's own permissions (PORTH-610) ────────────────────────────────
       # These belong here, not in the Porth install. Porth owns the
       # porth-platform and porth-tenant namespaces; anything this app enforces
@@ -198,17 +209,29 @@ jobs:
           # PORTH_API_URL is still resolved above — SAM needs it as the
           # CloudFront origin.
           VITE_API_BASE_URL: /porth
-          VITE_SAMPLE_APP_API_URL: ${{ env.SAMPLE_APP_API_URL }}
+          # PORTH-612 — empty ON PURPOSE, and it must stay a set-but-empty value
+          # rather than being removed. sampleApp.ts reads
+          #   VITE_SAMPLE_APP_API_URL ?? VITE_API_BASE_URL
+          # so deleting this line falls back to /porth and every sample call would
+          # be prefixed onto the Porth API. Empty means the SPA calls /sample/*
+          # on its own origin, which CloudFront routes to the app's API — the only
+          # arrangement where the zone-scoped session cookie is actually sent.
+          VITE_SAMPLE_APP_API_URL: ''
           VITE_PLATFORM_APEX: porth-sample
 
       # ffug is a test fixture for ADR-Z11 (PORTH-555) — its own suite gates the
       # deploy that ships it. Scoped to ffug deliberately: this workflow had no
       # Python test step before, and widening it is a separate change.
-      - name: Run ffug unit tests (ADR-Z11 PORTH-555)
+      # PORTH-612 — sample_app/tests too, not just ffug. Those tests assert the
+      # things this deploy is otherwise free to break silently: that the app's API
+      # is behind the Porth authorizer and same-origin, and that the permissions
+      # the seeder registers are the ones the routers enforce. Both failures are
+      # invisible from Porth's side, so CI is the only place they surface early.
+      - name: Run unit tests (ADR-Z11 PORTH-555, PORTH-612)
         working-directory: lambdas
         run: |
-          python -m pip install --quiet pytest boto3
-          python -m pytest ffug/tests -q
+          python -m pip install --quiet pytest boto3 pyyaml
+          python -m pytest ffug/tests sample_app/tests -q
 
       # ── SAM build + deploy ───────────────────────────────────────────────────────────────
       - name: SAM build
@@ -247,6 +270,7 @@ jobs:
             --parameter-overrides \
               Environment=dev \
               PorthApiUrl=${{ env.PORTH_API_URL }} \
+              PorthAuthorizerFunctionArn=${{ env.PORTH_AUTHORIZER_ARN }} \
               AcmCertificateArn=${{ vars.ACM_CERTIFICATE_ARN }} \
               CloudFrontAlias='*.porth-sample.ems.estynsoftware.cloud' \
               CloudFrontApexAlias='porth-sample.ems.estynsoftware.cloud' \
