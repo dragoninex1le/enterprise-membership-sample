@@ -706,47 +706,16 @@ jobs:
             exit 1
           fi
 
-          BLOB=$(MANIFEST="$MANIFEST" python3 -c '
-          import json, os, sys
-          manifest = json.loads(os.environ["MANIFEST"])
-          idp = (manifest.get("platform") or {}).get("idp") or {}
-          missing = [k for k in ("issuer", "jwks_uri") if not idp.get(k)]
-          if missing:
-              print(f"::error::platform.idp is missing {missing} (PORTH-488 needs both)", file=sys.stderr)
-              raise SystemExit(1)
-
-          z = os.environ["PORTH_DNS_ZONE"].rstrip(".")
-          blob = {
-              # Identity — from the manifest, verbatim. `client_id` is named
-              # interactive_client_id here because that is what the proxy reads.
-              "issuer": idp["issuer"],
-              "jwks_uri": idp["jwks_uri"],
-              "interactive_client_id": idp.get("client_id", ""),
-              "audience": idp.get("audience", ""),
-              "protocol": idp.get("protocol", "oidc"),
-              # Stack shape — derived, stays in the pipeline.
-              "custom_domain": os.environ.get("PORTH_DOMAIN", ""),
-              "cookie_domain": f".{z}",
-              "dns_zone": z,
-              "spa_origins": os.environ.get("PORTH_SPA_ORIGINS_RAW", ""),
-              "platform_tenant_id": "platform",
-              # PORTH-588: root_url / environments / tenant_origins are NOT written
-              # here. They are policy.MANAGED_KEYS, owned by `porth-install
-              # auth-config`, which runs as the next step. This step writes only the
-              # keys belonging to this consumer — identity and stack shape.
-              # NOTE: this whole block is inside python3 -c '...', a single-quoted
-              # shell string. An apostrophe here ends that string and breaks the
-              # step in bash, not in Python. Do not use one.
-              "environment": os.environ.get("EFF_FIXED_ENV", ""),
-              "sessions_table": os.environ.get("PORTH_SESSIONS_TABLE", ""),
-              "session_kms_key_id": os.environ.get("PORTH_SESSION_KMS", ""),
-          }
-          # Providers without RP-initiated logout simply omit it.
-          if idp.get("end_session_endpoint"):
-              blob["end_session_endpoint"] = idp["end_session_endpoint"]
-
-          print(json.dumps(blob))
-          ')
+          # PORTH-598: the builder lives in deploy/porth/scripts/. It used to be a
+          # python3 -c '...' here — a single-quoted shell string containing Python
+          # containing JSON. An apostrophe in one of its comments ended the shell
+          # string and broke the deploy (PORTH-589); the error read as a bash
+          # syntax error pointing at a parenthesis.
+          BLOB=$(
+            MANIFEST="$MANIFEST" \
+            EFF_FIXED_ENVIRONMENT="$EFF_FIXED_ENV" \
+            python3 deploy/porth/scripts/build_auth_blob.py
+          )
 
           echo "→ writing /porth/auth blob"
           aws ssm put-parameter --name /porth/auth --type String --overwrite \
@@ -820,8 +789,9 @@ jobs:
         continue-on-error: true
         run: |
           ENV="${{ env.EFF_ENV_NAME }}"
-          ALLOW_ALL='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"execute-api:Invoke","Resource":"*"}]}'
-          INDEX='{ "/organizations":"platform-admin-only", "/tenants":"tenant-scoped-rbac", "/users":"tenant-scoped-user", "/roles":"tenant-scoped-rbac", "/permissions":"tenant-scoped-rbac", "/claim-mapping-configs":"tenant-scoped-rbac", "/org-units":"tenant-scoped-rbac", "/provision":"tenant-scoped-user" }'
+          # PORTH-598: payloads live in deploy/porth/ as reviewable JSON.
+          ALLOW_ALL=$(cat deploy/porth/auth-policy/allow-all.json)
+          INDEX=$(cat deploy/porth/auth-policy/index.json)
 
           for NAME in \
             "/porth/${ENV}/auth-policy/platform-admin-only:$ALLOW_ALL" \
@@ -860,7 +830,7 @@ jobs:
           # PORTH-514/530 — LeadingKeys must carry the ENV#$env# prefix. EMS pins
           # FixedEnvironment, so every item is written under ENV#{slot}#…; the old
           # un-prefixed TENANT#$tenant / ORG#$org_id matched no key that exists.
-          TENANT_SESSION_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:PutItem","dynamodb:Query","dynamodb:UpdateItem","dynamodb:DeleteItem","dynamodb:BatchGetItem","dynamodb:BatchWriteItem","dynamodb:ConditionCheckItem"],"Resource":"*","Condition":{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["ENV#$env#TENANT#$tenant#*"]}}}]}'
+          TENANT_SESSION_POLICY=$(cat deploy/porth/session-policy/tenant-scoped-default.json)
           aws ssm put-parameter \
             --name "/porth/${ENV}/auth-session-policy/${TEMPLATE_NAME}" \
             --value "$TENANT_SESSION_POLICY" \
@@ -880,7 +850,7 @@ jobs:
           # populates no dynamodb:LeadingKeys, so ForAllValues:StringLike passes
           # vacuously; folding it in above would read as constrained while
           # constraining nothing.
-          PLATFORM_SESSION_POLICY='{"Version":"2012-10-17","Statement":[{"Sid":"PlatformOperatorKeyedAccess","Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:PutItem","dynamodb:Query","dynamodb:UpdateItem","dynamodb:DeleteItem","dynamodb:BatchGetItem","dynamodb:BatchWriteItem","dynamodb:ConditionCheckItem"],"Resource":"*","Condition":{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["ENV#$env#*"]}}},{"Sid":"PlatformOperatorScan","Effect":"Allow","Action":["dynamodb:Scan"],"Resource":"*"}]}'
+          PLATFORM_SESSION_POLICY=$(cat deploy/porth/session-policy/platform-scoped-default.json)
           aws ssm put-parameter \
             --name "/porth/${ENV}/auth-session-policy/${PLATFORM_TEMPLATE_NAME}" \
             --value "$PLATFORM_SESSION_POLICY" \
@@ -900,7 +870,7 @@ jobs:
           #
           # PORTH-576 — platform_paths selects the template for the platform-admin
           # role.
-          SESSION_INDEX="{\"roles\":{\"tenant\":\"porth-tenant-${ENV}\",\"platform_admin\":\"porth-platform-admin-${ENV}\"},\"context_rules\":[],\"paths\":{\"/\":\"${TEMPLATE_NAME}\"},\"platform_paths\":{\"/\":\"${PLATFORM_TEMPLATE_NAME}\"}}"
+          SESSION_INDEX=$(python3 deploy/porth/scripts/render.py deploy/porth/session-policy/index.template.json ENV="$ENV")
           aws ssm put-parameter \
             --name "/porth/${ENV}/auth-session-policy/index" \
             --value "$SESSION_INDEX" \

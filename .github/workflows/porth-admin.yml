@@ -1,0 +1,150 @@
+name: Porth — admin tasks
+
+# PORTH-598. The porth-install package ships several commands that are documented
+# as "run by hand" — and there was no hand to run them from. They need EMS
+# credentials and the package off CodeArtifact, which a laptop has neither of, and
+# cloud operations do not run from a local machine anyway.
+#
+# So they run here: same OIDC role as the install, same account, dry-run by
+# default, and a record in the Actions log of who ran what and when.
+#
+# Each command is idempotent and converges — running one that has nothing to do
+# reports "nothing to do" rather than doing it twice. That is what makes it safe
+# to reach for when you are unsure whether it has already been run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Which porth-install command to run'
+        required: true
+        type: choice
+        options:
+          - reconcile-permissions
+          - check-session-policy
+          - backfill-tenant-index
+          - auth-config
+      environment_name:
+        description: 'Table-name suffix (the Environment stack parameter)'
+        required: false
+        default: 'dev'
+      env_scope:
+        description: 'ADR-Z8 slot the records live under. Must match FixedEnvironment.'
+        required: false
+        default: 'prod'
+      apply:
+        description: 'Write changes. Leave OFF to dry-run and read the report first.'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: porth-admin-${{ inputs.task }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  CA_DOMAIN: porth
+  CA_REPO: porth-py
+  CA_OWNER: '084847995635'
+
+jobs:
+  run-task:
+    name: ${{ inputs.task }} (${{ inputs.apply && 'APPLY' || 'dry-run' }})
+    runs-on: ubuntu-latest
+    environment: porth-install
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Caller identity
+        run: aws sts get-caller-identity
+
+      - name: Install porth-install from CodeArtifact
+        run: |
+          set -euo pipefail
+          aws codeartifact login --tool pip \
+            --domain "$CA_DOMAIN" --domain-owner "$CA_OWNER" \
+            --repository "$CA_REPO" --region "$AWS_REGION"
+          pip install --quiet porth-install
+          echo "porth-install $(pip show porth-install | awk '/^Version:/ {print $2}')"
+
+      - name: Run the task
+        env:
+          ENV_NAME: ${{ inputs.environment_name || 'dev' }}
+          ENV_SCOPE: ${{ inputs.env_scope || 'prod' }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          set -euo pipefail
+
+          # Dry-run is the default and has to be explicit per command, because
+          # "no --apply flag" is not the same as "--dry-run" for a tool whose
+          # commands each decide their own default.
+          DRY=""
+          if [ "$APPLY" != "true" ]; then
+            DRY="--dry-run"
+            echo "::notice::Dry run — nothing will be written. Re-run with apply=true once the report looks right."
+          fi
+
+          case "${{ inputs.task }}" in
+            reconcile-permissions)
+              # --tenants all reconciles every tenant's admin role, not just the
+              # platform one. An existing tenant whose admin role predates a
+              # permission is exactly the mismatch this exists to close, and
+              # provisioning only runs at tenant CREATION so nothing else fixes it.
+              porth-install reconcile-permissions \
+                --permissions-table "porth-permissions-${ENV_NAME}" \
+                --roles-table "porth-roles-${ENV_NAME}" \
+                --tenants-table "porth-tenants-${ENV_NAME}" \
+                --environment "$ENV_SCOPE" \
+                --tenants all \
+                $DRY
+              ;;
+            check-session-policy)
+              # Read-only; ignores $DRY.
+              porth-install check-session-policy \
+                --prefix "/porth/${ENV_NAME}/auth-session-policy"
+              ;;
+            backfill-tenant-index)
+              porth-install backfill-tenant-index \
+                --table "porth-tenants-${ENV_NAME}" \
+                $DRY
+              ;;
+            auth-config)
+              # Normally runs inside porth-install.yml. Exposed here for the case
+              # where the blob needs conforming without a full install.
+              porth-install auth-config $DRY
+              ;;
+            *)
+              echo "::error::unknown task ${{ inputs.task }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Porth admin task"
+            echo ""
+            echo "- **Task:** \`${{ inputs.task }}\`"
+            echo "- **Mode:** ${{ inputs.apply && '**APPLY** — changes written' || 'dry run — nothing written' }}"
+            echo "- **Tables:** \`*-${{ inputs.environment_name || 'dev' }}\`"
+            echo "- **Env scope:** \`${{ inputs.env_scope || 'prod' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

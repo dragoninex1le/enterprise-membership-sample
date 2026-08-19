@@ -1,0 +1,10 @@
+{
+  "/organizations": "platform-admin-only",
+  "/tenants": "tenant-scoped-rbac",
+  "/users": "tenant-scoped-user",
+  "/roles": "tenant-scoped-rbac",
+  "/permissions": "tenant-scoped-rbac",
+  "/claim-mapping-configs": "tenant-scoped-rbac",
+  "/org-units": "tenant-scoped-rbac",
+  "/provision": "tenant-scoped-user"
+}
