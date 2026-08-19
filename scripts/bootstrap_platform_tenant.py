@@ -308,16 +308,50 @@ def bootstrap_role_permissions(roles_tbl, role_id: str, permission_keys: list[st
     ``legacy_pk`` is still swept, because this install may be the first one that
     runs after a migration and the rows this script itself left behind are
     exactly the ones nothing else will clean up.
+
+    PORTH-609 — it removes only the grants it OWNS. The consuming app registers
+    its own permissions against this role, and replacing the whole set revoked
+    them on every Porth install.
     """
     role_pk = env_key(f"TENANT#platform#ROLE#{role_id}")
     legacy_pk = env_key(f"ROLE#{role_id}")
 
-    # Remove old links, under BOTH shapes.
+    # Only the grants this script OWNS (PORTH-609). It used to delete every
+    # PERM# row on the role before writing its own ten back, which silently
+    # revoked any permission granted by anything else — the consuming app's own
+    # permissions among them. The EMS app registers Accounts Receivable,
+    # Accounts Payable and Dashboard against this same role, and an install of
+    # PORTH wiped them: the app then rendered "unauthorized" on its own pages,
+    # with nothing in Porth's logs, because Porth had allowed every request.
+    #
+    # It was concealed until now. The sweep only looked at the legacy key, so
+    # after PORTH-602 moved the rows it deleted nothing at all; PORTH-607 made
+    # the sweep find both shapes, and that is what turned a latent
+    # whole-set replace into a real one.
+    #
+    # A whole-set replace is the wrong verb here regardless. porth_common's
+    # set_role_permissions already unions for exactly this reason — "an operator
+    # may have granted extras deliberately and this is not the place to revoke
+    # them" — and a bootstrap script has even less claim to another
+    # namespace's grants than an operator does.
+    owned = {p["key"] for p in PERMISSIONS}
+
     for pk in (role_pk, legacy_pk):
-        old = roles_tbl.query(
+        existing = roles_tbl.query(
             KeyConditionExpression=Key("pk").eq(pk) & Key("sk").begins_with("PERM#")
         )
-        for item in old.get("Items", []):
+        for item in existing.get("Items", []):
+            key = item.get("permission_key") or item["sk"].removeprefix("PERM#")
+            if key not in owned:
+                # Someone else's grant. Not ours to remove — and on the legacy
+                # key, not ours to leave stranded either, so it is moved rather
+                # than dropped.
+                if pk == legacy_pk:
+                    moved = dict(item)
+                    moved["pk"] = role_pk
+                    roles_tbl.put_item(Item=moved)
+                    roles_tbl.delete_item(Key={"pk": item["pk"], "sk": item["sk"]})
+                continue
             roles_tbl.delete_item(Key={"pk": item["pk"], "sk": item["sk"]})
 
     # Write new links
