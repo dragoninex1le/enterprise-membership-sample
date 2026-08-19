@@ -1,0 +1,9 @@
+{
+  "roles": {
+    "tenant": "porth-tenant-{{ENV}}",
+    "platform_admin": "porth-platform-admin-{{ENV}}"
+  },
+  "context_rules": [],
+  "paths": { "/": "tenant-scoped-default" },
+  "platform_paths": { "/": "platform-scoped-default" }
+}
