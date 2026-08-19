@@ -3,7 +3,7 @@ import re
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
-from .middleware import PorthContextMiddleware
+from .director import DirectorMiddleware
 from .routers import dashboard, ar, ap, approvals
 
 app = FastAPI(title="Porth Sample App")
@@ -34,9 +34,12 @@ else:
 
 # Middleware is applied LIFO — last added = outermost = first to process requests.
 # CORSMiddleware must be outermost so it wraps ALL responses, including early-exit
-# error responses (e.g. 401) from inner middleware.  If PorthContextMiddleware were
+# error responses (e.g. 401) from inner middleware.  If DirectorMiddleware were
 # outermost it would return a 401 without CORS headers and the browser would block it.
-app.add_middleware(PorthContextMiddleware)   # added first → innermost
+# PORTH-613 — the shared Director, not a hand-rolled context. Still innermost,
+# so CORSMiddleware wraps even the early 401/403 responses; a refusal without
+# CORS headers is one the browser hides from the app entirely.
+app.add_middleware(DirectorMiddleware)       # added first → innermost
 
 app.add_middleware(                          # added last  → outermost
     CORSMiddleware,

@@ -59,7 +59,7 @@ def test_the_api_declares_a_porth_authorizer(resources):
 def test_the_context_lands_where_the_app_reads_it(resources):
     """EnableSimpleResponses must be false.
 
-    auth_context.py reads requestContext.authorizer.lambda. Simple responses put
+    the Director reads requestContext.authorizer.lambda. Simple responses put
     the context somewhere else, so the app would see nothing and 401 — the same
     symptom as having no authorizer at all.
     """
