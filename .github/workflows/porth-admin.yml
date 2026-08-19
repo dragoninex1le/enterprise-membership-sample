@@ -58,7 +58,7 @@ env:
   CA_DOMAIN: porth
   CA_REPO: porth-py
   CA_OWNER: '084847995635'
-  PORTH_INSTALL_VERSION: '0.2.3'
+  PORTH_INSTALL_VERSION: '0.2.5'
 
 jobs:
   run-task:

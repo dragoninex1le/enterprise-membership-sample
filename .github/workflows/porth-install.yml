@@ -103,7 +103,7 @@ env:
   AWS_REGION: us-east-1
   # Pinned deliberately; see the install step for why a floating version
   # silently resolved backwards.
-  PORTH_INSTALL_VERSION: '0.2.4'
+  PORTH_INSTALL_VERSION: '0.2.5'
 
 jobs:
   install-or-upgrade:
