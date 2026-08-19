@@ -95,6 +95,9 @@ concurrency:
 
 env:
   AWS_REGION: us-east-1
+  # Pinned deliberately; see the install step for why a floating version
+  # silently resolved backwards.
+  PORTH_INSTALL_VERSION: '0.2.3'
 
 jobs:
   install-or-upgrade:
@@ -764,7 +767,22 @@ jobs:
             --domain-owner "$CA_OWNER" \
             --repository "$CA_REPO" \
             --region "$AWS_REGION"
-          pip install --quiet porth-install
+          # Pinned, not floating. `pip install porth-install` takes whatever is
+          # latest THAT IT CAN RESOLVE, and on 2026-08-18 that silently meant an
+          # old one: 0.2.3 requires porth-common>=0.0.6, 0.0.6 had not been
+          # published yet, so pip backtracked to 0.2.1 — whose floor it could
+          # satisfy — and installed that. The symptom was
+          #
+          #   porth-install: error: argument command: invalid choice: 'migrate-keys'
+          #
+          # which reads as a broken workflow rather than an unpublished
+          # dependency, and it survived a re-run because nothing about it was
+          # transient. A pin turns that into "no matching distribution", which
+          # names the real problem.
+          #
+          # Bump this deliberately when a new porth-install is published.
+          pip install --quiet "porth-install==${PORTH_INSTALL_VERSION}"
+          echo "porth-install $(pip show porth-install | awk '/^Version:/ {print $2}')"
 
           # Dry run first: the plan is the audit trail. It names every key that
           # changes, old value to new, and everything deliberately left alone.
