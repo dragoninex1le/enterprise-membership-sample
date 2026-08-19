@@ -1,15 +1,30 @@
 name: E2E Tests
 
+# PORTH-611 — automatic execution is PAUSED, not deleted.
+#
+# The suite has been failing and is due to move to a separate harness, so
+# running it on every push, every pull request and every deploy costs pipeline
+# time to re-report a known-red state. A red check nobody acts on is worse than
+# no check: it trains everyone to ignore the colour, and the next genuine
+# failure arrives wearing the same face.
+#
+# workflow_dispatch is deliberately kept. The suite still runs on demand, so
+# this is a pause with the tests intact and not a quiet deletion — the specs,
+# fixtures and helpers are all untouched.
+#
+# To restore, put the three triggers below back:
+#
+#   push:
+#     branches: ['**']
+#   pull_request:
+#   workflow_run:                    # Tier 2 only after the deploy finishes,
+#     workflows: ["Deploy Admin UI"] # so it never tests a stale live site
+#     types: [completed]
+#     branches: [main]
+#
+# Restoring them without fixing the suite first just reinstates the noise.
 on:
-  push:
-    branches: ['**']
-  pull_request:
   workflow_dispatch:
-  # Tier 2 only fires after the deploy finishes — prevents testing a stale live site
-  workflow_run:
-    workflows: ["Deploy Admin UI"]
-    types: [completed]
-    branches: [main]
 
 # PORTH-540 removed the OIDC grant as vestigial, noting to restore it when the suite
 # needs credentials. That moment is PORTH-531: @estyn/porth-admin resolves from the Porth
