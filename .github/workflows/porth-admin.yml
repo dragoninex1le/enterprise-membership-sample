@@ -11,6 +11,13 @@ name: Porth — admin tasks
 # Each command is idempotent and converges — running one that has nothing to do
 # reports "nothing to do" rather than doing it twice. That is what makes it safe
 # to reach for when you are unsure whether it has already been run.
+#
+# PORTH-605 — `migrate-keys` is deliberately NOT here. Data migrations run
+# automatically inside porth-install.yml on every install and upgrade, which is
+# what convergence is for: an upgrade step nobody has to remember, on exactly
+# the installs nobody is sure about. Adding it here again would recreate the
+# manual step, and a migration that only runs when someone thinks to run it is
+# the failure mode, not the feature.
 
 on:
   workflow_dispatch:
@@ -23,7 +30,6 @@ on:
           - reconcile-permissions
           - check-session-policy
           - backfill-tenant-index
-          - migrate-keys
           - auth-config
       environment_name:
         description: 'Table-name suffix (the Environment stack parameter)'
@@ -140,21 +146,6 @@ jobs:
             backfill-tenant-index)
               porth-install backfill-tenant-index \
                 --table "porth-tenants-${ENV_NAME}" \
-                $DRY
-              ;;
-            migrate-keys)
-              # Re-key rows whose partition key does not lead with the tenant,
-              # so dynamodb:LeadingKeys can isolate them. Scans both tables and
-              # moves only the rows that do not already conform, so running it
-              # on a converged install is a scan that writes nothing.
-              #
-              # No --installed-version: omitted means "unknown", which runs
-              # every migration. That is the safe reading — an install nobody
-              # can date is the one most likely to be behind — and it is
-              # affordable because each migration converges.
-              porth-install migrate-keys \
-                --roles-table "porth-roles-${ENV_NAME}" \
-                --users-table "porth-users-${ENV_NAME}" \
                 $DRY
               ;;
             auth-config)

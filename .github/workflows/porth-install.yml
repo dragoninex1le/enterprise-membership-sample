@@ -97,7 +97,7 @@ env:
   AWS_REGION: us-east-1
   # Pinned deliberately; see the install step for why a floating version
   # silently resolved backwards.
-  PORTH_INSTALL_VERSION: '0.2.3'
+  PORTH_INSTALL_VERSION: '0.2.4'
 
 jobs:
   install-or-upgrade:
@@ -796,6 +796,64 @@ jobs:
           porth-install auth-config \
             --root-url "$PORTH_ROOT_URL_RESOLVED" \
             --environments "${PORTH_AUTH_ENVIRONMENTS_RAW:-}"
+
+      # ── Data migrations (porth-install migrate-keys) ───────────────────────
+      # PORTH-605. This runs on EVERY install and upgrade, because that is what
+      # migrations.py is built for: each migration scans, asks each row whether
+      # it already conforms, and fixes only the ones that do not. There is no
+      # "has this run?" state anywhere — the data IS the state — so re-running a
+      # converged install is a scan that writes nothing.
+      #
+      # It was briefly a hand-dispatched task in porth-admin.yml. That was the
+      # wrong home: it made an upgrade step something a person had to remember,
+      # on exactly the installs nobody is sure about, which is the situation the
+      # convergence design exists to survive.
+      #
+      # Placement matters more than anything else here. This sits AFTER "Execute
+      # change set", so the stack is already running code that reads
+      # tenant-leading keys (PORTH-604). The reverse order — data moved while the
+      # old code is live — is the failure this whole sequence is arranged to
+      # avoid: every read misses, every role resolves zero permissions, and the
+      # install reports success.
+      #
+      # No continue-on-error. A migration that cannot key a row stops with that
+      # row named and writes nothing; carrying on would leave an install that
+      # passed its pipeline and is not isolated.
+      - name: Run data migrations (porth-install migrate-keys)
+        env:
+          CA_DOMAIN: porth
+          CA_REPO: porth-py
+          CA_OWNER: ${{ vars.PORTH_CODEARTIFACT_OWNER || '084847995635' }}
+          # EFF_ENV_NAME is what every other step in this workflow uses (see the
+          # change-set parameters); inventing a second source for the same value
+          # is how the table-name suffix drifts.
+          ENV_NAME: ${{ env.EFF_ENV_NAME }}
+        run: |
+          set -euo pipefail
+
+          # Empty would build "porth-roles-" and fail somewhere less obvious.
+          if [ -z "${ENV_NAME:-}" ]; then
+            echo "::error::EFF_ENV_NAME is empty — cannot resolve the table names."
+            exit 1
+          fi
+
+          aws codeartifact login --tool pip \
+            --domain "$CA_DOMAIN" --domain-owner "$CA_OWNER" \
+            --repository "$CA_REPO" --region "${AWS_REGION}"
+          pip install --quiet "porth-install==${PORTH_INSTALL_VERSION}"
+
+          # Dry run first, for the same reason auth-config does: the plan is the
+          # audit trail. It names every key that moves, old value to new.
+          echo "── plan ──"
+          porth-install migrate-keys \
+            --roles-table "porth-roles-${ENV_NAME}" \
+            --users-table "porth-users-${ENV_NAME}" \
+            --dry-run
+
+          echo "── apply ──"
+          porth-install migrate-keys \
+            --roles-table "porth-roles-${ENV_NAME}" \
+            --users-table "porth-users-${ENV_NAME}"
 
       # ── Seed SSM auth-policy + session-policy templates ─────────────────────
       # Components deploy.yml seeds these after every deploy, but porth-install
