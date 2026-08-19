@@ -23,6 +23,7 @@ on:
           - reconcile-permissions
           - check-session-policy
           - backfill-tenant-index
+          - migrate-keys
           - auth-config
       environment_name:
         description: 'Table-name suffix (the Environment stack parameter)'
@@ -124,6 +125,21 @@ jobs:
             backfill-tenant-index)
               porth-install backfill-tenant-index \
                 --table "porth-tenants-${ENV_NAME}" \
+                $DRY
+              ;;
+            migrate-keys)
+              # Re-key rows whose partition key does not lead with the tenant,
+              # so dynamodb:LeadingKeys can isolate them. Scans both tables and
+              # moves only the rows that do not already conform, so running it
+              # on a converged install is a scan that writes nothing.
+              #
+              # No --installed-version: omitted means "unknown", which runs
+              # every migration. That is the safe reading — an install nobody
+              # can date is the one most likely to be behind — and it is
+              # affordable because each migration converges.
+              porth-install migrate-keys \
+                --roles-table "porth-roles-${ENV_NAME}" \
+                --users-table "porth-users-${ENV_NAME}" \
                 $DRY
               ;;
             auth-config)
