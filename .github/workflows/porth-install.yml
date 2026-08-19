@@ -46,9 +46,15 @@ on:
   workflow_dispatch:
     inputs:
       sar_version:
+        # Kept current deliberately. A stale default is not a harmless
+        # convenience: the dispatch form prefills it, so leaving 0.2.0 here
+        # meant an upgrade silently asked for a release older than the one
+        # installed, and the change set was refused with an error that reads as
+        # a stack problem rather than a wrong input. Bump this with each Porth
+        # release the consumer is expected to move to.
         description: 'Porth SAR app semantic version to install/upgrade to'
         required: true
-        default: '0.2.0'
+        default: '0.2.5'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
@@ -97,7 +103,7 @@ env:
   AWS_REGION: us-east-1
   # Pinned deliberately; see the install step for why a floating version
   # silently resolved backwards.
-  PORTH_INSTALL_VERSION: '0.2.4'
+  PORTH_INSTALL_VERSION: '0.2.5'
 
 jobs:
   install-or-upgrade:
@@ -837,6 +843,12 @@ jobs:
             exit 1
           fi
 
+          if [ -z "${EFF_SAR_VERSION:-}" ]; then
+            echo "::error::EFF_SAR_VERSION is empty — refusing to run migrations"
+            echo "::error::without knowing which release is being installed."
+            exit 1
+          fi
+
           aws codeartifact login --tool pip \
             --domain "$CA_DOMAIN" --domain-owner "$CA_OWNER" \
             --repository "$CA_REPO" --region "${AWS_REGION}"
@@ -844,16 +856,30 @@ jobs:
 
           # Dry run first, for the same reason auth-config does: the plan is the
           # audit trail. It names every key that moves, old value to new.
+          # --target-version is the safety gate, not a convenience (PORTH-606).
+          # A migration is only correct once the code that can READ its output is
+          # running, so an install of an older release must not carry it. Without
+          # this, dispatching with the default sar_version (0.2.0) would deploy
+          # code that reads ENV#e#ROLE#{id} and then re-key every row to
+          # ENV#e#TENANT#t#ROLE#{id} — every read missing, on a stack that just
+          # reported success. That very dispatch happened; an unrelated
+          # change-set failure is the only reason it did not.
+          #
+          # No --installed-version: omitted means "unknown", which considers
+          # every migration up to the target. Convergence makes that affordable,
+          # and an install nobody can date is the one most likely to be behind.
           echo "── plan ──"
           porth-install migrate-keys \
             --roles-table "porth-roles-${ENV_NAME}" \
             --users-table "porth-users-${ENV_NAME}" \
+            --target-version "${EFF_SAR_VERSION}" \
             --dry-run
 
           echo "── apply ──"
           porth-install migrate-keys \
             --roles-table "porth-roles-${ENV_NAME}" \
-            --users-table "porth-users-${ENV_NAME}"
+            --users-table "porth-users-${ENV_NAME}" \
+            --target-version "${EFF_SAR_VERSION}"
 
       # ── Seed SSM auth-policy + session-policy templates ─────────────────────
       # Components deploy.yml seeds these after every deploy, but porth-install
