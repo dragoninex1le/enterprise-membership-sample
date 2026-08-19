@@ -118,6 +118,45 @@ jobs:
           echo "PORTH_API_URL=$PORTH_API_URL" >> $GITHUB_ENV
           echo "✅ Resolved PORTH_API_URL=$PORTH_API_URL"
 
+      # ── The app's own permissions (PORTH-610) ────────────────────────────────
+      # These belong here, not in the Porth install. Porth owns the
+      # porth-platform and porth-tenant namespaces; anything this app enforces
+      # is this app's to register, from this app's deploy.
+      #
+      # That boundary is not a preference. PORTH-609 was a Porth install
+      # deleting these very permissions, and the reason nothing put them back is
+      # that nothing owned them — they had only ever been created by hand. The
+      # app's pages then 403 while Porth's logs stay clean, because Porth
+      # allowed every request it saw and these routes never reach it.
+      #
+      # Converging and additive: registers what is missing, unions the grants,
+      # writes nothing on a second run, and removes nothing ever.
+      - name: Seed the app's own Porth permissions
+        run: |
+          set -euo pipefail
+
+          STACK="$PORTH_STACK_NAME"
+          get_output() {
+            aws cloudformation describe-stacks --stack-name "$STACK" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text 2>/dev/null || echo ""
+          }
+
+          export PORTH_PERMISSIONS_TABLE=$(get_output PermissionsTableName)
+          export PORTH_ROLES_TABLE=$(get_output RolesTableName)
+          export PORTH_TENANTS_TABLE=$(get_output TenantsTableName)
+          export PORTH_ENV_SCOPE="${{ vars.PORTH_ENV_SCOPE || 'prod' }}"
+
+          if [ -z "$PORTH_PERMISSIONS_TABLE" ] || [ "$PORTH_PERMISSIONS_TABLE" = "None" ]; then
+            echo "::error::could not resolve Porth table names from $STACK."
+            echo "::error::The app's permissions cannot be registered, so its"
+            echo "::error::pages will 403 with nothing in Porth's logs."
+            exit 1
+          fi
+
+          python -m pip install --quiet boto3
+          python scripts/seed_app_permissions.py
+
       - name: Resolve sample app stack outputs
         run: |
           STACK=${{ env.SAM_STACK_NAME }}
