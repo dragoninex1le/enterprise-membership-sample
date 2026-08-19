@@ -291,13 +291,34 @@ def bootstrap_role(roles_tbl, now: str) -> str:
 
 
 def bootstrap_role_permissions(roles_tbl, role_id: str, permission_keys: list[str], now: str) -> None:
-    role_pk = env_key(f"ROLE#{role_id}")
-    # Remove old links
-    old = roles_tbl.query(
-        KeyConditionExpression=Key("pk").eq(role_pk) & Key("sk").begins_with("PERM#")
-    )
-    for item in old.get("Items", []):
-        roles_tbl.delete_item(Key={"pk": item["pk"], "sk": item["sk"]})
+    """Set the platform-admin role's permission grants.
+
+    PORTH-607 — tenant-leading keys. This wrote ``ENV#{e}#ROLE#{id}``, the shape
+    that predates PORTH-604, and it runs in the same install pipeline as the
+    migration and AFTER it. So the migration correctly moved the grants and
+    deleted the originals, and thirty seconds later this recreated them:
+
+        ENV#prod#ROLE#{id}              ← written here, again, every install
+        ENV#prod#TENANT#platform#ROLE#{id}   ← where the migration had put them
+
+    Nothing failed. The repositories read new-then-old, so the duplicates were
+    invisible from the application — the only symptom was the old rows never
+    going away, which reads as "the migration did not delete them".
+
+    ``legacy_pk`` is still swept, because this install may be the first one that
+    runs after a migration and the rows this script itself left behind are
+    exactly the ones nothing else will clean up.
+    """
+    role_pk = env_key(f"TENANT#platform#ROLE#{role_id}")
+    legacy_pk = env_key(f"ROLE#{role_id}")
+
+    # Remove old links, under BOTH shapes.
+    for pk in (role_pk, legacy_pk):
+        old = roles_tbl.query(
+            KeyConditionExpression=Key("pk").eq(pk) & Key("sk").begins_with("PERM#")
+        )
+        for item in old.get("Items", []):
+            roles_tbl.delete_item(Key={"pk": item["pk"], "sk": item["sk"]})
 
     # Write new links
     for pkey in permission_keys:
