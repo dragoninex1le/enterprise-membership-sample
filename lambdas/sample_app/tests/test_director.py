@@ -139,3 +139,85 @@ def test_the_repository_uses_the_directors_own_connection(monkeypatch):
 
     assert asked, "the repository never asked the Director for a connection"
     assert repository is director.repository, "a new connection per access"
+
+
+# --------------------------------------------------------------------------
+# the chain, end to end
+# --------------------------------------------------------------------------
+#
+# Everything above tests a piece. These call a real route through a real app, so
+# the whole path executes: middleware attaches the Director, get_director hands
+# it to the `porth` dependency, and the handler reaches its data through it.
+#
+# Added because the pieces all passed while nothing ran them together — the
+# conftest had a `client` fixture that no test used, so a break anywhere in the
+# wiring would have gone unnoticed by a green suite.
+
+
+
+def _condition_values(condition) -> set:
+    """Every literal operand in a boto3 key condition, however nested."""
+    values: set = set()
+    expression = getattr(condition, "get_expression", None)
+    if expression is None:
+        return {condition} if isinstance(condition, str) else values
+    for operand in expression()["values"]:
+        if isinstance(operand, str):
+            values.add(operand)
+        else:
+            values |= _condition_values(operand)
+    return values
+
+def test_a_route_reaches_its_data_through_the_director(client, mock_dynamodb):
+    mock_dynamodb.Table.return_value.query.return_value = {
+        "Items": [{"invoice_id": "i-1"}]
+    }
+
+    response = client.get("/sample/ar/invoices")
+
+    assert response.status_code == 200
+    assert response.json() == [{"invoice_id": "i-1"}]
+
+
+def test_the_handler_scopes_by_the_directors_tenant(client, mock_dynamodb):
+    """The tenant comes from the authorizer context, never from the caller."""
+    mock_dynamodb.Table.return_value.query.return_value = {"Items": []}
+
+    client.get("/sample/ar/invoices")
+
+    condition = mock_dynamodb.Table.return_value.query.call_args.kwargs[
+        "KeyConditionExpression"
+    ]
+
+    assert "TENANT#t-test" in _condition_values(condition), (
+        "the query was not scoped to the Director's tenant. str() on a boto3 "
+        "condition hides its operands, so this walks the expression instead — "
+        "an assertion against the repr passes no matter which tenant was used."
+    )
+
+
+def test_a_route_without_the_permission_is_refused(mock_dynamodb):
+    """403 from the route itself, with the Director attached and authenticated."""
+    from sample_app.tests.conftest import build_director, make_test_app
+    from starlette.testclient import TestClient
+
+    director = build_director(permissions={"dashboard.read"}, dynamodb=mock_dynamodb)
+    response = TestClient(make_test_app(director)).get("/sample/ar/invoices")
+
+    assert response.status_code == 403
+    assert "ar.invoices.read" in response.json()["detail"]
+
+
+def test_a_write_route_needs_its_own_permission(mock_dynamodb):
+    """Read does not imply write — the split the app's whole model rests on."""
+    from sample_app.tests.conftest import build_director, make_test_app
+    from starlette.testclient import TestClient
+
+    director = build_director(permissions={"ar.invoices.read"}, dynamodb=mock_dynamodb)
+    response = TestClient(make_test_app(director)).post(
+        "/sample/ar/invoices",
+        json={"customer_name": "Acme", "amount": 1.0, "due_date": ""},
+    )
+
+    assert response.status_code == 403
+    assert "ar.invoices.write" in response.json()["detail"]
