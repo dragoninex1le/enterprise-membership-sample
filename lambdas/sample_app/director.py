@@ -34,6 +34,7 @@ import os
 
 from porth_common.director import Director as PorthDirector
 from porth_common.director import DirectorMiddleware as _BaseDirectorMiddleware
+from porth_common.protocols.cloud_clients import DOCUMENT_STORE
 
 from .repository import SampleAppRepository
 
@@ -58,9 +59,15 @@ class SampleAppDirector(PorthDirector):
         to this tenant's credentials, so a handler cannot reach another tenant's
         partition even by asking. The old middleware built this from raw STS keys
         per request, which worked and cached nothing and renewed nothing.
+
+        The argument is a CAPABILITY, not an AWS service name — DOCUMENT_STORE,
+        which on AWS maps to DynamoDB and elsewhere would be Firestore or Cosmos
+        DB. Passing ``"dynamodb"`` raised UnknownCapabilityError at runtime and
+        the app 500'd on every page (PORTH-615). The constant is imported rather
+        than spelled, so the same mistake is an ImportError next time.
         """
         if getattr(self, "_repository", None) is None:
-            self._repository = SampleAppRepository(self.resource("dynamodb"))
+            self._repository = SampleAppRepository(self.resource(DOCUMENT_STORE))
         return self._repository
 
 

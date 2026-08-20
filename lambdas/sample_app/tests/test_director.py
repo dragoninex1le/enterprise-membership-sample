@@ -120,8 +120,11 @@ def test_the_repository_uses_the_directors_own_connection(monkeypatch):
     The connection is cached and scoped to this request's credentials, so a
     handler cannot reach another tenant's partition even by asking.
     """
+    from porth_common.protocols.cloud_clients import CAPABILITIES
+
     director = _director(tenant_id="ems-test", permissions="")
     asked: list = []
+    capabilities: list = []
 
     class _Table:
         pass
@@ -131,14 +134,25 @@ def test_the_repository_uses_the_directors_own_connection(monkeypatch):
             asked.append(name)
             return _Table()
 
-    monkeypatch.setattr(
-        SampleAppDirector, "resource", lambda self, capability: _Resource()
-    )
+    def _resource(self, capability):
+        capabilities.append(capability)
+        return _Resource()
+
+    monkeypatch.setattr(SampleAppDirector, "resource", _resource)
 
     repository = director.repository
 
     assert asked, "the repository never asked the Director for a connection"
     assert repository is director.repository, "a new connection per access"
+
+    # The name has to be a real CAPABILITY, not an AWS service name. The first
+    # version of this test stubbed `resource` and ignored its argument, so
+    # `self.resource("dynamodb")` passed here and raised UnknownCapabilityError
+    # in production on every page (PORTH-615). A stub that accepts anything
+    # tests that the call happened, not that it could work.
+    assert capabilities[0] in CAPABILITIES, (
+        f"{capabilities[0]!r} is not a capability — known: {sorted(CAPABILITIES)}"
+    )
 
 
 # --------------------------------------------------------------------------
