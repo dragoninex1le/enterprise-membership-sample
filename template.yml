@@ -124,7 +124,15 @@ Resources:
   SampleAppAuthorizerInvokeRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub porth-sample-app-authorizer-invoke-${PorthEnvironment}
+      # No RoleName on purpose. The CFN execution role scopes IAM to
+      # role/enterprise-membership-sample-* (see
+      # infra/receiving-account-templates/sample-app-deploy-role.yaml in
+      # Components), and every other role in this stack is CloudFormation-named,
+      # so it inherits the stack prefix and matches. An explicit name outside
+      # that prefix is denied at CREATE — and would have required widening a
+      # deliberately narrow IAM grant to add one role.
+      #
+      # Nothing refers to this role by name; the API references it by ARN.
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
