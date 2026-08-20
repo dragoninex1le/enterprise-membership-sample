@@ -114,45 +114,47 @@ def test_no_director_at_all_is_401_not_403():
 # --------------------------------------------------------------------------
 
 
-def test_the_repository_uses_the_directors_own_connection(monkeypatch):
-    """Not a resource built by hand from raw STS keys.
+def test_the_repository_uses_the_apps_own_credentials(monkeypatch):
+    """Not Porth's tenant-narrowed ones (PORTH-616).
 
-    The connection is cached and scoped to this request's credentials, so a
-    handler cannot reach another tenant's partition even by asking.
+    self.resource() returns credentials scoped to PORTH's tables, and this app's
+    table is not one of them:
+
+        AccessDeniedException: assumed-role/porth-tenant-dev/porth-tenant is not
+        authorized to perform: dynamodb:Query on table/porth-sample-app-dev
+
+    That is correct behaviour. Fixing it by adding the app's table to Porth's
+    role would put a consumer's data in Porth's IAM, and the next consumer's
+    after that.
+
+    The previous version of this test stubbed `resource` and asserted only that
+    it was CALLED — which is exactly why the wrong credential source passed
+    review twice.
     """
-    from porth_common.protocols.cloud_clients import CAPABILITIES
+    import sample_app.director as director_module
 
     director = _director(tenant_id="ems-test", permissions="")
-    asked: list = []
-    capabilities: list = []
+    used_porth_credentials = []
 
-    class _Table:
-        pass
-
+    monkeypatch.setattr(
+        SampleAppDirector,
+        "resource",
+        lambda self, capability: used_porth_credentials.append(capability),
+    )
     class _Resource:
         def Table(self, name):
-            asked.append(name)
-            return _Table()
+            return object()
 
-    def _resource(self, capability):
-        capabilities.append(capability)
-        return _Resource()
-
-    monkeypatch.setattr(SampleAppDirector, "resource", _resource)
+    monkeypatch.setattr(director_module.boto3, "resource", lambda service: _Resource())
 
     repository = director.repository
 
-    assert asked, "the repository never asked the Director for a connection"
+    assert not used_porth_credentials, (
+        "the app reached its own table through Porth's tenant credentials; those "
+        "are scoped to Porth's tables and this one is not among them"
+    )
     assert repository is director.repository, "a new connection per access"
 
-    # The name has to be a real CAPABILITY, not an AWS service name. The first
-    # version of this test stubbed `resource` and ignored its argument, so
-    # `self.resource("dynamodb")` passed here and raised UnknownCapabilityError
-    # in production on every page (PORTH-615). A stub that accepts anything
-    # tests that the call happened, not that it could work.
-    assert capabilities[0] in CAPABILITIES, (
-        f"{capabilities[0]!r} is not a capability — known: {sorted(CAPABILITIES)}"
-    )
 
 
 # --------------------------------------------------------------------------
