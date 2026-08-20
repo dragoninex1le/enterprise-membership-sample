@@ -72,6 +72,15 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # Which role this actually ran as. Cheap, and it settles a question that
+      # otherwise needs repo settings to answer: AWS_ROLE_ARN is an environment
+      # variable, so the workflow file alone cannot tell you. Worth recording on
+      # every run — several failures this week were a DEPLOYED role having
+      # drifted from the template it was supposed to match, and the first
+      # question each time was "which role is this?".
+      - name: Caller identity
+        run: aws sts get-caller-identity
+
       - name: Verify Porth components are deployed in EMS (pre-check)
         run: |
           echo "Looking for the Porth components stack: $PORTH_STACK_NAME"
