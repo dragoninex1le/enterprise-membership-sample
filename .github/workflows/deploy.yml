@@ -72,6 +72,15 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # Which role this actually ran as. Cheap, and it settles a question that
+      # otherwise needs repo settings to answer: AWS_ROLE_ARN is an environment
+      # variable, so the workflow file alone cannot tell you. Worth recording on
+      # every run — several failures this week were a DEPLOYED role having
+      # drifted from the template it was supposed to match, and the first
+      # question each time was "which role is this?".
+      - name: Caller identity
+        run: aws sts get-caller-identity
+
       - name: Verify Porth components are deployed in EMS (pre-check)
         run: |
           echo "Looking for the Porth components stack: $PORTH_STACK_NAME"
@@ -117,6 +126,17 @@ jobs:
           fi
           echo "PORTH_API_URL=$PORTH_API_URL" >> $GITHUB_ENV
           echo "✅ Resolved PORTH_API_URL=$PORTH_API_URL"
+
+          # PORTH-612: the sample app's API is authorized by Porth's authorizer.
+          PORTH_AUTHORIZER_ARN=$(get_output AuthorizerFunctionArn)
+          if [ -z "$PORTH_AUTHORIZER_ARN" ] || [ "$PORTH_AUTHORIZER_ARN" == "None" ]; then
+            echo "❌ Could not resolve AuthorizerFunctionArn from the $STACK stack outputs."
+            echo "❌ Without it the sample app's API would deploy with no authorizer,"
+            echo "❌ and every one of its routes would 401 before any permission check."
+            exit 1
+          fi
+          echo "PORTH_AUTHORIZER_ARN=$PORTH_AUTHORIZER_ARN" >> $GITHUB_ENV
+          echo "✅ Resolved PORTH_AUTHORIZER_ARN=$PORTH_AUTHORIZER_ARN"
 
       # ── The app's own permissions (PORTH-610) ────────────────────────────────
       # These belong here, not in the Porth install. Porth owns the
@@ -198,19 +218,55 @@ jobs:
           # PORTH_API_URL is still resolved above — SAM needs it as the
           # CloudFront origin.
           VITE_API_BASE_URL: /porth
-          VITE_SAMPLE_APP_API_URL: ${{ env.SAMPLE_APP_API_URL }}
+          # PORTH-612 — empty ON PURPOSE, and it must stay a set-but-empty value
+          # rather than being removed. sampleApp.ts reads
+          #   VITE_SAMPLE_APP_API_URL ?? VITE_API_BASE_URL
+          # so deleting this line falls back to /porth and every sample call would
+          # be prefixed onto the Porth API. Empty means the SPA calls /sample/*
+          # on its own origin, which CloudFront routes to the app's API — the only
+          # arrangement where the zone-scoped session cookie is actually sent.
+          VITE_SAMPLE_APP_API_URL: ''
           VITE_PLATFORM_APEX: porth-sample
 
       # ffug is a test fixture for ADR-Z11 (PORTH-555) — its own suite gates the
       # deploy that ships it. Scoped to ffug deliberately: this workflow had no
       # Python test step before, and widening it is a separate change.
-      - name: Run ffug unit tests (ADR-Z11 PORTH-555)
+      # PORTH-612 — sample_app/tests too, not just ffug. Those tests assert the
+      # things this deploy is otherwise free to break silently: that the app's API
+      # is behind the Porth authorizer and same-origin, and that the permissions
+      # the seeder registers are the ones the routers enforce. Both failures are
+      # invisible from Porth's side, so CI is the only place they surface early.
+      - name: Run unit tests (ADR-Z11 PORTH-555, PORTH-612)
         working-directory: lambdas
         run: |
-          python -m pip install --quiet pytest boto3
-          python -m pytest ffug/tests -q
+          python -m pip install --quiet pytest boto3 pyyaml
+          python -m pytest ffug/tests sample_app/tests -q
 
       # ── SAM build + deploy ───────────────────────────────────────────────────────────────
+
+      # PORTH-613 — the sample app now depends on porth-common, which lives in
+      # the Porth CodeArtifact repo and not on PyPI. `sam build` shells out to
+      # pip, so pip needs the index BEFORE the build, not after.
+      #
+      # The token fetched earlier is npm's (frontend/.npmrc reads
+      # CODEARTIFACT_AUTH_TOKEN for @estyn/porth-admin) and does nothing for pip.
+      # Without this step the build fails on:
+      #
+      #   ERROR: Could not find a version that satisfies the requirement porth-common
+      #
+      # which reads as a bad version pin rather than an unconfigured index.
+      #
+      # `login --tool pip` sets a global index-url, so the rest of the build
+      # resolves through the same repository. That is safe because porth-py
+      # proxies PyPI — fastapi, mangum and boto3 come through it too, as they
+      # already do for every porth-install run.
+      - name: Configure pip for CodeArtifact (porth-common)
+        run: |
+          set -euo pipefail
+          aws codeartifact login --tool pip \
+            --domain porth --domain-owner 084847995635 \
+            --repository porth-py --region "$AWS_REGION"
+
       - name: SAM build
         run: sam build
 
@@ -247,6 +303,7 @@ jobs:
             --parameter-overrides \
               Environment=dev \
               PorthApiUrl=${{ env.PORTH_API_URL }} \
+              PorthAuthorizerFunctionArn=${{ env.PORTH_AUTHORIZER_ARN }} \
               AcmCertificateArn=${{ vars.ACM_CERTIFICATE_ARN }} \
               CloudFrontAlias='*.porth-sample.ems.estynsoftware.cloud' \
               CloudFrontApexAlias='porth-sample.ems.estynsoftware.cloud' \

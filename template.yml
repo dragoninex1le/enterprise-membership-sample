@@ -18,6 +18,15 @@ Parameters:
       Base URL of the deployed Porth API
       (output PorthApiUrl from the Components stack)
 
+  PorthAuthorizerFunctionArn:
+    Type: String
+    Description: >
+      ARN of Porth's Lambda authorizer (output AuthorizerFunctionArn from the
+      Components stack). The sample app's API is authorized by the SAME function
+      that guards Porth's own — PORTH-612. Without it the app's routes reach the
+      Lambda with no requestContext.authorizer.lambda, tenant_id is None, and the
+      app's middleware returns 401 before any permission is consulted.
+
   AcmCertificateArn:
     Type: String
     NoEcho: true
@@ -75,6 +84,71 @@ Resources:
         - AttributeName: sk
           KeyType: RANGE
 
+  # ── Sample app API, authorized by Porth ───────────────────────────────────
+  #
+  # PORTH-612. This used to be SAM's implicit HttpApi with no Auth at all, so
+  # every request arrived unauthenticated: no requestContext.authorizer.lambda,
+  # tenant_id None, and sample_app/middleware.py returned 401 before any
+  # permission was consulted. The SPA read that 401 as a dead session, re-ran the
+  # Porth login, succeeded, retried, and looped — while Porth's logs stayed clean,
+  # because these routes never reached Porth at all.
+  #
+  # The configuration mirrors Porth's own API deliberately. In particular there is
+  # NO identity source (PORTH-479 Path B): HTTP API identity sources are
+  # AND-matched, so [Authorization, Cookie] cannot express "either", and requiring
+  # Authorization makes API Gateway 401 cookie-only BFF requests *without invoking
+  # the authorizer*. Our calls are cookie-authenticated, so that would reproduce
+  # the exact failure this resource exists to fix.
+  SampleAppApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: $default
+      Auth:
+        DefaultAuthorizer: PorthAuthorizer
+        Authorizers:
+          PorthAuthorizer:
+            AuthorizerPayloadFormatVersion: "2.0"
+            # False, so the authorizer returns an IAM policy and its context
+            # lands at requestContext.authorizer.lambda — which is exactly where
+            # sample_app/auth_context.py reads it from. Simple responses would
+            # move it and the app would see nothing.
+            EnableSimpleResponses: false
+            FunctionArn: !Ref PorthAuthorizerFunctionArn
+            FunctionInvokeRole: !GetAtt SampleAppAuthorizerInvokeRole.Arn
+      # No CorsConfiguration: after PORTH-612 the SPA calls this same-origin
+      # through CloudFront, so there is no preflight to answer. Adding one would
+      # invite the cross-origin arrangement that cannot carry the session cookie.
+
+  # API Gateway assumes this to call Porth's authorizer, which lives in another
+  # stack. Scoped to that one function ARN and nothing else.
+  SampleAppAuthorizerInvokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # No RoleName on purpose. The CFN execution role scopes IAM to
+      # role/enterprise-membership-sample-* (see
+      # infra/receiving-account-templates/sample-app-deploy-role.yaml in
+      # Components), and every other role in this stack is CloudFormation-named,
+      # so it inherits the stack prefix and matches. An explicit name outside
+      # that prefix is denied at CREATE — and would have required widening a
+      # deliberately narrow IAM grant to add one role.
+      #
+      # Nothing refers to this role by name; the API references it by ARN.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokePorthAuthorizer
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Ref PorthAuthorizerFunctionArn
+
   # ── Sample app API Lambda ─────────────────────────────────────────────────
 
   SampleAppFunction:
@@ -98,6 +172,8 @@ Resources:
         ApiProxy:
           Type: HttpApi
           Properties:
+            # The explicit, Porth-authorized API — not SAM's implicit one.
+            ApiId: !Ref SampleAppApi
             Path: /sample/{proxy+}
             Method: ANY
 
@@ -331,6 +407,29 @@ Resources:
             FunctionAssociations:
               - EventType: viewer-request
                 FunctionARN: !GetAtt PorthApiPathStripFunction.FunctionMetadata.FunctionARN
+          # PORTH-612 — the sample app's API has to be same-origin for exactly the
+          # reason /porth/* is. The session cookie is scoped to the zone, so a call
+          # to the raw execute-api host never carries it: the request arrives
+          # unauthenticated, the authorizer resolves no session, and the app 401s.
+          # Attaching the authorizer alone does not fix that — both halves are
+          # required, and either alone still fails.
+          #
+          # No path-strip function here: the app serves its routes AT /sample
+          # (routers use prefix="/sample/ar" and the event path is
+          # /sample/{proxy+}), so the prefix is real rather than a routing
+          # convenience. Stripping it would 404 every call.
+          - PathPattern: /sample/*
+            TargetOriginId: SampleApiOrigin
+            ViewerProtocolPolicy: https-only
+            # CachingDisabled — authenticated, tenant-scoped reads and writes.
+            # Caching any of these would serve one tenant's data to another.
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            # AllViewerExceptHostHeader — forwards the session cookie and
+            # X-CSRF-Token, and sends the origin's Host so API Gateway routes it.
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            Compress: true
         Origins:
           - Id: S3Origin
             DomainName: !GetAtt AdminUIBucket.RegionalDomainName
@@ -339,6 +438,11 @@ Resources:
           - Id: PorthApiOrigin
             # PorthApiUrl is "https://host" — index 2 of the "/"-split is the host.
             DomainName: !Select [2, !Split ["/", !Ref PorthApiUrl]]
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: [TLSv1.2]
+          - Id: SampleApiOrigin
+            DomainName: !Sub ${SampleAppApi}.execute-api.${AWS::Region}.amazonaws.com
             CustomOriginConfig:
               OriginProtocolPolicy: https-only
               OriginSSLProtocols: [TLSv1.2]
@@ -382,8 +486,11 @@ Outputs:
       Name: !Sub ${AWS::StackName}-CloudFrontUrl
 
   SampleAppApiUrl:
-    Description: Sample app API Gateway URL
-    Value: !Sub https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com
+    Description: >
+      Sample app API Gateway URL. The SPA no longer calls this directly — it goes
+      through CloudFront at /sample/* so the session cookie is same-origin
+      (PORTH-612). Kept for diagnostics and for callers that hold their own token.
+    Value: !Sub https://${SampleAppApi}.execute-api.${AWS::Region}.amazonaws.com
     Export:
       Name: !Sub ${AWS::StackName}-SampleAppApiUrl
 

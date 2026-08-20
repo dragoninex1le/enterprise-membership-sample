@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Request, Depends
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from ..dependencies import require_permission
-from ..repository import SampleAppRepository
+from ..dependencies import porth, require_permission
+from ..director import SampleAppDirector
 
 router = APIRouter(prefix="/sample/ap", tags=["accounts-payable"])
 
@@ -11,12 +11,12 @@ class CreateBillRequest(BaseModel):
     due_date: str = ""
 
 @router.get("/bills", dependencies=[Depends(require_permission("ap.bills.read"))])
-def list_bills(request: Request) -> list[dict]:
-    return SampleAppRepository(request.state.porth.dynamodb).list_bills(request.state.porth.tenant_id)
+def list_bills(director: SampleAppDirector = Depends(porth)) -> list[dict]:
+    return director.repository.list_bills(director.tenant_id)
 
 @router.post("/bills", dependencies=[Depends(require_permission("ap.bills.write"))])
-def create_bill(body: CreateBillRequest, request: Request) -> dict:
-    return SampleAppRepository(request.state.porth.dynamodb).create_bill(
-        request.state.porth.tenant_id,
-        {**body.model_dump(), "created_by": request.state.porth.user_id},
+def create_bill(body: CreateBillRequest, director: SampleAppDirector = Depends(porth)) -> dict:
+    return director.repository.create_bill(
+        director.tenant_id,
+        {**body.model_dump(), "created_by": director.user_id},
     )
