@@ -231,19 +231,6 @@ jobs:
       # ffug is a test fixture for ADR-Z11 (PORTH-555) — its own suite gates the
       # deploy that ships it. Scoped to ffug deliberately: this workflow had no
       # Python test step before, and widening it is a separate change.
-      # PORTH-612 — sample_app/tests too, not just ffug. Those tests assert the
-      # things this deploy is otherwise free to break silently: that the app's API
-      # is behind the Porth authorizer and same-origin, and that the permissions
-      # the seeder registers are the ones the routers enforce. Both failures are
-      # invisible from Porth's side, so CI is the only place they surface early.
-      - name: Run unit tests (ADR-Z11 PORTH-555, PORTH-612)
-        working-directory: lambdas
-        run: |
-          python -m pip install --quiet pytest boto3 pyyaml
-          python -m pytest ffug/tests sample_app/tests -q
-
-      # ── SAM build + deploy ───────────────────────────────────────────────────────────────
-
       # PORTH-613 — the sample app now depends on porth-common, which lives in
       # the Porth CodeArtifact repo and not on PyPI. `sam build` shells out to
       # pip, so pip needs the index BEFORE the build, not after.
@@ -266,6 +253,29 @@ jobs:
           aws codeartifact login --tool pip \
             --domain porth --domain-owner 084847995635 \
             --repository porth-py --region "$AWS_REGION"
+
+      # PORTH-612 — sample_app/tests too, not just ffug. Those tests assert the
+      # things this deploy is otherwise free to break silently: that the app's API
+      # is behind the Porth authorizer and same-origin, and that the permissions
+      # the seeder registers are the ones the routers enforce. Both failures are
+      # invisible from Porth's side, so CI is the only place they surface early.
+      - name: Run unit tests (ADR-Z11 PORTH-555, PORTH-612)
+        working-directory: lambdas
+        run: |
+          set -euo pipefail
+          # requirements.txt, not a curated list. This installed a hand-listed
+          # `pytest boto3 pyyaml` back when it ran only ffug/tests, which needed
+          # nothing else — and adding sample_app/tests broke CI on the first push
+          # with `ModuleNotFoundError: No module named 'starlette'`, because those
+          # tests import FastAPI and porth_common. A curated list is a second
+          # statement of requirements.txt and drifts the moment the app gains a
+          # dependency; this way the tests run against the same set the Lambda
+          # will. porth-common is in it, which is why the CodeArtifact login now
+          # comes first (PORTH-614).
+          python -m pip install --quiet -r requirements.txt pytest pyyaml
+          python -m pytest ffug/tests sample_app/tests -q
+
+      # ── SAM build + deploy ───────────────────────────────────────────────────────────────
 
       - name: SAM build
         run: sam build
