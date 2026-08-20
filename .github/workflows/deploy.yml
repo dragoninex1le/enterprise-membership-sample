@@ -234,6 +234,30 @@ jobs:
           python -m pytest ffug/tests sample_app/tests -q
 
       # ── SAM build + deploy ───────────────────────────────────────────────────────────────
+
+      # PORTH-613 — the sample app now depends on porth-common, which lives in
+      # the Porth CodeArtifact repo and not on PyPI. `sam build` shells out to
+      # pip, so pip needs the index BEFORE the build, not after.
+      #
+      # The token fetched earlier is npm's (frontend/.npmrc reads
+      # CODEARTIFACT_AUTH_TOKEN for @estyn/porth-admin) and does nothing for pip.
+      # Without this step the build fails on:
+      #
+      #   ERROR: Could not find a version that satisfies the requirement porth-common
+      #
+      # which reads as a bad version pin rather than an unconfigured index.
+      #
+      # `login --tool pip` sets a global index-url, so the rest of the build
+      # resolves through the same repository. That is safe because porth-py
+      # proxies PyPI — fastapi, mangum and boto3 come through it too, as they
+      # already do for every porth-install run.
+      - name: Configure pip for CodeArtifact (porth-common)
+        run: |
+          set -euo pipefail
+          aws codeartifact login --tool pip \
+            --domain porth --domain-owner 084847995635 \
+            --repository porth-py --region "$AWS_REGION"
+
       - name: SAM build
         run: sam build
 
