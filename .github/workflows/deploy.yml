@@ -138,6 +138,48 @@ jobs:
           echo "PORTH_AUTHORIZER_ARN=$PORTH_AUTHORIZER_ARN" >> $GITHUB_ENV
           echo "✅ Resolved PORTH_AUTHORIZER_ARN=$PORTH_AUTHORIZER_ARN"
 
+          # PORTH-587 — what ffug needs from the install, read from the install
+          # rather than assumed here.
+          #
+          # Environment and FixedEnvironment are two different axes wearing one
+          # word, and on this install they hold DIFFERENT VALUES (dev / prod).
+          # Environment addresses configuration — SSM document paths, the event
+          # bus name, the context key alias. FixedEnvironment addresses data —
+          # the ENV#{slot}# prefix on every partition key, and the value an
+          # inbound context envelope is checked against.
+          #
+          # Swapping them produces a service that reads configuration which does
+          # not exist, or writes keys nothing can read. Both are silent, which is
+          # why these are resolved and hard-failed rather than defaulted.
+          get_param() {
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK" \
+              --query "Stacks[0].Parameters[?ParameterKey=='$1'].ParameterValue" \
+              --output text
+          }
+          PORTH_BRANCH=$(get_param Environment)
+          PORTH_ENV_SLOT=$(get_param FixedEnvironment)
+          PORTH_EVENT_BUS=$(get_output EventBusName)
+
+          MISSING=()
+          [ -z "$PORTH_BRANCH" ] || [ "$PORTH_BRANCH" == "None" ] && MISSING+=("Environment (stack parameter)")
+          [ -z "$PORTH_ENV_SLOT" ] || [ "$PORTH_ENV_SLOT" == "None" ] && MISSING+=("FixedEnvironment (stack parameter)")
+          [ -z "$PORTH_EVENT_BUS" ] || [ "$PORTH_EVENT_BUS" == "None" ] && MISSING+=("EventBusName (stack output)")
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "❌ Could not resolve from $STACK: ${MISSING[*]}"
+            echo "❌ ffug would deploy pointed at the wrong environment axis or the"
+            echo "❌ wrong event bus, and both failures are silent — no tenant is"
+            echo "❌ ever provisioned and nothing reports why."
+            exit 1
+          fi
+
+          echo "PORTH_BRANCH=$PORTH_BRANCH" >> $GITHUB_ENV
+          echo "PORTH_ENV_SLOT=$PORTH_ENV_SLOT" >> $GITHUB_ENV
+          echo "PORTH_EVENT_BUS=$PORTH_EVENT_BUS" >> $GITHUB_ENV
+          echo "✅ Porth branch (config axis) = $PORTH_BRANCH"
+          echo "✅ Porth slot   (data axis)   = $PORTH_ENV_SLOT"
+          echo "✅ Porth event bus            = $PORTH_EVENT_BUS"
+
       # ── The app's own permissions (PORTH-610) ────────────────────────────────
       # These belong here, not in the Porth install. Porth owns the
       # porth-platform and porth-tenant namespaces; anything this app enforces
@@ -318,6 +360,10 @@ jobs:
               CloudFrontAlias='*.porth-sample.ems.estynsoftware.cloud' \
               CloudFrontApexAlias='porth-sample.ems.estynsoftware.cloud' \
               PorthEnvironment=dev \
+              PorthBranch=${{ env.PORTH_BRANCH }} \
+              PorthEnvironmentSlot=${{ env.PORTH_ENV_SLOT }} \
+              PorthEventBusName=${{ env.PORTH_EVENT_BUS }} \
+              PorthContextSigningKeyArn=/porth/${{ env.PORTH_BRANCH }}/infra/context-signing-key-arn \
             --no-fail-on-empty-changeset
 
       - name: Diagnose SAM managed-bucket failure

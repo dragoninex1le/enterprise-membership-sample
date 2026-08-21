@@ -1,112 +1,309 @@
+"""The request path — Phase B (PORTH-587).
+
+These tests substitute two seams and nothing else:
+
+* ``porth_common.director.get_context`` — the boundary that verifies the
+  envelope. Substituting it is substituting KMS, which a unit test has no
+  business calling. Every test therefore hands the Director the *exact* shape
+  ``_service_context`` produces from verified claims, so the fake cannot flatter
+  the code by being more generous than the real thing.
+* ``FfugDirector.resource`` — the narrowed connection. What it returns here is a
+  plain double; the narrowing it stands in for is IAM's, asserted against the
+  template in ``test_template_isolation.py`` and witnessed live in UAT-3.
+
+What is deliberately NOT faked: the refusal paths. Those are ffug's own logic
+and run for real.
+"""
+
 from unittest.mock import MagicMock
 
 import pytest
+from porth_common.context.envelope import (
+    EnvelopeAudienceMismatchError,
+    EnvelopeEnvironmentMismatchError,
+    EnvelopeExpiredError,
+    EnvelopeMalformedError,
+    EnvelopeSignatureInvalidError,
+    EnvelopeUnsignedError,
+)
+from porth_common.internal_plane.config import ServiceSuspendedError, UnknownServiceError
 
-import ffug.handler as h
+from ffug import handler as h
+from ffug import salt
+
+ACME_PRIME = "11473776585539494943"
+GLOBEX_PRIME = "9764321322338584621"
 
 
-@pytest.fixture(autouse=True)
+def verified_context(tenant_id="acme", environment="prod", source="porth"):
+    """Exactly what porth_common builds from verified claims — no more.
+
+    Note what is empty and stays empty: roles, permissions, and every user
+    field. A service principal is not a human principal, so a permission check
+    written for a person fails closed. Copying the real shape is the point.
+    """
+    return {
+        "_boundary": "service",
+        "tenant_id": tenant_id,
+        "environment": environment,
+        "source_service": source,
+        "trace_id": "trace-1",
+        "organization_id": "",
+        "user_id": "",
+        "external_id": "",
+        "porth_user_id": "",
+        "roles": "",
+        "permissions": "",
+        "user_email": "",
+        "user_display_name": "",
+        "user_first_name": "",
+        "user_last_name": "",
+        "user_avatar_url": "",
+        "user_status": "",
+        "user_created_at": "",
+        "user_updated_at": "",
+    }
+
+
+@pytest.fixture
 def table():
-    """Substitute the module-level table handle (sample_app_events convention)."""
-    mock = MagicMock()
-    h._table = mock
-    yield mock
-    h._table = None
+    return MagicMock()
 
 
-def test_echo_stores_under_env_and_tenant_keys(table):
-    result = h.handler(
-        {
-            "environment": "dev",
-            "tenant_id": "acme",
-            "op": "echo",
-            "item_id": "i-1",
-            "payload": {"hello": "world"},
-        }
+@pytest.fixture
+def porth(monkeypatch, table):
+    """Wire both seams. Returns a controller the tests drive."""
+
+    class Controller:
+        context = verified_context()
+        table = None
+
+        def arrives_as(self, **kwargs):
+            self.context = verified_context(**kwargs)
+
+        def raises(self, exc):
+            def boom(_event):
+                raise exc
+
+            monkeypatch.setattr("porth_common.director.get_context", boom)
+
+        def tenant_is(self, status="active", prime=ACME_PRIME):
+            row = {"status": status}
+            if prime is not None:
+                row["prime"] = prime
+            self.table.get_item.return_value = {"Item": row}
+
+        def tenant_is_unknown(self):
+            self.table.get_item.return_value = {}
+
+    controller = Controller()
+    controller.table = table
+
+    monkeypatch.setattr("porth_common.director.get_context", lambda _e: controller.context)
+    monkeypatch.setattr(
+        h.FfugDirector, "resource", lambda self, _capability: MagicMock(Table=lambda _n: table)
+    )
+    controller.tenant_is()
+    return controller
+
+
+def err(result):
+    return result["error"]["code"]
+
+
+# --- the tenant is not a payload field any more ------------------------------
+
+
+def test_tenant_comes_from_the_verified_claims_not_the_payload(porth, table):
+    """The keystone. A caller that names a tenant is ignored, not obeyed —
+    ``tenant_id`` is simply not a field this handler reads."""
+    porth.arrives_as(tenant_id="acme")
+
+    h.handler({"op": "echo", "item_id": "i-1", "payload": 1, "tenant_id": "globex",
+               "environment": "somewhere-else"})
+
+    assert table.put_item.call_args[1]["Item"]["pk"] == "ENV#prod#TENANT#acme"
+
+
+def test_an_invocation_with_no_context_is_refused(porth):
+    porth.context = {}
+
+    assert err(h.handler({"op": "hash", "payload": 1})) == "missing_context"
+    assert err(h.handler({})) == "missing_context"
+    assert err(h.handler(None)) == "missing_context"
+
+
+# --- envelope rejection classes (UAT-4) --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "exc,code",
+    [
+        (EnvelopeUnsignedError("no token"), "unsigned"),
+        (EnvelopeSignatureInvalidError("forged"), "bad_signature"),
+        (EnvelopeExpiredError("stale"), "expired"),
+        (EnvelopeAudienceMismatchError("for someone else"), "audience_mismatch"),
+        (EnvelopeEnvironmentMismatchError("wrong slot"), "environment_mismatch"),
+        (EnvelopeMalformedError("garbage"), "malformed"),
+    ],
+)
+def test_each_envelope_rejection_keeps_its_own_code(porth, table, exc, code):
+    """The codes are the library's ``reason_code``, not ffug's invention, so
+    ffug's replies and Porth's audit-log lines share one vocabulary."""
+    porth.raises(exc)
+
+    result = h.handler({"op": "hash", "payload": 1})
+
+    assert err(result) == code
+    assert not table.put_item.called
+
+
+@pytest.mark.parametrize(
+    "exc", [UnknownServiceError("ghost"), ServiceSuspendedError("ghost", "suspended")]
+)
+def test_a_verified_envelope_from_an_unaccepted_service_is_its_own_fault(porth, exc):
+    """Distinct from a bad signature on purpose: one is forgery, the other is
+    configuration, and they want different people looking at them."""
+    porth.raises(exc)
+
+    assert err(h.handler({"op": "hash", "payload": 1})) == "source_service_refused"
+
+
+def test_a_narrowing_failure_is_not_answered_it_is_raised(porth, monkeypatch):
+    """A deployment fault, not a caller fault. It must alarm as an invocation
+    error rather than being handed back to the caller as a tidy rejection."""
+    from porth_common.director import ResourceUnavailableError
+
+    monkeypatch.setattr(
+        h.FfugDirector, "resource", MagicMock(side_effect=RuntimeError("AssumeRole denied"))
     )
 
-    assert result == {
-        "ok": True,
-        "op": "echo",
-        "item_id": "i-1",
-        "payload": {"hello": "world"},
+    with pytest.raises(ResourceUnavailableError):
+        h.handler({"op": "hash", "payload": 1})
+
+
+# --- the tenant must have been provisioned by the bus ------------------------
+
+
+def test_a_tenant_the_bus_has_not_announced_is_refused(porth):
+    """ffug cannot mint its own salt. A caller arriving before the event is
+    refused rather than served under an invented one."""
+    porth.tenant_is_unknown()
+
+    assert err(h.handler({"op": "hash", "payload": 1})) == "tenant_not_provisioned"
+
+
+def test_a_suspended_tenant_is_served_nothing(porth, table):
+    """TS-MC.8 — refusal at event-delivery latency, not at cache TTL."""
+    porth.tenant_is(status="suspended")
+
+    assert err(h.handler({"op": "hash", "payload": 1})) == "tenant_not_active"
+    assert err(h.handler({"op": "echo", "item_id": "i", "payload": 1})) == "tenant_not_active"
+    assert err(h.handler({"op": "get", "item_id": "i"})) == "tenant_not_active"
+    assert not table.put_item.called
+
+
+def test_a_deleted_tenants_stripped_marker_is_not_a_salt(porth):
+    """Reached by a caller holding a still-valid envelope for a tenant deleted
+    moments ago. The marker has a status and no salt; it must not be usable."""
+    porth.tenant_is(status="deleted", prime=None)
+
+    assert err(h.handler({"op": "hash", "payload": 1})) == "tenant_not_active"
+
+
+# --- hash: the demonstrable half --------------------------------------------
+
+
+def test_hash_returns_this_tenants_digest_and_the_salt_behind_it(porth):
+    result = h.handler({"op": "hash", "payload": {"amount": 100}})
+
+    assert result["ok"] is True
+    assert result["prime"] == ACME_PRIME
+    assert result["digest"] == salt.digest(ACME_PRIME, {"amount": 100})
+
+
+def test_the_same_payload_under_two_tenants_gives_two_digests(porth):
+    """The property the whole slice exists to show. Both invocations run the
+    same code on the same input; only the salt each one is ALLOWED to read
+    differs, and that permission is IAM's to grant."""
+    porth.arrives_as(tenant_id="acme")
+    porth.tenant_is(prime=ACME_PRIME)
+    acme = h.handler({"op": "hash", "payload": {"amount": 100}})
+
+    porth.arrives_as(tenant_id="globex")
+    porth.tenant_is(prime=GLOBEX_PRIME)
+    globex = h.handler({"op": "hash", "payload": {"amount": 100}})
+
+    assert acme["digest"] != globex["digest"]
+
+
+def test_hash_reads_the_salt_from_this_tenants_partition_only(porth, table):
+    porth.arrives_as(tenant_id="globex")
+
+    h.handler({"op": "hash", "payload": 1})
+
+    assert table.get_item.call_args[1]["Key"] == {
+        "pk": "ENV#prod#TENANT#globex",
+        "sk": "PROJECTION",
     }
+
+
+def test_hash_writes_nothing(porth, table):
+    """Kept pure so ``echo`` stays the only writer and the residue sweep stays
+    a one-prefix question."""
+    h.handler({"op": "hash", "payload": 1})
+
+    assert not table.put_item.called
+
+
+def test_hash_requires_a_payload(porth):
+    assert err(h.handler({"op": "hash"})) == "missing_payload"
+
+
+# --- echo and get, unchanged in contract, now on narrowed credentials --------
+
+
+def test_echo_stores_under_the_tenant_partition_and_hands_the_payload_back(porth, table):
+    result = h.handler({"op": "echo", "item_id": "i-1", "payload": {"hello": "world"}})
+
+    assert result == {"ok": True, "op": "echo", "item_id": "i-1", "payload": {"hello": "world"}}
     item = table.put_item.call_args[1]["Item"]
-    assert item["pk"] == "ENV#dev#TENANT#acme"
-    assert item["sk"] == "ITEM#i-1"
-    assert item["payload"] == {"hello": "world"}
+    assert item == {"pk": "ENV#prod#TENANT#acme", "sk": "ITEM#i-1", "payload": {"hello": "world"}}
 
 
-def test_echo_is_the_default_op(table):
-    h.handler({"environment": "dev", "tenant_id": "acme", "item_id": "i-1", "payload": 1})
+def test_echo_is_still_the_default_op(porth, table):
+    h.handler({"item_id": "i-1", "payload": 1})
+
     assert table.put_item.called
 
 
-def test_get_reads_back_under_the_same_keys(table):
-    table.get_item.return_value = {"Item": {"payload": {"hello": "world"}}}
+def test_get_reads_back_under_the_same_keys(porth, table):
+    table.get_item.side_effect = [
+        {"Item": {"status": "active", "prime": ACME_PRIME}},
+        {"Item": {"payload": {"hello": "world"}}},
+    ]
 
-    result = h.handler(
-        {"environment": "dev", "tenant_id": "acme", "op": "get", "item_id": "i-1"}
-    )
+    result = h.handler({"op": "get", "item_id": "i-1"})
 
-    assert result["ok"] is True
     assert result["payload"] == {"hello": "world"}
     assert table.get_item.call_args[1]["Key"] == {
-        "pk": "ENV#dev#TENANT#acme",
+        "pk": "ENV#prod#TENANT#acme",
         "sk": "ITEM#i-1",
     }
 
 
-def test_get_missing_item_is_a_typed_rejection(table):
-    table.get_item.return_value = {}
+def test_get_missing_item_is_a_typed_rejection(porth, table):
+    table.get_item.side_effect = [{"Item": {"status": "active", "prime": ACME_PRIME}}, {}]
 
-    result = h.handler(
-        {"environment": "dev", "tenant_id": "acme", "op": "get", "item_id": "nope"}
-    )
-
-    assert result["ok"] is False
-    assert result["error"]["code"] == "not_found"
+    assert err(h.handler({"op": "get", "item_id": "nope"})) == "not_found"
 
 
-# --- fail-closed context resolution (the Phase B swap point) -----------------
-
-
-@pytest.mark.parametrize(
-    "event,code",
-    [
-        ({"tenant_id": "acme", "item_id": "i-1", "payload": 1}, "missing_environment"),
-        ({"environment": "dev", "item_id": "i-1", "payload": 1}, "missing_tenant"),
-        ({"environment": "  ", "tenant_id": "acme"}, "missing_environment"),
-        ({"environment": "dev", "tenant_id": "  "}, "missing_tenant"),
-    ],
-)
-def test_missing_context_is_refused_never_defaulted(table, event, code):
-    result = h.handler(event)
-
-    assert result["ok"] is False
-    assert result["error"]["code"] == code
-    # The point of the assertion: nothing was written under a fallback tenant.
+def test_echo_requires_item_id_and_payload(porth, table):
+    assert err(h.handler({"op": "echo", "payload": 1})) == "missing_item_id"
+    assert err(h.handler({"op": "echo", "item_id": "i-1"})) == "missing_payload"
     assert not table.put_item.called
 
 
-def test_unknown_op_is_refused(table):
-    result = h.handler({"environment": "dev", "tenant_id": "acme", "op": "delete_everything"})
-
-    assert result["ok"] is False
-    assert result["error"]["code"] == "unknown_op"
+def test_unknown_op_is_refused(porth, table):
+    assert err(h.handler({"op": "delete_everything"})) == "unknown_op"
     assert not table.put_item.called
-
-
-def test_echo_requires_item_id_and_payload(table):
-    assert h.handler({"environment": "dev", "tenant_id": "acme", "payload": 1})["error"][
-        "code"
-    ] == "missing_item_id"
-    assert h.handler({"environment": "dev", "tenant_id": "acme", "item_id": "i-1"})["error"][
-        "code"
-    ] == "missing_payload"
-    assert not table.put_item.called
-
-
-def test_empty_invocation_is_refused(table):
-    assert h.handler({})["error"]["code"] == "missing_environment"
-    assert h.handler(None)["error"]["code"] == "missing_environment"
