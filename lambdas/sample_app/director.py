@@ -32,10 +32,9 @@ from __future__ import annotations
 
 import os
 
-import boto3
-
 from porth_common.director import Director as PorthDirector
 from porth_common.director import DirectorMiddleware as _BaseDirectorMiddleware
+from porth_common.protocols.cloud_clients import DOCUMENT_STORE
 
 from .repository import SampleAppRepository
 
@@ -54,40 +53,48 @@ class SampleAppDirector(PorthDirector):
 
     @property
     def repository(self) -> SampleAppRepository:
-        """This app's own table, reached with this app's own credentials.
+        """This app's table, reached with the credentials this request arrived on.
 
-        Deliberately NOT ``self.resource(...)`` (PORTH-616). That returns Porth's
-        tenant-narrowed credentials, and those are scoped to PORTH's tables:
+        ``self.resource(...)`` does not mean "Porth's credentials". It means
+        *whatever the authorizer minted for this request*, and PORTH-586 changed
+        what that is.
 
-            AccessDeniedException: User: assumed-role/porth-tenant-dev/porth-tenant
-            is not authorized to perform: dynamodb:Query on
-            table/porth-sample-app-dev
+        PORTH-616 was right about the mechanics and its premise has since gone.
+        Before PORTH-586 every request resolved a catch-all binding in the
+        session-policy index, so the credentials arriving here were
+        ``porth-tenant-{env}`` — Porth's own role, scoped to Porth's tables, and
+        correctly refusing this one:
 
-        Which is correct behaviour, not a missing grant. porth-tenant-dev is
-        Porth's role. Adding this app's table to it would put a consumer's data
-        in Porth's IAM, and the next consumer's after that — Porth's session
-        policy would grow a row per consuming application, which is the opposite
-        of a boundary.
+            AccessDeniedException: assumed-role/porth-tenant-dev/porth-tenant is
+            not authorized to perform: dynamodb:Query on table/porth-sample-app-dev
 
-        So the app's table is the app's problem, protected by the app's own
-        Lambda execution role (DynamoDBCrudPolicy on SampleAppTable in
-        template.yml). Tenant isolation for THIS table is enforced by its key
-        design — every row is ``pk = TENANT#{tenant_id}`` — using the tenant the
-        Director resolved from the authorizer, which no handler can forge or
-        override.
+        Falling back to the ambient execution role was the right answer to that.
+        The index now binds this app's host to this app's own role, so the same
+        call returns ``porth-sample-app-tenant-{env}``: a role this app owns,
+        granted this table and nothing of Porth's, and narrowed to one tenant by
+        the ``porth-tenant`` / ``porth-env`` session tags Porth attaches to every
+        assume. The call site did not change meaning; what arrives did.
 
-        The distinction worth keeping straight: Porth's credentials protect
-        Porth's data at the IAM layer; this app's data is isolated by the key it
-        is written under, with the tenant supplied by Porth. Those are different
-        mechanisms and only the first can live in ``self.resource``.
+        What that buys, and it is the whole point of PORTH-585: tenant isolation
+        on this app's data becomes an IAM boundary rather than a convention. It
+        was the key shape — every row written under ``pk = TENANT#{tenant_id}``
+        — which is sound while every write goes through this repository and is
+        worth nothing the first time one does not. A query for another tenant's
+        partition is now refused by DynamoDB before this code is consulted.
 
-        This was never exercised before because the app's API had no authorizer,
-        so no STS credentials ever reached it and the old middleware silently
-        used the ambient identity — the behaviour restored here, now with the
-        reason written down.
+        The ambient identity is gone rather than merely unused: SampleAppFunction
+        no longer holds DynamoDBCrudPolicy on this table, so there is nothing to
+        fall back TO. That is deliberate, and it is what Porth did to its own API
+        function in PORTH-550 — while a broad execution role exists underneath,
+        narrowing is advisory, and any path that loses it succeeds quietly
+        against every tenant.
+
+        SampleAppEventConsumerFunction keeps its own grant. No authorizer runs
+        for an EventBridge delivery, so there are no request credentials to use
+        and its execution role is the only identity it can have.
         """
         if getattr(self, "_repository", None) is None:
-            self._repository = SampleAppRepository(boto3.resource("dynamodb"))
+            self._repository = SampleAppRepository(self.resource(DOCUMENT_STORE))
         return self._repository
 
 

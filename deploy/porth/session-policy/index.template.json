@@ -19,7 +19,9 @@
         "tenant"
       ],
       "role_arn": "arn:aws:iam::{account}:role/porth-sample-app-${role_type}-{{ENV}}",
-      "session_policy_arns": []
+      "session_policy_arns": [
+        "arn:aws:iam::{account}:policy/porth-sample-app-${role_type}-session-{{ENV}}"
+      ]
     },
     "porth:/": {
       "role_types": [

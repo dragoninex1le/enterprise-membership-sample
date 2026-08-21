@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
 from .director import DirectorMiddleware
-from .routers import dashboard, ar, ap, approvals
+from .routers import dashboard, ar, ap, approvals, diagnostics
 
 app = FastAPI(title="Porth Sample App")
 
@@ -54,5 +54,9 @@ app.include_router(dashboard.router)
 app.include_router(ar.router)
 app.include_router(ap.router)
 app.include_router(approvals.router)
+# PORTH-586: which role served the request. Behind the same authorizer as
+# every other route, so it reports the identity of a REAL request rather
+# than of a probe taking a different path to get here.
+app.include_router(diagnostics.router)
 
 handler = Mangum(app, lifespan="off")
