@@ -380,6 +380,51 @@ jobs:
             echo "- **CloudFront Hosted Zone ID for Alias:** Z2FDTNDATAQYW2"
           } >> $GITHUB_STEP_SUMMARY
 
+      - name: Upsert Route 53 alias for the sample API custom domain
+        # PORTH-586. Not an AWS::Route53::RecordSet in template.yml: that needs
+        # HostedZoneName, which CloudFormation resolves with
+        # route53:ListHostedZones, and this role has ListHostedZonesByName. The
+        # first attempt failed on exactly that and rolled the whole change set
+        # back — the API domain and the app's role with it.
+        #
+        # The alias target is the API's REGIONAL domain and REGIONAL hosted zone,
+        # both published by the stack. Not the CloudFront zone Z2FDTNDATAQYW2
+        # used by the apex alias below: that is a different target and would
+        # resolve nowhere.
+        run: |
+          set -euo pipefail
+          get_output() {
+            aws cloudformation describe-stacks \
+              --stack-name ${{ env.SAM_STACK_NAME }} \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text
+          }
+          API_DOMAIN=$(get_output SampleApiDomainName)
+          TARGET=$(get_output SampleApiDomainRegionalDomainName)
+          TARGET_ZONE=$(get_output SampleApiDomainRegionalHostedZoneId)
+          HOSTED_ZONE_ID=$(aws route53 list-hosted-zones-by-name \
+            --dns-name "ems.estynsoftware.cloud." \
+            --query "HostedZones[0].Id" \
+            --output text | sed 's|/hostedzone/||')
+          echo "Upserting: $API_DOMAIN → $TARGET (HZ $HOSTED_ZONE_ID)"
+          aws route53 change-resource-record-sets \
+            --hosted-zone-id "$HOSTED_ZONE_ID" \
+            --change-batch "{
+              \"Changes\": [{
+                \"Action\": \"UPSERT\",
+                \"ResourceRecordSet\": {
+                  \"Name\": \"$API_DOMAIN\",
+                  \"Type\": \"A\",
+                  \"AliasTarget\": {
+                    \"HostedZoneId\": \"$TARGET_ZONE\",
+                    \"DNSName\": \"$TARGET\",
+                    \"EvaluateTargetHealth\": false
+                  }
+                }
+              }]
+            }"
+          echo "✅ Route 53 alias upserted: $API_DOMAIN → $TARGET"
+
       - name: Upsert Route 53 alias for CloudFront (apex)
         # Creates/updates porth-sample.ems.estynsoftware.cloud → CloudFront
         # distribution on every deploy so the alias is always current even if
