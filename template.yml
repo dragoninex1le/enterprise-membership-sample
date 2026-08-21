@@ -828,13 +828,23 @@ Resources:
           SslSupportMethod: sni-only
           MinimumProtocolVersion: TLSv1.2_2021
         # SPA fallback: serve index.html for all 403/404 so React Router handles routing
-        CustomErrorResponses:
-          - ErrorCode: 403
-            ResponseCode: 200
-            ResponsePagePath: /index.html
-          - ErrorCode: 404
-            ResponseCode: 200
-            ResponsePagePath: /index.html
+        # No CustomErrorResponses. They are DISTRIBUTION-WIDE — there is no way
+        # to scope them to a behaviour — so the 403/404 → 200 /index.html rules
+        # that existed for SPA deep links were also rewriting every API error
+        # into a success.
+        #
+        # The symptom was a frontend crash that named nothing:
+        #
+        #     TypeError: s.map is not a function
+        #
+        # /sample/approvals returned 403, CloudFront turned it into 200 plus an
+        # HTML document, axios saw 2xx and resolved, and the page called .map on
+        # a string. Every API failure — a denied authorizer, a missing
+        # permission, an unmapped route — arrived at the SPA wearing the same
+        # disguise, and none of them could be told apart or even seen.
+        #
+        # Deep links are handled at the edge instead, on the DEFAULT behaviour
+        # only, so /sample/* and /porth/* now return what they actually mean.
         DefaultCacheBehavior:
           TargetOriginId: S3Origin
           ViewerProtocolPolicy: redirect-to-https
@@ -843,6 +853,9 @@ Resources:
           AllowedMethods: [GET, HEAD, OPTIONS]
           CachedMethods: [GET, HEAD]
           Compress: true
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt SpaFallbackFunction.FunctionMetadata.FunctionARN
         # PORTH-531 / ADR-Z9 "Path B" — serve the BFF auth routes SAME-ORIGIN.
         #
         # The SPA and the Porth API are different subdomains, so calling
@@ -937,6 +950,32 @@ Resources:
             CustomOriginConfig:
               OriginProtocolPolicy: https-only
               OriginSSLProtocols: [TLSv1.2]
+
+  # Rewrites SPA deep links to /index.html at the edge.
+  #
+  # Attached ONLY to the default behaviour, which is the whole point: the API
+  # behaviours never see it, so their status codes survive. A path with a file
+  # extension is an asset and passes through; anything else is a client route
+  # that S3 has no object for, and would 404.
+  SpaFallbackFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub ${AWS::StackName}-spa-fallback
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Rewrite extensionless paths to /index.html for SPA routing
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var request = event.request;
+          var uri = request.uri;
+          // An extension means an asset: /assets/index-abc.js, /favicon.ico.
+          // Everything else is a client-side route.
+          if (uri.indexOf('.') === -1) {
+            request.uri = '/index.html';
+          }
+          return request;
+        }
 
   # Strips the /porth prefix the SPA uses for same-origin API calls; the Porth
   # API serves its routes at the root of its custom domain (PORTH-531).

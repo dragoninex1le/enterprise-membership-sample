@@ -27,9 +27,44 @@ function StatusBadge({ status }: { status: string }) {
   )
 }
 
+interface Identity {
+  tenant_id: string
+  narrowed: boolean
+  app_table: string
+  role: string | null
+  app_table_reachable: boolean
+  detail: string
+}
+
+// PORTH-585 made the role a per-request decision; this shows which one was made.
+// Without it, a page served under the wrong credentials looks exactly like one
+// served under the right ones — right up until something is denied.
+function IdentityStrip({ identity }: { identity: Identity | null }) {
+  if (!identity) return null
+  const ok = identity.app_table_reachable
+  return (
+    <div
+      className={`mb-4 rounded-md border px-3 py-2 text-xs ${
+        ok ? 'border-green-200 bg-green-50 text-green-900'
+           : 'border-amber-200 bg-amber-50 text-amber-900'
+      }`}
+    >
+      <span className="font-semibold">Served as: </span>
+      <span className="font-mono">{identity.role ?? (ok ? 'this app\u2019s own role' : 'unknown')}</span>
+      <span className="mx-2 text-gray-400">|</span>
+      <span className="font-semibold">tenant: </span>
+      <span className="font-mono">{identity.tenant_id}</span>
+      <span className="mx-2 text-gray-400">|</span>
+      <span>{identity.narrowed ? 'narrowed credentials' : 'ambient identity'}</span>
+      {!ok && <div className="mt-1 font-mono opacity-80">{identity.detail}</div>}
+    </div>
+  )
+}
+
 export default function ApprovalsPage() {
   const { currentUser } = usePorthContext()
   const [approvals, setApprovals] = useState<Approval[]>([])
+  const [identity, setIdentity] = useState<Identity | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -41,9 +76,30 @@ export default function ApprovalsPage() {
     setError(null)
     sampleApiClient
       .get<Approval[]>('/sample/approvals')
-      .then(r => setApprovals(r.data))
+      .then(r => {
+        // Guard the shape, not just the status. CloudFront used to rewrite API
+        // 403s and 404s into 200 + index.html, so this resolved with an HTML
+        // STRING and the render crashed on `.map` — an error that named the
+        // component and nothing about the actual failure. The rewrite is gone
+        // (PORTH-586), and this makes the same mistake impossible to repeat
+        // silently from any other cause.
+        if (!Array.isArray(r.data)) {
+          throw new Error(
+            'expected a list of approvals, received ' + typeof r.data +
+            ' — the API returned something that is not this endpoint\u2019s response'
+          )
+        }
+        setApprovals(r.data)
+      })
       .catch(err => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false))
+
+    // Best effort, and deliberately not awaited with the list: a diagnostic
+    // that can break the page it diagnoses is worse than no diagnostic.
+    sampleApiClient
+      .get<Identity>('/sample/diagnostics/identity')
+      .then(r => setIdentity(r.data))
+      .catch(() => setIdentity(null))
   }, [currentUser])
 
   function handleAction(recordId: string, action: 'approve' | 'reject') {
@@ -64,6 +120,7 @@ export default function ApprovalsPage() {
   return (
     <div>
       <h1 className="text-2xl font-bold text-gray-900 mb-1">Approvals</h1>
+      <IdentityStrip identity={identity} />
       <p className="text-sm text-gray-500 mb-6">Review and approve/reject transactions — Controllers only</p>
 
       {error && (
