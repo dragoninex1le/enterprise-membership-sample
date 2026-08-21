@@ -55,9 +55,20 @@ def resources(template):
 
 
 def statements(role):
+    """Every statement, with `Fn::If` wrappers unwrapped to the branch they emit.
+
+    Two of these grants are conditional — IAM rejects an empty Resource, so the
+    KMS statements only exist when the signing key was resolved. A conditional
+    grant is still a grant, and the assertions below have to see through the
+    wrapper or they would pass vacuously by finding nothing.
+    """
     for policy in role["Properties"].get("Policies", []):
         for statement in policy["PolicyDocument"]["Statement"]:
-            yield statement
+            if isinstance(statement, dict) and set(statement) == {"If"}:
+                _condition, when_true, _when_false = statement["If"]
+                yield when_true
+            else:
+                yield statement
 
 
 def actions(role):
@@ -94,6 +105,14 @@ def test_ffug_can_reach_no_table_without_narrowing_first(resources):
             f"FfugFunctionRole grants {action}; ffug must reach data only "
             f"through the credentials it narrows for itself"
         )
+
+
+def test_a_conditional_grant_is_still_visible_to_these_assertions(resources):
+    """Guards the helper above. If `statements()` stopped unwrapping `Fn::If`,
+    every KMS assertion here would pass by finding nothing — the vacuous-pass
+    failure mode that makes a green suite worse than no suite."""
+    assert "kms:Verify" in actions(resources["FfugFunctionRole"])
+    assert "kms:Sign" in actions(resources["PorthUatRunnerRole"])
 
 
 def test_ffug_verifies_context_and_can_never_mint_it(resources):

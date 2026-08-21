@@ -132,13 +132,31 @@ Parameters:
       EntityEvent consumer has sat inert (tracked separately).
 
   PorthContextSigningKeyArn:
-    Type: AWS::SSM::Parameter::Value<String>
-    Default: /porth/dev/infra/context-signing-key-arn
+    Type: String
+    Default: ''
     Description: >
-      SSM PATH holding the context-token signing KMS key ARN, written by the
-      porth-install-once Terraform module. Pass the path for this install's
-      branch. Same pattern the Porth stack itself uses; the value resolves at
-      deploy time so nothing here carries a key ARN in source.
+      ARN of the context-token signing KMS key, written to SSM by the
+      porth-install-once Terraform module and resolved by deploy.yml.
+
+      A plain String, deliberately, having been AWS::SSM::Parameter::Value<String>
+      for exactly one failed deploy. That type makes CLOUDFORMATION resolve the
+      path, at change-set creation, using the DEPLOY role's credentials — not the
+      CFN execution role's, which is the surprising half. sample-app-deploy-role
+      holds no ssm:GetParameters, so the deploy died with an AccessDenied naming
+      an action nothing in this template asks for. Resolving it in the workflow
+      puts the read somewhere a reader can see it.
+
+      Empty is allowed and is NOT a silent degradation: the two KMS grants below
+      are conditional on it, so an install without it deploys the table and the
+      lifecycle consumer — the tenant still gets its salt from the bus — while
+      the request path has no verifier and refuses every call. Which half is
+      wired is reported in the stack outputs rather than left to be discovered.
+
+Conditions:
+
+  # PORTH-587. Both KMS grants name a key ARN in their Resource, and IAM rejects
+  # an empty one. Absent the key, ffug deploys as the bus consumer only.
+  HasContextSigningKey: !Not [!Equals [!Ref PorthContextSigningKeyArn, '']]
 
 Resources:
 
@@ -529,9 +547,17 @@ Resources:
               # attempting Sign and being denied is what UAT-4 witnesses live,
               # so adding Sign here would not merely widen a permission — it
               # would delete the demonstration.
-              - Effect: Allow
-                Action: kms:Verify
-                Resource: !Ref PorthContextSigningKeyArn
+              #
+              # Conditional only because IAM rejects an empty Resource. Without
+              # the key ffug has no verifier and refuses every call — loudly, at
+              # the boundary — which is the correct posture for a service that
+              # cannot check who is calling it.
+              - !If
+                - HasContextSigningKey
+                - Effect: Allow
+                  Action: kms:Verify
+                  Resource: !Ref PorthContextSigningKeyArn
+                - !Ref AWS::NoValue
               # The D3 service registry (is the calling service registered and
               # active?) and the session-policy template the narrowing renders.
               - Effect: Allow
@@ -717,9 +743,12 @@ Resources:
               # ffug's own role holds kms:Verify and never this. The split is
               # the point: a compromised receiver cannot mint context for
               # another tenant (H1).
-              - Effect: Allow
-                Action: kms:Sign
-                Resource: !Ref PorthContextSigningKeyArn
+              - !If
+                - HasContextSigningKey
+                - Effect: Allow
+                  Action: kms:Sign
+                  Resource: !Ref PorthContextSigningKeyArn
+                - !Ref AWS::NoValue
 
   # ── S3 bucket for React SPA static assets ────────────────────────────────
 
@@ -973,6 +1002,16 @@ Outputs:
     Value: !GetAtt FfugLifecycleFunction.Arn
     Export:
       Name: !Sub ${AWS::StackName}-FfugLifecycleFunctionArn
+
+  FfugInternalPlaneWired:
+    Description: >
+      Whether ffug's REQUEST path is wired (PORTH-587). "yes" means the context
+      signing key was resolved, so ffug can verify an envelope and the UAT
+      runner can mint one. "no" means only the bus half is live: tenants still
+      get their salt from tenant.created, and every synchronous call is refused
+      because there is no verifier. Published because the difference is
+      otherwise invisible until something calls ffug.
+    Value: !If [HasContextSigningKey, 'yes', 'no']
 
   FfugTenantRoleArn:
     Description: >

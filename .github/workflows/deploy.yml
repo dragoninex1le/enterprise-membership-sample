@@ -190,6 +190,33 @@ jobs:
             exit 1
           fi
 
+          # The context signing key. Read HERE rather than by CloudFormation:
+          # AWS::SSM::Parameter::Value<String> resolves at change-set creation
+          # using the DEPLOY role's credentials, not the CFN execution role's,
+          # and sample-app-deploy-role holds no ssm:GetParameters — so the whole
+          # deploy died on an AccessDenied naming an action the template never
+          # asks for. Run 32442832244.
+          #
+          # Not fatal if it fails. Without the key ffug still deploys as the bus
+          # consumer, so tenants get their salt from tenant.created; what it
+          # loses is the verifier, and every synchronous call is then refused at
+          # the boundary. The stack output FfugInternalPlaneWired says which.
+          CONTEXT_KEY_ARN=$(aws ssm get-parameter \
+            --name "/porth/${PORTH_BRANCH}/infra/context-signing-key-arn" \
+            --query Parameter.Value --output text 2>/dev/null || echo "")
+          if [ -z "$CONTEXT_KEY_ARN" ] || [ "$CONTEXT_KEY_ARN" == "None" ]; then
+            CONTEXT_KEY_ARN=""
+            echo "::warning::Could not read /porth/${PORTH_BRANCH}/infra/context-signing-key-arn."
+            echo "::warning::ffug deploys as the BUS CONSUMER ONLY - tenants still get a salt,"
+            echo "::warning::but every synchronous call is refused because there is no verifier."
+            echo "::warning::Fix: grant ssm:GetParameter on /porth/* to sample-app-deploy-role"
+            echo "::warning::(source of truth: Components infra/receiving-account-templates/"
+            echo "::warning::sample-app-deploy-role.yaml; the LIVE role needs it applied too)."
+          else
+            echo "✅ Context signing key resolved - ffug's request path will be wired"
+          fi
+
+          echo "PORTH_CONTEXT_KEY_ARN=$CONTEXT_KEY_ARN" >> $GITHUB_ENV
           echo "PORTH_BRANCH=$PORTH_BRANCH" >> $GITHUB_ENV
           echo "PORTH_ENV_SLOT=$PORTH_ENV_SLOT" >> $GITHUB_ENV
           echo "PORTH_EVENT_BUS=$PORTH_EVENT_BUS" >> $GITHUB_ENV
@@ -382,7 +409,7 @@ jobs:
               PorthEnvironment=dev \
               PorthBranch=${{ env.PORTH_BRANCH }} \
               PorthEventBusName=${{ env.PORTH_EVENT_BUS }} \
-              PorthContextSigningKeyArn=/porth/${{ env.PORTH_BRANCH }}/infra/context-signing-key-arn \
+              PorthContextSigningKeyArn=${{ env.PORTH_CONTEXT_KEY_ARN }} \
             --no-fail-on-empty-changeset
 
       - name: Diagnose SAM managed-bucket failure

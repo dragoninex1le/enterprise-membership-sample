@@ -71,12 +71,26 @@ jobs:
           UAT_ROLE_ARN=$(sample_output PorthUatRunnerRoleArn)
           PORTH_BRANCH=$(porth_param Environment)
 
-          # The signer needs the key. KMS accepts a key ARN anywhere an alias is
-          # accepted, so resolving the ARN from SSM avoids reconstructing the
-          # alias string and guessing at the Terraform's name suffix.
-          CONTEXT_KEY_ARN=$(aws ssm get-parameter \
-            --name "/porth/${PORTH_BRANCH}/infra/context-signing-key-arn" \
-            --query Parameter.Value --output text)
+          # The signer needs the key. Taken from the STACK'S OWN PARAMETERS,
+          # not from SSM: deploy.yml already resolved it once and passed it in,
+          # and the deploy role's SSM access is the thing that cannot be relied
+          # on (run 32442832244). DescribeStacks is already permitted, and this
+          # way the proof signs with exactly the key the deployed function was
+          # told to verify against — reading SSM again could disagree with it.
+          CONTEXT_KEY_ARN=$(aws cloudformation describe-stacks \
+            --stack-name "$SAM_STACK_NAME" \
+            --query "Stacks[0].Parameters[?ParameterKey=='PorthContextSigningKeyArn'].ParameterValue" \
+            --output text)
+          WIRED=$(sample_output FfugInternalPlaneWired)
+          if [ "$WIRED" != "yes" ]; then
+            echo "::error::The stack reports FfugInternalPlaneWired=$WIRED."
+            echo "ffug deployed as the bus consumer only, with no context verifier."
+            echo "Stage A (the tenant's salt) will work; stage B cannot — every"
+            echo "synchronous call is refused at the boundary."
+            echo "Fix: grant ssm:GetParameter on /porth/* to sample-app-deploy-role,"
+            echo "then re-run Deploy Admin UI."
+            exit 1
+          fi
 
           MISSING=()
           [ -z "$FFUG_FUNCTION_ARN" ] || [ "$FFUG_FUNCTION_ARN" == "None" ] && MISSING+=("FfugFunctionArn")
