@@ -1,4 +1,5 @@
 // PORTH-128 — Flat tenant list with org filter, New Org, New Tenant (incl. IdP), Edit Tenant (incl. IdP)
+// PORTH-595 — Announce: re-emit a tenant's lifecycle event so a service deployed after it can catch up
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { organizationsApi } from '../api/organizations'
@@ -88,6 +89,11 @@ export default function TenantsPage() {
   const [tenantSaving, setTenantSaving] = useState(false)
   const [tenantError, setTenantError] = useState<string | null>(null)
 
+  // Announce — re-emit a tenant's lifecycle event so consuming services that
+  // were deployed after it existed can catch up (PORTH-595).
+  const [announcing, setAnnouncing] = useState<string | null>(null)
+  const [announced, setAnnounced] = useState<Record<string, string>>({})
+
   // Edit Tenant
   const [editing, setEditing] = useState<TenantRow | null>(null)
   const [editForm, setEditForm] = useState<EditTenantForm>({ display_name: '', idp_enabled: false, idp_domain: '', idp_client_id: '', idp_audience: '' })
@@ -159,6 +165,37 @@ export default function TenantsPage() {
       setEditing(null); loadAll()
     } catch (e: unknown) { setEditError(e instanceof Error ? e.message : 'Failed') }
     finally { setEditSaving(false) }
+  }
+
+  /** Re-announce a tenant on the event plane, changing nothing about it.
+   *
+   * Consuming services keep read-only projections fed from the tenant-lifecycle
+   * bus, and a service only ever hears about a tenant that changes AFTER it is
+   * deployed. Every tenant that already existed is invisible to it — not
+   * missing, never announced. Nothing reports that, because from the bus's point
+   * of view nothing has happened.
+   *
+   * This sends the tenant's CURRENT display_name back unchanged. Porth's
+   * tenant_repo publishes `tenant.updated` on every update without checking
+   * whether anything differs, so a no-op write is a real event on the wire, and
+   * a consumer that provisions on `updated` catches up. That the payload is
+   * unchanged is the point: an operator should not have to edit a live tenant to
+   * make a downstream service notice it.
+   */
+  async function doAnnounce(t: TenantRow) {
+    setAnnouncing(t.tenant_id)
+    // Clear any previous result for this row. Written as a filter rather than
+    // rest-destructuring with a discarded binding: tsconfig sets
+    // noUnusedLocals, so `const { [id]: _drop, ...rest }` fails the build.
+    setAnnounced(a => Object.fromEntries(Object.entries(a).filter(([id]) => id !== t.tenant_id)))
+    try {
+      await tenantsApi.update(t.tenant_id, { display_name: t.display_name })
+      setAnnounced(a => ({ ...a, [t.tenant_id]: 'announced' }))
+    } catch (e: unknown) {
+      setAnnounced(a => ({ ...a, [t.tenant_id]: e instanceof Error ? e.message : 'Failed' }))
+    } finally {
+      setAnnouncing(null)
+    }
   }
 
   function openEdit(t: TenantRow) {
@@ -255,6 +292,16 @@ export default function TenantsPage() {
                     </button>
                     <button onClick={() => openEdit(t)}
                       className="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-100 text-gray-600">Edit</button>
+                    <button onClick={() => doAnnounce(t)} disabled={announcing === t.tenant_id}
+                      title="Re-emit this tenant's lifecycle event so consuming services can catch up. Changes nothing about the tenant."
+                      className="text-xs px-2 py-1 border border-indigo-200 rounded hover:bg-indigo-50 text-indigo-700 disabled:opacity-50">
+                      {announcing === t.tenant_id ? 'Announcing…' : 'Announce'}
+                    </button>
+                    {announced[t.tenant_id] && (
+                      <span className={`text-xs ${announced[t.tenant_id] === 'announced' ? 'text-green-600' : 'text-red-600'}`}>
+                        {announced[t.tenant_id] === 'announced' ? '✓ on the bus' : announced[t.tenant_id]}
+                      </span>
+                    )}
                     {t.status === 'active'
                       ? <button onClick={() => doSuspend(t)} className="text-xs px-2 py-1 border border-red-200 rounded hover:bg-red-50 text-red-600">Suspend</button>
                       : t.status === 'suspended'
