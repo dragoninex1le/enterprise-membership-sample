@@ -138,6 +138,23 @@ jobs:
           echo "PORTH_AUTHORIZER_ARN=$PORTH_AUTHORIZER_ARN" >> $GITHUB_ENV
           echo "✅ Resolved PORTH_AUTHORIZER_ARN=$PORTH_AUTHORIZER_ARN"
 
+          # PORTH-586: the authorizer's EXECUTION role — a different object from
+          # the function ARN above, and the principal the app's own role trusts.
+          # Published as an output from SAR 0.3.1; before that it was not
+          # derivable at all, since the role is SAM-generated with a name nobody
+          # can compose.
+          PORTH_AUTHORIZER_ROLE_ARN=$(get_output AuthorizerFunctionRoleArn)
+          if [ -z "$PORTH_AUTHORIZER_ROLE_ARN" ] || [ "$PORTH_AUTHORIZER_ROLE_ARN" == "None" ]; then
+            echo "❌ Could not resolve AuthorizerFunctionRoleArn from the $STACK stack outputs."
+            echo "❌ It is published from SAR 0.3.1 — upgrade the Porth install first"
+            echo "❌ (porth-install.yml, sar_version 0.3.1). Without it the sample app's"
+            echo "❌ role has no principal to trust, so the authorizer cannot assume it and"
+            echo "❌ every request to /sample/* denies."
+            exit 1
+          fi
+          echo "PORTH_AUTHORIZER_ROLE_ARN=$PORTH_AUTHORIZER_ROLE_ARN" >> $GITHUB_ENV
+          echo "✅ Resolved PORTH_AUTHORIZER_ROLE_ARN=$PORTH_AUTHORIZER_ROLE_ARN"
+
       # ── The app's own permissions (PORTH-610) ────────────────────────────────
       # These belong here, not in the Porth install. Porth owns the
       # porth-platform and porth-tenant namespaces; anything this app enforces
@@ -307,13 +324,16 @@ jobs:
           sam deploy \
             --stack-name ${{ env.SAM_STACK_NAME }} \
             --region ${{ env.AWS_REGION }} \
-            --capabilities CAPABILITY_IAM \
+            --capabilities CAPABILITY_NAMED_IAM \
             --resolve-s3 \
             --s3-prefix ${{ env.SAM_STACK_NAME }} \
             --parameter-overrides \
               Environment=dev \
               PorthApiUrl=${{ env.PORTH_API_URL }} \
               PorthAuthorizerFunctionArn=${{ env.PORTH_AUTHORIZER_ARN }} \
+              PorthAuthorizerFunctionRoleArn=${{ env.PORTH_AUTHORIZER_ROLE_ARN }} \
+              SampleApiDomainName='sample-api.porth-sample.ems.estynsoftware.cloud' \
+              PorthEnvSlot=prod \
               AcmCertificateArn=${{ vars.ACM_CERTIFICATE_ARN }} \
               CloudFrontAlias='*.porth-sample.ems.estynsoftware.cloud' \
               CloudFrontApexAlias='porth-sample.ems.estynsoftware.cloud' \

@@ -46,6 +46,37 @@ Parameters:
     Default: 'porth-sample.ems.estynsoftware.cloud'
     Description: Apex alternate domain name — used as the platform admin entry point.
 
+  PorthAuthorizerFunctionRoleArn:
+    Type: String
+    Default: ''
+    Description: >-
+      EXECUTION role ARN of Porth's Lambda authorizer (output
+      AuthorizerFunctionRoleArn, SAR 0.3.1+). This is the principal the sample
+      app's own role trusts — not PorthAuthorizerFunctionArn above, which is the
+      function and cannot appear in a trust policy. Resolved from the Porth
+      stack by deploy.yml.
+
+  PorthEnvSlot:
+    Type: String
+    Default: prod
+    Description: >-
+      The ADR-Z8 slot this install is pinned to — EMS's FixedEnvironment, which
+      is what Porth puts in the porth-env session tag. Deliberately NOT
+      PorthEnvironment below: that one suffixes table names (porth-sample-app-dev)
+      and this one scopes identities (ENV#prod#…). They differ in EMS, and
+      conflating them silently scopes a policy to a slot that never appears in a
+      tag.
+
+  SampleApiDomainName:
+    Type: String
+    Default: 'sample-api.porth-sample.ems.estynsoftware.cloud'
+    Description: >-
+      Custom domain for the sample app's API. It exists so the session-policy
+      index can be keyed on a STABLE host: CloudFront sends the origin's Host,
+      and the execute-api hostname it used to send carries the API id, so a
+      binding keyed on it breaks silently the moment the API is replaced.
+      Covered by the wildcard in CloudFrontAlias.
+
   PorthEnvironment:
     Type: String
     Default: dev
@@ -118,6 +149,122 @@ Resources:
       # No CorsConfiguration: after PORTH-612 the SPA calls this same-origin
       # through CloudFront, so there is no preflight to answer. Adding one would
       # invite the cross-origin arrangement that cannot carry the session cookie.
+
+  # ── The sample app's API, under a name that does not move ────────────────
+  #
+  # PORTH-586. CloudFront's /sample/* behaviour uses AllViewerExceptHostHeader,
+  # so the authorizer sees the ORIGIN's Host — which was
+  # {SampleAppApi}.execute-api.{region}.amazonaws.com. That already
+  # distinguished this API from Porth's, and a session-policy binding could
+  # have been keyed on it. It should not be: the name contains the API id, so
+  # replacing the API silently stops matching the binding and every call here
+  # denies with `no_binding`. Configuration that is really a fingerprint.
+  #
+  # Regional, not edge-optimised: CloudFront is already in front of it, and an
+  # edge-optimised domain would put a second CloudFront distribution behind the
+  # first.
+  SampleAppApiDomain:
+    Type: AWS::ApiGatewayV2::DomainName
+    Properties:
+      DomainName: !Ref SampleApiDomainName
+      DomainNameConfigurations:
+        - CertificateArn: !Ref AcmCertificateArn
+          EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+
+  SampleAppApiMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Properties:
+      ApiId: !Ref SampleAppApi
+      DomainName: !Ref SampleAppApiDomain
+      # The app serves its routes AT /sample and the API's stage is $default, so
+      # there is no mapping key: the path arrives whole, exactly as it does via
+      # the execute-api hostname today.
+      Stage: $default
+
+  SampleAppApiDomainRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: 'ems.estynsoftware.cloud.'
+      Name: !Ref SampleApiDomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt SampleAppApiDomain.RegionalDomainName
+        HostedZoneId: !GetAtt SampleAppApiDomain.RegionalHostedZoneId
+        EvaluateTargetHealth: false
+
+  # ── The app's own base role ──────────────────────────────────────────────
+  #
+  # PORTH-586, and the whole point of PORTH-585. Porth's authorizer assumes this
+  # role for requests arriving on this app's host, and hands the app credentials
+  # narrowed to one tenant — for the app's OWN table, which Porth knows nothing
+  # about and must not.
+  #
+  # Nothing in Porth names this role. The grant is entirely the trust policy
+  # below: same account, so a resource-based grant stands on its own.
+  #
+  # The name is composed by the index from ${role_type}, so it has to match
+  # porth-sample-app-{role_type}-{env}.
+  SampleAppTenantRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub porth-sample-app-tenant-${PorthEnvironment}
+      Description: >-
+        Assumed by Porth's authorizer for requests to the sample app's API.
+        Narrowed to one tenant by the porth-tenant session tag.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref PorthAuthorizerFunctionRoleArn
+            # BOTH actions. sts:TagSession is not optional and its absence is
+            # silent: the tags are dropped, ${aws:PrincipalTag/porth-tenant}
+            # below resolves to nothing, matches no key, and the session can
+            # read nothing at all — with no error naming the cause.
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: TenantScopedAppTable
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Tenant isolation is the KEY, environment isolation is the TABLE.
+              # This table is per-environment by name (porth-sample-app-dev), so
+              # there is no ENV# prefix in its keys to condition on and writing
+              # one would constrain nothing. The slot is fenced by the second
+              # statement's condition instead, on the tag itself.
+              - Sid: TenantPartitionOnly
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:ConditionCheckItem
+                Resource:
+                  - !GetAtt SampleAppTable.Arn
+                  - !Sub "${SampleAppTable.Arn}/index/*"
+                Condition:
+                  # Two patterns, both needed. The tenant's own record has PK
+                  # exactly TENANT#{tenant} with no trailing separator, so the
+                  # '#*' pattern alone cannot match it — the mistake PORTH-593
+                  # fixed in Porth's own policy. And the bare TENANT#{tenant}*
+                  # form is a PREFIX match, so 'acme' would reach 'acme-staging'.
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - "TENANT#${aws:PrincipalTag/porth-tenant}"
+                      - "TENANT#${aws:PrincipalTag/porth-tenant}#*"
+                  # A session from another slot cannot use this role at all.
+                  StringEquals:
+                    aws:PrincipalTag/porth-env: !Ref PorthEnvSlot
+              # Scan is absent on purpose. It populates no dynamodb:LeadingKeys,
+              # so ForAllValues:StringLike passes vacuously against it — granting
+              # it here would read as tenant-scoped while reaching every tenant.
 
   # API Gateway assumes this to call Porth's authorizer, which lives in another
   # stack. Scoped to that one function ARN and nothing else.
@@ -442,7 +589,12 @@ Resources:
               OriginProtocolPolicy: https-only
               OriginSSLProtocols: [TLSv1.2]
           - Id: SampleApiOrigin
-            DomainName: !Sub ${SampleAppApi}.execute-api.${AWS::Region}.amazonaws.com
+            # PORTH-586 — the custom domain rather than the execute-api
+            # hostname, so the Host the authorizer sees is stable and the
+            # session-policy binding can be keyed on it. DependsOn is implicit
+            # through the !Ref, but the API mapping must exist before traffic
+            # arrives or the domain answers 404.
+            DomainName: !Ref SampleApiDomainName
             CustomOriginConfig:
               OriginProtocolPolicy: https-only
               OriginSSLProtocols: [TLSv1.2]
@@ -482,6 +634,16 @@ Outputs:
   CloudFrontUrl:
     Description: Public URL of the Porth Admin UI
     Value: !Sub https://${CloudFrontDistribution.DomainName}
+  SampleApiDomainName:
+    Description: >-
+      Custom domain the sample app's API answers on. This is the host the
+      authorizer matches against context_rules in the session-policy index.
+    Value: !Ref SampleApiDomainName
+  SampleAppTenantRoleArn:
+    Description: >-
+      The app's own base role, assumed by Porth's authorizer for requests to
+      this app. Named by the session-policy index binding.
+    Value: !GetAtt SampleAppTenantRole.Arn
     Export:
       Name: !Sub ${AWS::StackName}-CloudFrontUrl
 
