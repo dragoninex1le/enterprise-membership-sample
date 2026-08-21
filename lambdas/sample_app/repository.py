@@ -32,7 +32,83 @@ import os
 import uuid
 from datetime import datetime, timezone
 
+from dataclasses import dataclass
+
 from boto3.dynamodb.conditions import Key
+
+#: The one status that means "waiting for a human". Named once: a second
+#: spelling of it is a record that can never be found again.
+PENDING_APPROVAL = "pending_approval"
+
+
+@dataclass(frozen=True)
+class _RecordSpec:
+    record_type: str
+    prefix: str
+    label: str
+    id_field: str
+    party_field: str
+    #: The states a record may be submitted FROM. Invoices are created `draft`
+    #: and bills `pending`; both are working states, and neither is a decision.
+    submittable_from: frozenset
+
+
+#: The record types that can be approved. Adding one is a line here, not a
+#: branch in three places.
+APPROVABLE: dict[str, _RecordSpec] = {
+    "invoice": _RecordSpec(
+        record_type="invoice", prefix="INVOICE#", label="Invoice",
+        id_field="invoice_id", party_field="customer_name",
+        submittable_from=frozenset({"draft"}),
+    ),
+    "bill": _RecordSpec(
+        record_type="bill", prefix="BILL#", label="Bill",
+        id_field="bill_id", party_field="vendor_name",
+        submittable_from=frozenset({"pending"}),
+    ),
+}
+
+
+class UnknownRecordTypeError(ValueError):
+    """A record type that cannot be approved, refused rather than guessed at."""
+
+
+class TransitionNotAllowedError(Exception):
+    """The record does not exist, or is not in a state this transition allows."""
+
+
+def _spec(record_type: str) -> _RecordSpec:
+    spec = APPROVABLE.get(record_type)
+    if spec is None:
+        raise UnknownRecordTypeError(
+            f"{record_type!r} is not approvable; expected one of "
+            f"{', '.join(sorted(APPROVABLE))}"
+        )
+    return spec
+
+
+def _conditional_check_failed(exc: Exception) -> bool:
+    """True when DynamoDB refused the write because our guard said so."""
+    code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+    return code == "ConditionalCheckFailedException"
+
+
+def _as_approval(record_type: str, spec: _RecordSpec, item: dict) -> dict:
+    """One record, in the shape the approvals screen reads.
+
+    The screen has always expected `record_type`, `amount`, `submitted_by` and
+    `submitted_at`. Nothing produced them, so even a row that had somehow
+    reached the list would have rendered blank columns.
+    """
+    return {
+        "record_id": item.get(spec.id_field, ""),
+        "record_type": record_type,
+        "counterparty": item.get(spec.party_field, ""),
+        "amount": item.get("amount", "0"),
+        "status": item.get("status", ""),
+        "submitted_by": item.get("submitted_by", ""),
+        "submitted_at": item.get("submitted_at", ""),
+    }
 
 #: The table NAME's environment — the deployment axis. Not the data axis; see
 #: the module docstring. These are different values and conflating them is the
@@ -86,7 +162,18 @@ class SampleAppRepository:
         return self._list("BILL#")
 
     def list_pending_approvals(self) -> list[dict]:
-        return [i for i in self._list("APPROVAL#") if i.get("status") == "pending"]
+        """Everything awaiting a decision, across both record types.
+
+        Derived from the records themselves — there is no APPROVAL# row and
+        never was. The previous version queried that prefix, which nothing has
+        ever written, so this list was structurally always empty (PORTH-597).
+        """
+        pending: list[dict] = []
+        for record_type, spec in APPROVABLE.items():
+            for item in self._list(spec.prefix):
+                if item.get("status") == PENDING_APPROVAL:
+                    pending.append(_as_approval(record_type, spec, item))
+        return sorted(pending, key=lambda a: a["submitted_at"])
 
     # -- writes --------------------------------------------------------------
 
@@ -116,21 +203,82 @@ class SampleAppRepository:
         self.table.put_item(Item=item)
         return item
 
-    def _set_approval_status(self, record_id: str, status: str) -> dict:
-        resp = self.table.update_item(
-            Key={"pk": self.partition, "sk": f"APPROVAL#{record_id}"},
-            UpdateExpression="SET #s = :v",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":v": status},
-            ReturnValues="ALL_NEW",
+    def submit_for_approval(self, record_type: str, record_id: str, *, by: str) -> dict:
+        """Move a record from its own working state into the approval queue.
+
+        This is the step that did not exist. Invoices were created `draft` and
+        bills `pending`, the approvals list queried a prefix nothing wrote, and
+        there was no action anywhere that moved a record from one to the other —
+        so nothing could ever appear for a decision.
+        """
+        spec = _spec(record_type)
+        return self._transition(
+            spec,
+            record_id,
+            to=PENDING_APPROVAL,
+            allowed_from=spec.submittable_from,
+            extra={"submitted_by": by, "submitted_at": _now()},
         )
-        return resp.get("Attributes", {})
 
-    def approve(self, record_id: str) -> dict:
-        return self._set_approval_status(record_id, "approved")
+    def approve(self, record_type: str, record_id: str) -> dict:
+        spec = _spec(record_type)
+        return self._transition(
+            spec, record_id, to="approved", allowed_from={PENDING_APPROVAL}
+        )
 
-    def reject(self, record_id: str) -> dict:
-        return self._set_approval_status(record_id, "rejected")
+    def reject(self, record_type: str, record_id: str) -> dict:
+        spec = _spec(record_type)
+        return self._transition(
+            spec, record_id, to="rejected", allowed_from={PENDING_APPROVAL}
+        )
+
+    def _transition(
+        self, spec: "_RecordSpec", record_id: str, *,
+        to: str, allowed_from: set[str], extra: dict | None = None,
+    ) -> dict:
+        """One status change, guarded by DynamoDB rather than by a prior read.
+
+        The condition does two jobs at once, and both were broken before:
+
+        * **the record must exist.** ``UpdateItem`` is an UPSERT — the previous
+          approve() wrote to ``APPROVAL#{id}`` with no condition, so approving an
+          id that did not exist silently CREATED a row holding a pk, an sk and a
+          status, and nothing else. The only code path that could write to that
+          prefix wrote junk, and the list filtered it out again, so it was
+          invisible junk.
+        * **it must be in a state this transition is legal from.** Read-then-write
+          would race with a second approver; the condition cannot.
+        """
+        names = {"#s": "status"}
+        values = {f":from{i}": v for i, v in enumerate(sorted(allowed_from))}
+        values[":to"] = to
+        sets = ["#s = :to"]
+        for index, (key, value) in enumerate(sorted((extra or {}).items())):
+            names[f"#x{index}"] = key
+            values[f":x{index}"] = value
+            sets.append(f"#x{index} = :x{index}")
+
+        try:
+            resp = self.table.update_item(
+                Key={"pk": self.partition, "sk": f"{spec.prefix}{record_id}"},
+                UpdateExpression="SET " + ", ".join(sets),
+                ExpressionAttributeNames=names,
+                ExpressionAttributeValues=values,
+                ConditionExpression=(
+                    "attribute_exists(pk) AND #s IN ("
+                    + ", ".join(k for k in values if k.startswith(":from"))
+                    + ")"
+                ),
+                ReturnValues="ALL_NEW",
+            )
+        except Exception as exc:  # noqa: BLE001 — a refusal is a result
+            if _conditional_check_failed(exc):
+                raise TransitionNotAllowedError(
+                    f"{spec.label} {record_id} is not in "
+                    f"{' or '.join(sorted(allowed_from))}, or does not exist"
+                ) from exc
+            raise
+        return _as_approval(spec.record_type, spec, resp.get("Attributes", {}))
 
     # -- derived -------------------------------------------------------------
 
