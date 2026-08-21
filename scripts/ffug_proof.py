@@ -177,10 +177,20 @@ def stage_b(tenants: list[dict]) -> None:
             code = body.get("error", {}).get("code")
             fail(
                 f"ffug refused tenant {tenant_id}: {code} - {body.get('error', {}).get('message')}",
-                "tenant_not_provisioned means the projection vanished between stages.",
-                "unsigned/bad_signature/audience_mismatch mean this script's envelope",
-                "is wrong. environment_mismatch means PORTH_FIXED_ENVIRONMENT on the",
-                "function disagrees with the slot these rows are keyed under.",
+                "",
+                "  source_service_refused  the D3 registry does not list 'porth' as",
+                "                          active. The registry is a Porth-side SSM",
+                "                          document at /porth/{branch}/services, and an",
+                "                          ABSENT document fails closed on every lookup",
+                "                          — which is correct, and looks identical to a",
+                "                          rejected caller. Check the parameter exists.",
+                "  environment_mismatch    PORTH_FIXED_ENVIRONMENT on the function",
+                "                          disagrees with the slot these rows are keyed",
+                "                          under. The two axes again.",
+                "  audience_mismatch       PORTH_SERVICE_ID on the function is not 'ffug'.",
+                "  unsigned / bad_signature  this script's envelope is wrong, or the key",
+                "                          it signed with is not the one ffug verifies.",
+                "  tenant_not_provisioned  the projection vanished between stage A and B.",
             )
 
         expected = salt.digest(str(row["prime"]), PAYLOAD)
