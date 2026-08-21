@@ -182,16 +182,14 @@ Resources:
       # the execute-api hostname today.
       Stage: $default
 
-  SampleAppApiDomainRecord:
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneName: 'ems.estynsoftware.cloud.'
-      Name: !Ref SampleApiDomainName
-      Type: A
-      AliasTarget:
-        DNSName: !GetAtt SampleAppApiDomain.RegionalDomainName
-        HostedZoneId: !GetAtt SampleAppApiDomain.RegionalHostedZoneId
-        EvaluateTargetHealth: false
+  # The A record is NOT here. HostedZoneName makes CloudFormation resolve the
+  # zone with route53:ListHostedZones, and sample-app-deploy-role holds
+  # route53:ListHostedZonesByName — a different action. The whole change set
+  # rolled back on that one denial.
+  #
+  # deploy.yml upserts it instead, exactly as it already does for the CloudFront
+  # apex alias, using the permission the role actually has. The two values that
+  # step needs are published as outputs below.
 
   # ── The app's own base role ──────────────────────────────────────────────
   #
@@ -639,6 +637,15 @@ Outputs:
       Custom domain the sample app's API answers on. This is the host the
       authorizer matches against context_rules in the session-policy index.
     Value: !Ref SampleApiDomainName
+  SampleApiDomainRegionalDomainName:
+    Description: >-
+      Alias target for the sample API's custom domain. Consumed by deploy.yml's
+      Route 53 upsert — see SampleAppApiDomain for why the record is not a
+      stack resource.
+    Value: !GetAtt SampleAppApiDomain.RegionalDomainName
+  SampleApiDomainRegionalHostedZoneId:
+    Description: Hosted zone of the alias target, for the same upsert.
+    Value: !GetAtt SampleAppApiDomain.RegionalHostedZoneId
   SampleAppTenantRoleArn:
     Description: >-
       The app's own base role, assumed by Porth's authorizer for requests to
