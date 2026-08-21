@@ -237,6 +237,17 @@ def bootstrap_platform_org_and_tenant(tenants_tbl, now: str) -> str:
         "tenant_id": "platform", "org_id": org_id, "org_name": "Platform",
         # PORTH-502: environment_type was renamed tenant_tier.
         "display_name": "Platform", "tenant_tier": "production",
+        # PORTH-585: the role-type KEY the authorizer resolves its base role
+        # from. Porth 0.3.0 deleted the branch that used to infer this:
+        #
+        #     iam_role_key = "platform_admin" if tenant_id == "platform" else ...
+        #
+        # With it gone the elevation is DATA, and a platform tenant carrying no
+        # role_type falls back to "tenant" — an operator silently demoted, with
+        # an empty admin UI and no error anywhere to say why. This is the one
+        # record in the install for which the fallback is wrong, so it is the
+        # one record that has to name its type.
+        "role_type": "platform-admin",
         "status": "active", "created_at": now, "updated_at": now,
     })
     print(f"    created  {env_key(f'ORG#{org_id}')} + {platform_pk}")
