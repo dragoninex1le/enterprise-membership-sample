@@ -374,23 +374,27 @@ Resources:
               - !Sub "${SampleAppTable.Arn}/index/*"
             Condition:
               # Both patterns. This app's rows are written at exactly
-              # TENANT#{tenant} with no trailing separator, so '#*' alone cannot
-              # match them — the fault PORTH-593 found in Porth's own template.
-              # And the bare TENANT#{tenant}* form is a prefix match, so 'acme'
-              # would reach 'acme-staging'.
+              # ENV#{slot}#TENANT#{tenant} with no trailing separator, so '#*'
+              # alone cannot match them — the fault PORTH-593 found in Porth's
+              # own template. And the bare ...#TENANT#{tenant}* form is a prefix
+              # match, so 'acme' would reach 'acme-staging'.
+              #
+              # PORTH-594 put the environment IN these patterns, which it could
+              # not be before: this table's rows were keyed TENANT#{tenant} with
+              # the environment carried by the table NAME, so an ENV# pattern
+              # would have matched nothing and denied every request while
+              # looking stricter. The key carries it now, so the fence is on the
+              # thing being fenced.
               ForAllValues:StringLike:
                 dynamodb:LeadingKeys:
-                  - "TENANT#${aws:PrincipalTag/porth-tenant}"
-                  - "TENANT#${aws:PrincipalTag/porth-tenant}#*"
-              # The environment is NOT in the LeadingKeys, because it is not in
-              # the keys. This app's table is per-environment by NAME
-              # (porth-sample-app-{env}), unlike Porth's, whose rows carry an
-              # ENV#{slot}# prefix. Writing ENV# into these patterns would match
-              # nothing and deny every request while looking stricter.
-              #
-              # So the slot is fenced on the tag itself: a session carrying
-              # another environment's tag cannot use this policy at all. Same
-              # axis, expressed where it actually exists.
+                  - "ENV#${aws:PrincipalTag/porth-env}#TENANT#${aws:PrincipalTag/porth-tenant}"
+                  - "ENV#${aws:PrincipalTag/porth-env}#TENANT#${aws:PrincipalTag/porth-tenant}#*"
+              # Kept, though the LeadingKeys now carry the slot too. The two
+              # fail differently and the difference is worth having: a session
+              # tagged with another environment matches no key above and reads
+              # nothing, which looks like an empty tenant; this refuses it
+              # outright, which looks like what it is. Belt and braces where the
+              # braces produce a better error.
               StringEquals:
                 aws:PrincipalTag/porth-env: !Ref PorthEnvSlot
 

@@ -12,11 +12,10 @@ class CreateInvoiceRequest(BaseModel):
 
 @router.get("/invoices", dependencies=[Depends(require_permission("ar.invoices.read"))])
 def list_invoices(director: SampleAppDirector = Depends(porth)) -> list[dict]:
-    return director.repository.list_invoices(director.tenant_id)
+    return director.repository.list_invoices()
 
 @router.post("/invoices", dependencies=[Depends(require_permission("ar.invoices.write"))])
 def create_invoice(body: CreateInvoiceRequest, director: SampleAppDirector = Depends(porth)) -> dict:
     return director.repository.create_invoice(
-        director.tenant_id,
         {**body.model_dump(), "created_by": director.user_id},
     )

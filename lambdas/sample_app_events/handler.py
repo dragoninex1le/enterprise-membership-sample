@@ -3,6 +3,26 @@ import logging
 import os
 import boto3
 
+# PORTH-594 — this consumer writes a key shape the app can no longer read.
+#
+# The request path moved to ``ENV#{slot}#TENANT#{tenant}``; these writes are
+# still ``TENANT#{tenant}`` and ``PLATFORM``. Deliberately not migrated with it,
+# for two reasons worth stating rather than leaving to be inferred:
+#
+#   1. This rule has almost certainly never fired. It matches source
+#      ``porth.components`` on the DEFAULT bus; Porth emits
+#      ``porth.user-management`` on ``porth-events-{branch}``. PORTH-588 covers
+#      it, and its first question is whether this function should exist at all —
+#      nothing reads USER_CACHE# or TENANT_CACHE#, so it may simply be deleted.
+#
+#   2. It has no Director. No authorizer runs for an EventBridge delivery, so
+#      where it would get the ADR-Z8 slot from is a real decision that depends
+#      on which channel PORTH-588 puts it on. Guessing now would bake the wrong
+#      answer into a function that does not run.
+#
+# The rows it would write are unreachable under the current session policy —
+# harmless while nothing reads them and nothing writes them, a bug the moment
+# either changes. Hence this comment rather than silence.
 logger = logging.getLogger(__name__)
 TABLE_NAME = f"porth-sample-app-{os.environ.get('PORTH_ENVIRONMENT', 'dev')}"
 _table = None

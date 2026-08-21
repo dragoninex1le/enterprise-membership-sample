@@ -34,6 +34,11 @@ def build_director(permissions=None, *, dynamodb=None) -> SampleAppDirector:
             "authorizer": {
                 "lambda": {
                     "tenant_id": "t-test",
+                    # PORTH-594 — the fixture carried no environment, which is
+                    # part of why the axis drifted: the tests could not have
+                    # noticed its absence. The authorizer sends it on every
+                    # request and the key is built from it.
+                    "environment": "e-test",
                     "user_id": "u-1",
                     "organization_id": "org-1",
                     "external_id": "ext-1",
@@ -49,7 +54,9 @@ def build_director(permissions=None, *, dynamodb=None) -> SampleAppDirector:
     if dynamodb is not None:
         from sample_app.repository import SampleAppRepository
 
-        director._repository = SampleAppRepository(dynamodb)
+        director._repository = SampleAppRepository(
+            dynamodb, environment=director.environment, tenant_id=director.tenant_id
+        )
     return director
 
 
