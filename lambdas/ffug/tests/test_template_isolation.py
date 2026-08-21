@@ -236,8 +236,12 @@ def test_iam_role_descriptions_are_iam_legal(resources):
     dash this codebase uses freely in prose. CloudFormation only finds out
     mid-deploy and rolls the whole stack back (run 31216080066)."""
     offenders = []
+    # ManagedPolicy as well as Role. IAM applies the same rule to both
+    # descriptions, and the version of this test that checked only roles would
+    # have passed a managed policy straight into the mid-deploy rollback it
+    # exists to prevent — PORTH-586 added one and it was clean by luck.
     for name, resource in resources.items():
-        if resource.get("Type") != "AWS::IAM::Role":
+        if resource.get("Type") not in ("AWS::IAM::Role", "AWS::IAM::ManagedPolicy"):
             continue
         description = resource["Properties"].get("Description")
         if isinstance(description, str) and not LATIN1_PRINTABLE.match(description):

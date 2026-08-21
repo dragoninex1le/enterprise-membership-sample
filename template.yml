@@ -288,7 +288,7 @@ Resources:
       RoleName: !Sub porth-sample-app-tenant-${PorthEnvironment}
       Description: >-
         Assumed by Porth's authorizer for requests to the sample app's API.
-        The CEILING — this app's table and nothing else. Which tenant a given
+        The CEILING: this app's table and nothing else. Which tenant a given
         session may read is decided by SampleAppSessionPolicy, passed per
         request by the session-policy index.
       AssumeRolePolicyDocument:
