@@ -140,7 +140,17 @@ jobs:
         run: aws sts get-caller-identity
 
       - name: Prove it
-        run: python scripts/ffug_proof.py | tee proof.txt
+        # `set -o pipefail` is load-bearing, not hygiene. A pipeline's exit
+        # status is its LAST command's — `tee` — so without it the script's
+        # exit(1) is swallowed and a FAILED proof reports green. Run 32527214822
+        # did exactly that: stage A found no tenant projections, printed the
+        # remedy, exited 1, and the job concluded success.
+        #
+        # An evidence workflow that can report green while proving nothing is
+        # worse than no evidence workflow, because someone will cite it.
+        run: |
+          set -o pipefail
+          python scripts/ffug_proof.py | tee proof.txt
 
       - name: Publish the evidence
         if: always()
