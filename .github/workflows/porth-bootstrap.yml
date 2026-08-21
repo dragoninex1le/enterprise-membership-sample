@@ -179,6 +179,12 @@ jobs:
               {
                   ":idp": {"M": {k: {"S": v} for k, v in idp.items()}},
                   ":tier": {"S": "production"},
+                  # PORTH-585 — see bootstrap_platform_tenant.py. Set here as
+                  # well as at creation because the creation path early-returns
+                  # on an existing record, and every install that predates 0.3.0
+                  # already has one. This step runs on every bootstrap, so it is
+                  # what actually repairs them.
+                  ":rt": {"S": "platform-admin"},
                   ":ua": {"S": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
               },
               open("/tmp/idp-values.json", "w"),
@@ -193,10 +199,10 @@ jobs:
           aws dynamodb update-item \
             --table-name "$PORTH_TENANTS_TABLE" \
             --key file:///tmp/idp-key.json \
-            --update-expression "SET idp_config_override = :idp, tenant_tier = :tier, updated_at = :ua" \
+            --update-expression "SET idp_config_override = :idp, tenant_tier = :tier, role_type = :rt, updated_at = :ua" \
             --expression-attribute-values file:///tmp/idp-values.json \
             --region "$AWS_REGION"
-          echo "✅ Platform tenant IdP config + tenant_tier updated"
+          echo "✅ Platform tenant IdP config + tenant_tier + role_type updated"
 
       - name: Verify the authorizer can resolve it
         # The whole failure mode this guards against is silent: a record at the wrong key
@@ -221,7 +227,24 @@ jobs:
             echo "::error::pinned to '${ENV_SCOPE}' — check FixedEnvironment matches."
             exit 1
           fi
-          echo "✅ $PK resolves, issuer=$FOUND"
+          # PORTH-585: and that it carries its role type. Reading it back at the
+          # key the authorizer uses is the only thing that proves it, for the
+          # same reason the issuer check exists — a record without it resolves
+          # perfectly well and quietly gets tenant-scoped credentials.
+          ROLE_TYPE=$(aws dynamodb get-item \
+            --table-name "$PORTH_TENANTS_TABLE" \
+            --key "{\"PK\":{\"S\":\"$PK\"},\"SK\":{\"S\":\"METADATA\"}}" \
+            --query "Item.role_type.S" --output text \
+            --region "$AWS_REGION" 2>/dev/null || echo "")
+
+          if [ "$ROLE_TYPE" != "platform-admin" ]; then
+            echo "::error::$PK has role_type=${ROLE_TYPE:-<absent>}, expected platform-admin."
+            echo "::error::Porth 0.3.0 resolves the base role from this field. Absent, it"
+            echo "::error::falls back to 'tenant' and the platform operator is silently"
+            echo "::error::demoted — the admin UI loads with nothing in it and no error."
+            exit 1
+          fi
+          echo "✅ $PK resolves, issuer=$FOUND role_type=$ROLE_TYPE"
 
       - name: Summary
         run: |

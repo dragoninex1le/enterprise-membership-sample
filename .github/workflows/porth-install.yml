@@ -54,7 +54,7 @@ on:
         # release the consumer is expected to move to.
         description: 'Porth SAR app semantic version to install/upgrade to'
         required: true
-        default: '0.2.5'
+        default: '0.3.0'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
@@ -103,11 +103,11 @@ env:
   AWS_REGION: us-east-1
   # Pinned deliberately; see the install step for why a floating version
   # silently resolved backwards.
-  PORTH_INSTALL_VERSION: '0.2.5'
+  PORTH_INSTALL_VERSION: '0.3.0'
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.sar_version || '0.2.0' }}
+    name: Install or upgrade Porth ${{ inputs.sar_version || '0.3.0' }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
