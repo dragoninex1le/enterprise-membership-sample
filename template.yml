@@ -91,18 +91,34 @@ Parameters:
       Environment name passed to Lambda functions as PORTH_ENVIRONMENT.
       Used to resolve DynamoDB table names (e.g. porth-sample-app-dev).
 
-  UatRunnerSubjectClaim:
-    Type: CommaDelimitedList
-    Default: 'repo:dragoninex1le/Components:*,repo:dragoninex1le/enterprise-membership-sample:*'
+  UatRunnerComponentsRepo:
+    Type: String
+    Default: 'dragoninex1le/Components'
     Description: >
-      GitHub OIDC subject claims allowed to assume the Porth UAT runner role
-      (ADR-Z11 PORTH-553, Richard's Q13 ruling). A list rather than one string
-      since PORTH-587: the UAT suite lives in the Components repo, but the
-      isolation proof runs from THIS repo's own workflow, and requiring a
-      cross-repo dispatch to demonstrate ffug would put a coordination step in
-      front of every run. StringLike takes a list and ORs it. Tighten to
-      specific environments or refs once each workflow's identity is fixed,
-      e.g. 'repo:dragoninex1le/Components:environment:porth-uat'.
+      Repository whose GitHub OIDC identity may assume the Porth UAT runner role
+      (ADR-Z11 PORTH-553, Richard's Q13 ruling) — the repo the UAT suite lives in.
+
+  UatRunnerConsumerRepo:
+    Type: String
+    Default: 'dragoninex1le/enterprise-membership-sample'
+    Description: >
+      Second repository allowed to assume the UAT runner role: this one, so the
+      ffug isolation proof runs from its own workflow rather than through a
+      cross-repo dispatch.
+
+      Two String parameters rather than one CommaDelimitedList, deliberately.
+      The list version was correct and still did not work. `UatRunnerSubjectClaim`
+      already existed on the deployed stack, with a STORED VALUE naming only the
+      Components repo — and a template DEFAULT does not override a stored
+      parameter value: sam deploy reuses the previous one for any parameter it is
+      not explicitly given. The trust policy therefore kept the single old
+      subject while the template read as though it allowed both, and this repo's
+      OIDC was refused (proof run 32454844345). NEW parameter names have no
+      stored value, so their defaults actually apply.
+
+      They are also comma-free, which matters: `--parameter-overrides` takes a
+      space-separated Key=Value shorthand, and a comma inside one of those values
+      is its own small adventure.
 
   # ── PORTH-587: what ffug needs from the Porth install ─────────────────────
   #
@@ -702,7 +718,13 @@ Resources:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
-                token.actions.githubusercontent.com:sub: !Ref UatRunnerSubjectClaim
+                # Both repos, ORed. Built with !Sub from two parameters rather
+                # than passed as one pre-formatted list, so the trust policy
+                # shows the shape it enforces instead of deferring it to a
+                # parameter value nobody reads.
+                token.actions.githubusercontent.com:sub:
+                  - !Sub 'repo:${UatRunnerComponentsRepo}:*'
+                  - !Sub 'repo:${UatRunnerConsumerRepo}:*'
       Policies:
         - PolicyName: invoke-and-read-ffug
           PolicyDocument:
