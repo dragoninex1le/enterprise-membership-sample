@@ -12,6 +12,8 @@ interface Bill {
 }
 
 const STATUS_BADGE: Record<string, string> = {
+  // PORTH-597 — a record waiting on someone else.
+  pending_approval: 'bg-amber-100 text-amber-800',
   pending: 'bg-yellow-100 text-yellow-800',
   approved: 'bg-blue-100 text-blue-800',
   paid: 'bg-green-100 text-green-800',
@@ -37,6 +39,23 @@ export default function APPage() {
   const [form, setForm] = useState({ vendor_name: '', amount: '', due_date: '' })
 
   const canWrite = currentUser?.permissions?.includes(PERMISSIONS.AP_BILLS_WRITE) ?? false
+
+  // PORTH-597 — the step that did not exist. A bill was created and then
+  // had nowhere to go: the approvals screen queried a prefix nothing wrote, so
+  // nothing could ever appear for a decision. Submitting is guarded by this
+  // page's own write permission, not by approvals.write — you submit your own
+  // work, someone else decides on it.
+  const [submittingId, setSubmittingId] = useState<string | null>(null)
+
+  function submitForApproval(id: string) {
+    setSubmittingId(id)
+    setError(null)
+    sampleApiClient
+      .post<{ status: string }>(`/sample/ap/bills/${id}/submit`)
+      .then(() => fetchBills())
+      .catch(err => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setSubmittingId(null))
+  }
 
   function fetchBills() {
     setLoading(true)
@@ -105,7 +124,7 @@ export default function APPage() {
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
-                {['Bill ID', 'Vendor', 'Amount', 'Status', 'Due Date'].map(h => (
+                {['Bill ID', 'Vendor', 'Amount', 'Status', 'Due Date', ...(canWrite ? ['Actions'] : [])].map(h => (
                   <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     {h}
                   </th>
@@ -120,6 +139,23 @@ export default function APPage() {
                   <td className="px-4 py-3 text-sm text-gray-900">£{parseFloat(bill.amount).toFixed(2)}</td>
                   <td className="px-4 py-3"><StatusBadge status={bill.status} /></td>
                   <td className="px-4 py-3 text-sm text-gray-500">{bill.due_date}</td>
+                  {canWrite && (
+                    <td className="px-4 py-3">
+                      {bill.status === 'pending' ? (
+                        <button
+                          onClick={() => submitForApproval(bill.bill_id)}
+                          disabled={submittingId === bill.bill_id}
+                          className="rounded px-2.5 py-1 text-xs font-medium bg-indigo-100 text-indigo-800 hover:bg-indigo-200 disabled:opacity-50"
+                        >
+                          {submittingId === bill.bill_id ? 'Submitting\u2026' : 'Submit for approval'}
+                        </button>
+                      ) : (
+                        <span className="text-xs text-gray-400">
+                          {bill.status === 'pending_approval' ? 'awaiting approval' : '\u2014'}
+                        </span>
+                      )}
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>

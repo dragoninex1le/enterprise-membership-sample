@@ -66,20 +66,24 @@ def test_create_bill_keys():
     assert item["sk"].startswith("BILL#")
 
 
-def test_approve_sets_status():
+def test_approve_sets_status_on_the_source_record():
+    """The key is the INVOICE#, not an APPROVAL#. PORTH-597: the decision is a
+    status on the record itself, so there is no second row to keep in step."""
     repo, table = make_repo()
     table.update_item.return_value = {"Attributes": {"status": "approved"}}
-    repo.approve("rec-1")
+    repo.approve("invoice", "i-1")
     kw = table.update_item.call_args[1]
-    assert kw["ExpressionAttributeValues"][":v"] == "approved"
-    assert kw["Key"] == {"pk": PARTITION, "sk": "APPROVAL#rec-1"}
+    assert kw["ExpressionAttributeValues"][":to"] == "approved"
+    assert kw["Key"] == {"pk": PARTITION, "sk": "INVOICE#i-1"}
 
 
-def test_reject_sets_status():
+def test_reject_sets_status_on_the_source_record():
     repo, table = make_repo()
     table.update_item.return_value = {"Attributes": {"status": "rejected"}}
-    repo.reject("rec-1")
-    assert table.update_item.call_args[1]["ExpressionAttributeValues"][":v"] == "rejected"
+    repo.reject("bill", "b-1")
+    kw = table.update_item.call_args[1]
+    assert kw["ExpressionAttributeValues"][":to"] == "rejected"
+    assert kw["Key"] == {"pk": PARTITION, "sk": "BILL#b-1"}
 
 
 # --- reads -------------------------------------------------------------------
@@ -119,6 +123,144 @@ def test_reads_are_confined_to_one_partition():
     repo, table = make_repo()
     table.query.return_value = {"Items": []}
     repo.list_invoices(); repo.list_bills(); repo.list_pending_approvals()
-    assert table.query.call_count == 3
+    # Four, not three: list_pending_approvals reads both approvable prefixes,
+    # because an approval IS an invoice or a bill (PORTH-597).
+    assert table.query.call_count == 4
     for call in table.query.call_args_list:
         assert PARTITION in _condition_values(call[1]["KeyConditionExpression"])
+
+
+# --- approvals are derived from the records (PORTH-597) ----------------------
+
+
+class _ConditionalCheckFailed(Exception):
+    response = {"Error": {"Code": "ConditionalCheckFailedException"}}
+
+
+def _invoice(status, iid="i-1"):
+    return {"invoice_id": iid, "customer_name": "Acme", "amount": "100",
+            "status": status, "submitted_by": "u-1", "submitted_at": "2026-08-21T00:00:00Z"}
+
+
+def _bill(status, bid="b-1"):
+    return {"bill_id": bid, "vendor_name": "Vendor", "amount": "50",
+            "status": status, "submitted_by": "u-2", "submitted_at": "2026-08-21T01:00:00Z"}
+
+
+def test_approvals_come_from_the_records_not_an_approval_prefix():
+    """The bug this replaces: the list queried APPROVAL#, which nothing has ever
+    written, so it was structurally always empty rather than intermittently so."""
+    repo, table = make_repo()
+    table.query.side_effect = [
+        {"Items": [_invoice("pending_approval"), _invoice("draft", "i-2")]},
+        {"Items": [_bill("pending_approval")]},
+    ]
+
+    pending = repo.list_pending_approvals()
+
+    prefixes = [_condition_values(c[1]["KeyConditionExpression"]) for c in table.query.call_args_list]
+    assert not any("APPROVAL#" in v for values in prefixes for v in values)
+    assert [a["record_type"] for a in pending] == ["invoice", "bill"]
+    assert [a["record_id"] for a in pending] == ["i-1", "b-1"]
+
+
+def test_only_records_awaiting_a_decision_are_listed():
+    repo, table = make_repo()
+    table.query.side_effect = [
+        {"Items": [_invoice("draft"), _invoice("approved", "i-2")]},
+        {"Items": [_bill("pending")]},
+    ]
+
+    assert repo.list_pending_approvals() == []
+
+
+def test_the_listed_shape_is_the_one_the_screen_reads():
+    """`record_type`, `amount`, `submitted_by` and `submitted_at` have always
+    been expected by ApprovalsPage. Nothing produced them before."""
+    repo, table = make_repo()
+    table.query.side_effect = [{"Items": [_invoice("pending_approval")]}, {"Items": []}]
+
+    entry = repo.list_pending_approvals()[0]
+
+    assert set(entry) == {"record_id", "record_type", "counterparty", "amount",
+                          "status", "submitted_by", "submitted_at"}
+
+
+# --- transitions are guarded by DynamoDB, not by a prior read ----------------
+
+
+def test_submit_records_who_and_when_and_guards_the_source_state():
+    repo, table = make_repo()
+    table.update_item.return_value = {"Attributes": _invoice("pending_approval")}
+
+    repo.submit_for_approval("invoice", "i-1", by="u-9")
+
+    kw = table.update_item.call_args[1]
+    assert kw["Key"] == {"pk": PARTITION, "sk": "INVOICE#i-1"}
+    assert kw["ExpressionAttributeValues"][":to"] == "pending_approval"
+    assert "draft" in kw["ExpressionAttributeValues"].values()
+    assert "u-9" in kw["ExpressionAttributeValues"].values()
+
+
+def test_approving_a_record_that_does_not_exist_cannot_create_one():
+    """The regression that matters most here.
+
+    UpdateItem is an UPSERT. The previous approve() wrote to APPROVAL#{id} with
+    no condition, so approving an id that did not exist silently CREATED a row
+    holding a pk, an sk and a status and nothing else — and because the list
+    filtered on status, that row was invisible junk. `attribute_exists(pk)` is
+    what stops it.
+    """
+    repo, table = make_repo()
+    table.update_item.return_value = {"Attributes": _invoice("approved")}
+
+    repo.approve("invoice", "i-1")
+
+    assert "attribute_exists(pk)" in table.update_item.call_args[1]["ConditionExpression"]
+
+
+@pytest.mark.parametrize("action", ["approve", "reject"])
+def test_a_decision_is_only_legal_from_pending_approval(action):
+    repo, table = make_repo()
+    table.update_item.return_value = {"Attributes": _invoice("approved")}
+
+    getattr(repo, action)("invoice", "i-1")
+
+    values = table.update_item.call_args[1]["ExpressionAttributeValues"]
+    assert "pending_approval" in values.values()
+    assert "draft" not in values.values()
+
+
+@pytest.mark.parametrize("call", [
+    lambda r: r.approve("invoice", "i-1"),
+    lambda r: r.reject("bill", "b-1"),
+    lambda r: r.submit_for_approval("invoice", "i-1", by="u-1"),
+])
+def test_a_refused_guard_is_a_typed_error_not_a_crash(call):
+    from sample_app.repository import TransitionNotAllowedError
+
+    repo, table = make_repo()
+    table.update_item.side_effect = _ConditionalCheckFailed()
+
+    with pytest.raises(TransitionNotAllowedError):
+        call(repo)
+
+
+def test_a_real_failure_still_propagates():
+    """Only the guard is translated. A throttle is not a business outcome."""
+    class Throttled(Exception):
+        response = {"Error": {"Code": "ProvisionedThroughputExceededException"}}
+
+    repo, table = make_repo()
+    table.update_item.side_effect = Throttled()
+
+    with pytest.raises(Throttled):
+        repo.approve("invoice", "i-1")
+
+
+def test_an_unapprovable_record_type_is_refused():
+    from sample_app.repository import UnknownRecordTypeError
+
+    repo, _ = make_repo()
+    with pytest.raises(UnknownRecordTypeError):
+        repo.approve("purchase_order", "p-1")

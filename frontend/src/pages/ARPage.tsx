@@ -12,6 +12,9 @@ interface Invoice {
 }
 
 const STATUS_BADGE: Record<string, string> = {
+  // PORTH-597 — a record waiting on someone else.
+  pending_approval: 'bg-amber-100 text-amber-800',
+  approved: 'bg-green-100 text-green-800',
   draft: 'bg-yellow-100 text-yellow-800',
   sent: 'bg-blue-100 text-blue-800',
   paid: 'bg-green-100 text-green-800',
@@ -37,6 +40,23 @@ export default function ARPage() {
   const [form, setForm] = useState({ customer_name: '', amount: '', due_date: '' })
 
   const canWrite = currentUser?.permissions?.includes(PERMISSIONS.AR_INVOICES_WRITE) ?? false
+
+  // PORTH-597 — the step that did not exist. A invoice was created and then
+  // had nowhere to go: the approvals screen queried a prefix nothing wrote, so
+  // nothing could ever appear for a decision. Submitting is guarded by this
+  // page's own write permission, not by approvals.write — you submit your own
+  // work, someone else decides on it.
+  const [submittingId, setSubmittingId] = useState<string | null>(null)
+
+  function submitForApproval(id: string) {
+    setSubmittingId(id)
+    setError(null)
+    sampleApiClient
+      .post<{ status: string }>(`/sample/ar/invoices/${id}/submit`)
+      .then(() => fetchInvoices())
+      .catch(err => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setSubmittingId(null))
+  }
 
   function fetchInvoices() {
     setLoading(true)
@@ -105,7 +125,7 @@ export default function ARPage() {
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
-                {['Invoice ID', 'Customer', 'Amount', 'Status', 'Due Date'].map(h => (
+                {['Invoice ID', 'Customer', 'Amount', 'Status', 'Due Date', ...(canWrite ? ['Actions'] : [])].map(h => (
                   <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     {h}
                   </th>
@@ -120,6 +140,23 @@ export default function ARPage() {
                   <td className="px-4 py-3 text-sm text-gray-900">£{parseFloat(inv.amount).toFixed(2)}</td>
                   <td className="px-4 py-3"><StatusBadge status={inv.status} /></td>
                   <td className="px-4 py-3 text-sm text-gray-500">{inv.due_date}</td>
+                  {canWrite && (
+                    <td className="px-4 py-3">
+                      {inv.status === 'draft' ? (
+                        <button
+                          onClick={() => submitForApproval(inv.invoice_id)}
+                          disabled={submittingId === inv.invoice_id}
+                          className="rounded px-2.5 py-1 text-xs font-medium bg-indigo-100 text-indigo-800 hover:bg-indigo-200 disabled:opacity-50"
+                        >
+                          {submittingId === inv.invoice_id ? 'Submitting\u2026' : 'Submit for approval'}
+                        </button>
+                      ) : (
+                        <span className="text-xs text-gray-400">
+                          {inv.status === 'pending_approval' ? 'awaiting approval' : '\u2014'}
+                        </span>
+                      )}
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
