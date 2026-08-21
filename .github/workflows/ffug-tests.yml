@@ -1,26 +1,55 @@
 name: ffug — unit tests
 
-# ffug is the ADR-Z11 UAT compute target (PORTH-555). Its suite has to be green
-# on the PR, not only on the merge-to-main deploy — the epic's review model
-# gates each slice on a linked green run (evidence checkpoint).
+# ffug is the ADR-Z11 UAT compute target (PORTH-555, PORTH-587). Its suite has
+# to be green on the PR, not only on the merge-to-main deploy — the epic's
+# review model gates each slice on a linked green run (evidence checkpoint).
 #
 # Deliberately separate from deploy.yml: that workflow deploys, and PR-triggering
-# a deploy would be the wrong fix. This job needs no AWS credentials.
+# a deploy would be the wrong fix.
 
 on:
   pull_request:
     paths:
       - 'lambdas/ffug/**'
+      - 'lambdas/requirements.txt'
+      # The proof script recomputes ffug's digest and scans for its sort key.
+      # Both couplings are invisible at runtime — a rename leaves it scanning
+      # for a key nothing writes, finding nothing, and reporting the same thing
+      # a broken consumer reports.
+      - 'scripts/ffug_proof.py'
+      # PORTH-587 — the suite now asserts against the template, because the
+      # half of this slice that does the isolating is IAM and never appears in
+      # a code diff. A template change that quietly restores ffug's ambient
+      # DynamoDB grant has to fail here, on the PR that makes it.
+      - 'template.yml'
       - '.github/workflows/ffug-tests.yml'
   workflow_dispatch:
 
 permissions:
+  id-token: write
   contents: read
+
+env:
+  AWS_REGION: us-east-1
 
 jobs:
   test:
     name: ffug unit tests
     runs-on: ubuntu-latest
+    # PORTH-587 — this job needs AWS now, which it did not before.
+    #
+    # porth-common is published to the Porth CodeArtifact repository and not to
+    # PyPI, and since Phase B ffug imports it directly: the Director, the
+    # envelope errors and the tenant-lifecycle contract are the things under
+    # test. Stubbing them to keep the job credential-free would mean asserting
+    # against a fake of the very library whose behaviour is the subject.
+    #
+    # It reuses the deploy environment's role rather than declaring a narrower
+    # one, which is the trade worth naming: a pull_request run from a branch in
+    # THIS repo can see it. Forks cannot — GitHub withholds environment values
+    # from fork PRs — but a minimal CodeArtifact-read role for CI is the right
+    # end state and is a follow-up, not this slice.
+    environment: sample-app-deploy
     steps:
       - uses: actions/checkout@v4
 
@@ -29,44 +58,35 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # `login --tool pip` sets a global index-url, so everything resolves
+      # through porth-py — which proxies PyPI, so pytest and pyyaml come through
+      # it too. Without this the install fails on
+      #   ERROR: Could not find a version that satisfies the requirement porth-common
+      # which reads as a bad version pin rather than an unconfigured index.
+      - name: Configure pip for CodeArtifact (porth-common)
+        run: |
+          set -euo pipefail
+          aws codeartifact login --tool pip \
+            --domain porth --domain-owner 084847995635 \
+            --repository porth-py --region "$AWS_REGION"
+
       - name: Install test dependencies
-        # pyyaml is for the template guard below, not the tests — the runner
-        # image doesn't ship it, which is how this step earned its own commit.
-        run: python -m pip install --quiet pytest boto3 pyyaml
+        working-directory: lambdas
+        # requirements.txt, not a curated list — the lesson PORTH-614 cost a
+        # broken pipeline to learn. A hand-listed set is a second statement of
+        # requirements.txt and drifts the moment the Lambda gains a dependency.
+        # pyyaml is for the template assertions, which are not a runtime need.
+        run: python -m pip install --quiet -r requirements.txt pytest pyyaml
 
       - name: Run ffug tests
         working-directory: lambdas
+        # The IAM-legality guard that used to live inline in this workflow is
+        # now test_template_isolation.py, alongside the other properties that
+        # live in the template. One place, and the deploy gate runs it too.
         run: python -m pytest ffug/tests -q
-
-      # IAM rejects any character outside the Latin-1 printable range in a
-      # role Description, notably the em dash. CloudFormation only finds out
-      # mid-deploy and rolls the whole stack back, so catch it here instead.
-      - name: Guard - IAM role descriptions are IAM-legal
-        run: |
-          python - <<'PY'
-          import re, sys, yaml
-
-          class L(yaml.SafeLoader):
-              pass
-          for tag in ('!Sub', '!Ref', '!GetAtt', '!Equals', '!If', '!Join',
-                      '!Select', '!Split', '!FindInMap', '!Not', '!And', '!Or',
-                      '!Base64', '!Condition', '!ImportValue'):
-              L.add_constructor(tag, lambda loader, node: None)
-
-          doc = yaml.load(open('template.yml'), Loader=L)
-          legal = re.compile('^[\t\n\r\x20-\x7e\xa1-\xff]*$')
-          bad = []
-          for name, res in (doc.get('Resources') or {}).items():
-              if res.get('Type') != 'AWS::IAM::Role':
-                  continue
-              desc = (res.get('Properties') or {}).get('Description')
-              if isinstance(desc, str) and not legal.match(desc):
-                  offenders = sorted({hex(ord(c)) for c in desc if not legal.match(c)})
-                  bad.append('%s: illegal %s in %r' % (name, offenders, desc))
-          if bad:
-              print('IAM role Description must be ASCII/Latin-1 only:')
-              for b in bad:
-                  print('   ' + b)
-              sys.exit(1)
-          print('OK: IAM role descriptions are IAM-legal')
-          PY

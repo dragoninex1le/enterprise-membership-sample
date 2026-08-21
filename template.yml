@@ -67,6 +67,12 @@ Parameters:
       conflating them silently scopes a policy to a slot that never appears in a
       tag.
 
+      Two readers now: the session-tag condition below, and ffug's
+      PORTH_FIXED_ENVIRONMENT (PORTH-587) — the value an inbound context
+      envelope is checked against. deploy.yml resolves it from the Porth stack
+      rather than defaulting, because both readers fail silently when it is
+      wrong.
+
   SampleApiDomainName:
     Type: String
     Default: 'sample-api.porth-sample.ems.estynsoftware.cloud'
@@ -86,14 +92,71 @@ Parameters:
       Used to resolve DynamoDB table names (e.g. porth-sample-app-dev).
 
   UatRunnerSubjectClaim:
-    Type: String
-    Default: 'repo:dragoninex1le/Components:*'
+    Type: CommaDelimitedList
+    Default: 'repo:dragoninex1le/Components:*,repo:dragoninex1le/enterprise-membership-sample:*'
     Description: >
-      GitHub OIDC subject claim allowed to assume the Porth UAT runner role
-      (ADR-Z11 PORTH-553, Richard's Q13 ruling). The UAT suite lives in the
-      Components repo and calls ffug in this account. Tighten to a specific
-      environment or ref when the UAT workflow's identity is fixed, e.g.
-      'repo:dragoninex1le/Components:environment:porth-uat'.
+      GitHub OIDC subject claims allowed to assume the Porth UAT runner role
+      (ADR-Z11 PORTH-553, Richard's Q13 ruling). A list rather than one string
+      since PORTH-587: the UAT suite lives in the Components repo, but the
+      isolation proof runs from THIS repo's own workflow, and requiring a
+      cross-repo dispatch to demonstrate ffug would put a coordination step in
+      front of every run. StringLike takes a list and ORs it. Tighten to
+      specific environments or refs once each workflow's identity is fixed,
+      e.g. 'repo:dragoninex1le/Components:environment:porth-uat'.
+
+  # ── PORTH-587: what ffug needs from the Porth install ─────────────────────
+  #
+  # Four values, all resolved from the Porth stack by deploy.yml rather than
+  # defaulted here. The first two are the trap worth naming: Environment and
+  # FixedEnvironment are two different axes wearing one word, and on this
+  # install they hold DIFFERENT VALUES (dev and prod respectively). Getting
+  # them the wrong way round produces a service that reads configuration which
+  # does not exist, or writes keys nothing can read — both silent.
+
+  PorthBranch:
+    Type: String
+    Default: dev
+    Description: >
+      The Porth install's DEPLOYMENT axis — its stack's `Environment`
+      parameter. Drives the SSM document prefix (/porth/{branch}/services,
+      /porth/{branch}/auth-session-policy/*), the event bus name
+      (porth-events-{branch}) and the context key alias. NOT the data slot.
+
+  PorthEventBusName:
+    Type: String
+    Default: ''
+    Description: >
+      The Porth domain event bus (output EventBusName from the Porth stack).
+      A CUSTOM bus, not `default` — a rule written against the default bus
+      matches nothing and reports no error, which is how the sample app's
+      EntityEvent consumer has sat inert (tracked separately).
+
+  PorthContextSigningKeyArn:
+    Type: String
+    Default: ''
+    Description: >
+      ARN of the context-token signing KMS key, written to SSM by the
+      porth-install-once Terraform module and resolved by deploy.yml.
+
+      A plain String, deliberately, having been AWS::SSM::Parameter::Value<String>
+      for exactly one failed deploy. That type makes CLOUDFORMATION resolve the
+      path, at change-set creation, using the DEPLOY role's credentials — not the
+      CFN execution role's, which is the surprising half. sample-app-deploy-role
+      holds no ssm:GetParameters, so the deploy died with an AccessDenied naming
+      an action nothing in this template asks for. Resolving it in the workflow
+      puts the read somewhere a reader can see it.
+
+      Empty is allowed and is NOT a silent degradation: the two KMS grants below
+      are conditional on it, so an install without it deploys the table and the
+      lifecycle consumer — the tenant still gets its salt from the bus — while
+      the request path has no verifier and refuses every call. Which half is
+      wired is reported in the stack outputs rather than left to be discovered.
+
+Conditions:
+
+  # PORTH-587. Both KMS grants name a key ARN in their Resource, and IAM rejects
+  # an empty one. Absent the key, ffug deploys as the bus consumer only.
+  HasContextSigningKey: !Not [!Equals [!Ref PorthContextSigningKeyArn, '']]
 
 Resources:
 
@@ -370,6 +433,138 @@ Resources:
           KeyType: HASH
         - AttributeName: sk
           KeyType: RANGE
+      # PORTH-587. tenant.deleted strips the projection row of its salt and
+      # stamps expires_at on what is left. That remainder is the order gate
+      # which stops a late pre-deletion event resurrecting the tenant — it
+      # holds a tenant id, a timestamp and nothing else. Bounded rather than
+      # permanent because a marker that never expires IS residue, and
+      # residue-free teardown is a UAT-5 assertion.
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+
+  # The identity ffug narrows FROM (PORTH-550 / PORTH-587). ffug's execution
+  # role holds no data access of its own; it assumes this one per request with
+  # an inline session policy naming the request's tenant, and the intersection
+  # is what reaches DynamoDB. Same mechanism the authorizer applies to a human
+  # caller — applied here by the service to itself, because on the internal
+  # plane there was no authorizer to do it.
+  #
+  # Unnamed, like every other role in this stack: the CFN execution role scopes
+  # IAM to role/enterprise-membership-sample-*, which a CloudFormation-generated
+  # name inherits and an explicit one would not.
+  FfugTenantRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # ASCII only - IAM rejects anything outside Latin-1 printable, notably the
+      # em dash this codebase uses freely. ffug-tests.yml guards it on the PR
+      # because CloudFormation only finds out mid-deploy and rolls the stack back.
+      Description: "ffug per-tenant data identity - assumed with a tenant-scoped session policy (PORTH-587)."
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            # Account root, NOT the function role. Naming the function role here
+            # is a CloudFormation cycle: this role would reference it, and it
+            # would reference this role to be granted sts:AssumeRole. Root trust
+            # means "assumable by any principal in this account that has been
+            # GRANTED sts:AssumeRole on it" — the grant is the gate, and it
+            # lives on the caller (FfugFunctionRole below), where it is visible.
+            #
+            # No sts:TagSession. PORTH-607 added it to PorthTenantRole's trust
+            # for the authorizer's external path, which tags sessions;
+            # narrowed_credentials() on the internal plane calls AssumeRole with
+            # no Tags. Stated because a reviewer working from the PorthTenantRole
+            # precedent will otherwise add it by reflex.
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ffug-table-tenant-keyed
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # The CEILING. The per-request session policy intersects with it,
+              # so the effective reach is one tenant's rows in one table.
+              #
+              # dynamodb:Scan is deliberately ABSENT and must stay absent. Scan
+              # populates no dynamodb:LeadingKeys, so ForAllValues passes
+              # vacuously against it and the condition below would bind nothing
+              # — it is the one action no key condition can constrain (the trap
+              # PORTH-580 exists to retire on Porth's own platform policy).
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:ConditionCheckItem
+                Resource: !GetAtt FfugTable.Arn
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      # Both shapes, matching tenant-scoped-default. The bare
+                      # partition is the projection row; the #* form is
+                      # everything under it. Omitting the bare one would make
+                      # the salt unreadable and the failure would look like an
+                      # unprovisioned tenant.
+                      - ENV#*#TENANT#*
+                      - ENV#*#TENANT#*#*
+
+  # ffug's execution role. Note what is NOT here: any DynamoDB permission at
+  # all. It used to carry DynamoDBCrudPolicy on FfugTable, and removing that is
+  # the point of PORTH-587 rather than tidying. The Director raises instead of
+  # proceeding when it cannot narrow, so with no ambient grant to fall back on,
+  # a narrowing bug surfaces as AccessDenied — fail-closed as a structural
+  # property rather than as a behaviour something could regress.
+  FfugFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: "ffug execution role - verifies context envelopes and assumes its tenant role. Holds no data access."
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ffug-narrow-and-verify
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !GetAtt FfugTenantRole.Arn
+              # kms:Verify and NEVER kms:Sign (Head of Security condition H1).
+              # ffug is a receiver: it checks that context was minted by someone
+              # entitled to mint it, and cannot mint any itself. This role
+              # attempting Sign and being denied is what UAT-4 witnesses live,
+              # so adding Sign here would not merely widen a permission — it
+              # would delete the demonstration.
+              #
+              # Conditional only because IAM rejects an empty Resource. Without
+              # the key ffug has no verifier and refuses every call — loudly, at
+              # the boundary — which is the correct posture for a service that
+              # cannot check who is calling it.
+              - !If
+                - HasContextSigningKey
+                - Effect: Allow
+                  Action: kms:Verify
+                  Resource: !Ref PorthContextSigningKeyArn
+                - !Ref AWS::NoValue
+              # The D3 service registry (is the calling service registered and
+              # active?) and the session-policy template the narrowing renders.
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/auth-session-policy/*
 
   FfugFunction:
     Type: AWS::Serverless::Function
@@ -379,16 +574,110 @@ Resources:
       Handler: ffug.handler.handler
       Runtime: python3.12
       Timeout: 30
-      MemorySize: 128
+      MemorySize: 256
+      # Explicit Role, so FfugTenantRole can be referenced by ARN above. SAM
+      # rejects Role and Policies together — everything is in the role.
+      Role: !GetAtt FfugFunctionRole.Arn
       Environment:
         Variables:
+          # The two axes, kept apart on purpose. PORTH_BRANCH addresses
+          # configuration; PORTH_FIXED_ENVIRONMENT addresses data. They hold
+          # different values on this install.
+          PORTH_BRANCH: !Ref PorthBranch
+          PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
           PORTH_ENVIRONMENT: !Ref PorthEnvironment
+          # This service's registered identity — the audience it will accept in
+          # a context token. Unset, the Director refuses every internal call
+          # rather than skipping the audience check.
+          PORTH_SERVICE_ID: ffug
+          PORTH_SERVICE_DATA_IDENTITY: !GetAtt FfugTenantRole.Arn
+          # Fetched by name as auth-session-policy/{name}, from the same
+          # documents the authorizer selects among — one place to change the
+          # narrowing rule rather than a copy that drifts (the defect entry 3
+          # of the EMS upgrade log describes).
+          PORTH_SERVICE_DATA_SCOPE: tenant-scoped-default
           FFUG_TABLE_NAME: !Ref FfugTable
-      Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref FfugTable
       # No Events — ffug is invoked directly (IAM/SigV4), never through a
       # public HTTP route. The internal plane is the whole point.
+
+  # ── ffug lifecycle consumer (PORTH-546 adoption, PORTH-587) ───────────────
+  #
+  # The half that runs with nobody calling ffug: a tenant acquires its salt in
+  # ffug because Porth announced the tenant, not because anyone made a request.
+  #
+  # Its own function and its own role, deliberately. It acts for the platform,
+  # across tenants, before any caller for that tenant exists — so it has the
+  # opposite identity requirements to the request path and sharing a role would
+  # mean granting the request path what this one needs. Narrowing this consumer
+  # per record too is the stronger form of the claim and is its own ticket.
+  FfugLifecycleFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: "ffug lifecycle consumer - maintains the tenant projection from the Porth event bus (PORTH-587)."
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ffug-projection-maintenance
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Unconditioned and cross-tenant, and that is the honest shape:
+              # this function's whole job is to establish the boundary that
+              # everything else is then bound by. No KMS and no STS — a bus
+              # event is not an envelope and carries no signature to verify.
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:BatchWriteItem
+                Resource: !GetAtt FfugTable.Arn
+
+  FfugLifecycleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub porth-ffug-lifecycle-${PorthEnvironment}
+      CodeUri: lambdas/
+      Handler: ffug.lifecycle.handler
+      Runtime: python3.12
+      Timeout: 60
+      MemorySize: 256
+      Role: !GetAtt FfugLifecycleFunctionRole.Arn
+      Environment:
+        Variables:
+          PORTH_BRANCH: !Ref PorthBranch
+          PORTH_ENVIRONMENT: !Ref PorthEnvironment
+          FFUG_TABLE_NAME: !Ref FfugTable
+      Events:
+        TenantLifecycle:
+          Type: EventBridgeRule
+          Properties:
+            # The Porth domain bus, NOT the default bus. Porth publishes here
+            # and nowhere else, so a rule that omits this matches nothing and
+            # says nothing about it.
+            EventBusName: !Ref PorthEventBusName
+            Pattern:
+              source:
+                - porth.user-management
+              detail-type:
+                # Contract v1, lowercase. The capitalised `Tenant.*` domain
+                # events are the audit/search feed and are explicitly NOT this
+                # contract — subscribing to them from a consuming service is
+                # the documented wrong thing.
+                - tenant.created
+                - tenant.updated
+                - tenant.suspended
+                - tenant.reactivated
+                - tenant.deleted
 
   # Role the Components-repo UAT suite assumes to reach ffug in this account
   # (Q13 ruling, 2026-08-05). Unnamed deliberately: the deploy runs with
@@ -401,7 +690,7 @@ Resources:
       # printable range, which excludes the em dash this codebase uses freely
       # in prose. Cost of learning that: one rolled-back stack (run
       # 31216080066). The guard in ffug-tests.yml now catches it on the PR.
-      Description: "Porth ADR-Z11 UAT runner - invoke/read ffug from the Components repo's UAT workflow."
+      Description: "Porth ADR-Z11 UAT runner - mints context, invokes ffug, and reads its table to prove isolation."
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -424,12 +713,42 @@ Resources:
                 Resource: !GetAtt FfugFunction.Arn
               # Read-only on the table so UAT journeys can prove isolation and
               # residue-free teardown by inspection. Never write.
+              #
+              # This grant is also why the salt is not a secret: whoever holds
+              # this role can read every tenant's. Deliberate — it is what makes
+              # "two tenants, two salts" checkable by inspection. The isolation
+              # claim is that FFUG cannot make that read, not that nobody can.
               - Effect: Allow
                 Action:
                   - dynamodb:GetItem
                   - dynamodb:Query
                   - dynamodb:Scan
                 Resource: !GetAtt FfugTable.Arn
+              # PORTH-587 — the signer. Without this NOTHING in this account can
+              # mint a context token, so the internal plane has no caller and
+              # ADR-Z11's UAT-2/3/4 cannot run at all. Porth's own dev-class
+              # grant (PorthContextDeveloperSignPolicy) is emitted only when the
+              # install passes DeveloperSignRoleArns, and porth-install.yml never
+              # does — a green install with no signer and no error anywhere.
+              #
+              # Granting it here works because the context key's policy allows
+              # the account root and denies only cross-account use, so
+              # authorisation is delegated to IAM identity policies. That is
+              # itself a finding, recorded in Components PR #294: the dev-class
+              # condition governs what PORTH's template emits, not who in the
+              # account can sign. If that hole is later closed with an explicit
+              # key-policy Deny, THIS ROLE must be on the allow-list or the ffug
+              # UAT stops working.
+              #
+              # ffug's own role holds kms:Verify and never this. The split is
+              # the point: a compromised receiver cannot mint context for
+              # another tenant (H1).
+              - !If
+                - HasContextSigningKey
+                - Effect: Allow
+                  Action: kms:Sign
+                  Resource: !Ref PorthContextSigningKeyArn
+                - !Ref AWS::NoValue
 
   # ── S3 bucket for React SPA static assets ────────────────────────────────
 
@@ -674,6 +993,33 @@ Outputs:
     Value: !Ref FfugTable
     Export:
       Name: !Sub ${AWS::StackName}-FfugTableName
+
+  FfugLifecycleFunctionArn:
+    Description: >
+      ffug's tenant-lifecycle consumer (PORTH-587). Subscribed to the Porth
+      domain bus; this is where a tenant's salt is minted, before any caller
+      exists.
+    Value: !GetAtt FfugLifecycleFunction.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-FfugLifecycleFunctionArn
+
+  FfugInternalPlaneWired:
+    Description: >
+      Whether ffug's REQUEST path is wired (PORTH-587). "yes" means the context
+      signing key was resolved, so ffug can verify an envelope and the UAT
+      runner can mint one. "no" means only the bus half is live: tenants still
+      get their salt from tenant.created, and every synchronous call is refused
+      because there is no verifier. Published because the difference is
+      otherwise invisible until something calls ffug.
+    Value: !If [HasContextSigningKey, 'yes', 'no']
+
+  FfugTenantRoleArn:
+    Description: >
+      The identity ffug narrows from per request (PORTH-587). Published so a UAT
+      journey can assert on the effective session policy rather than infer it.
+    Value: !GetAtt FfugTenantRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-FfugTenantRoleArn
 
   PorthUatRunnerRoleArn:
     Description: Role the Components-repo UAT workflow assumes to reach ffug (Q13)

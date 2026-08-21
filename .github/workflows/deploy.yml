@@ -155,6 +155,77 @@ jobs:
           echo "PORTH_AUTHORIZER_ROLE_ARN=$PORTH_AUTHORIZER_ROLE_ARN" >> $GITHUB_ENV
           echo "✅ Resolved PORTH_AUTHORIZER_ROLE_ARN=$PORTH_AUTHORIZER_ROLE_ARN"
 
+          # PORTH-587 — what ffug needs from the install, read from the install
+          # rather than assumed here.
+          #
+          # Environment and FixedEnvironment are two different axes wearing one
+          # word, and on this install they hold DIFFERENT VALUES (dev / prod).
+          # Environment addresses configuration — SSM document paths, the event
+          # bus name, the context key alias. FixedEnvironment addresses data —
+          # the ENV#{slot}# prefix on every partition key, and the value an
+          # inbound context envelope is checked against.
+          #
+          # Swapping them produces a service that reads configuration which does
+          # not exist, or writes keys nothing can read. Both are silent, which is
+          # why these are resolved and hard-failed rather than defaulted.
+          get_param() {
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK" \
+              --query "Stacks[0].Parameters[?ParameterKey=='$1'].ParameterValue" \
+              --output text
+          }
+          PORTH_BRANCH=$(get_param Environment)
+          PORTH_ENV_SLOT=$(get_param FixedEnvironment)
+          PORTH_EVENT_BUS=$(get_output EventBusName)
+
+          MISSING=()
+          [ -z "$PORTH_BRANCH" ] || [ "$PORTH_BRANCH" == "None" ] && MISSING+=("Environment (stack parameter)")
+          [ -z "$PORTH_ENV_SLOT" ] || [ "$PORTH_ENV_SLOT" == "None" ] && MISSING+=("FixedEnvironment (stack parameter)")
+          [ -z "$PORTH_EVENT_BUS" ] || [ "$PORTH_EVENT_BUS" == "None" ] && MISSING+=("EventBusName (stack output)")
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "❌ Could not resolve from $STACK: ${MISSING[*]}"
+            echo "❌ ffug would deploy pointed at the wrong environment axis or the"
+            echo "❌ wrong event bus, and both failures are silent — no tenant is"
+            echo "❌ ever provisioned and nothing reports why."
+            exit 1
+          fi
+
+          # The context signing key. Read HERE rather than by CloudFormation:
+          # AWS::SSM::Parameter::Value<String> resolves at change-set creation
+          # using the DEPLOY role's credentials, not the CFN execution role's,
+          # and sample-app-deploy-role holds no ssm:GetParameters — so the whole
+          # deploy died on an AccessDenied naming an action the template never
+          # asks for. Run 32442832244.
+          #
+          # Not fatal if it fails. Without the key ffug still deploys as the bus
+          # consumer, so tenants get their salt from tenant.created; what it
+          # loses is the verifier, and every synchronous call is then refused at
+          # the boundary. The stack output FfugInternalPlaneWired says which.
+          CONTEXT_KEY_ARN=$(aws ssm get-parameter \
+            --name "/porth/${PORTH_BRANCH}/infra/context-signing-key-arn" \
+            --query Parameter.Value --output text 2>/dev/null || echo "")
+          if [ -z "$CONTEXT_KEY_ARN" ] || [ "$CONTEXT_KEY_ARN" == "None" ]; then
+            CONTEXT_KEY_ARN=""
+            echo "::warning::Could not read /porth/${PORTH_BRANCH}/infra/context-signing-key-arn."
+            echo "::warning::ffug deploys as the BUS CONSUMER ONLY - tenants still get a salt,"
+            echo "::warning::but every synchronous call is refused because there is no verifier."
+            echo "::warning::CONFIRMED by run 32443190291: the role has neither"
+            echo "::warning::ssm:GetParameter nor ssm:GetParameters on this path."
+            echo "::warning::Fix: grant ssm:GetParameter on /porth/* to sample-app-deploy-role"
+            echo "::warning::(source of truth: Components infra/receiving-account-templates/"
+            echo "::warning::sample-app-deploy-role.yaml; the LIVE role needs it applied too)."
+          else
+            echo "✅ Context signing key resolved - ffug's request path will be wired"
+          fi
+
+          echo "PORTH_CONTEXT_KEY_ARN=$CONTEXT_KEY_ARN" >> $GITHUB_ENV
+          echo "PORTH_BRANCH=$PORTH_BRANCH" >> $GITHUB_ENV
+          echo "PORTH_ENV_SLOT=$PORTH_ENV_SLOT" >> $GITHUB_ENV
+          echo "PORTH_EVENT_BUS=$PORTH_EVENT_BUS" >> $GITHUB_ENV
+          echo "✅ Porth branch (config axis) = $PORTH_BRANCH"
+          echo "✅ Porth slot   (data axis)   = $PORTH_ENV_SLOT"
+          echo "✅ Porth event bus            = $PORTH_EVENT_BUS"
+
       # ── The app's own permissions (PORTH-610) ────────────────────────────────
       # These belong here, not in the Porth install. Porth owns the
       # porth-platform and porth-tenant namespaces; anything this app enforces
@@ -302,11 +373,70 @@ jobs:
           # A stack left in REVIEW_IN_PROGRESS (failed --resolve-s3) or
           # ROLLBACK_COMPLETE / *_FAILED (failed initial CREATE) cannot be
           # updated — it must be deleted before it can be recreated cleanly.
+          #
+          # UPDATE_ROLLBACK_FAILED is NOT in that list and must never be added to
+          # it. It means a LIVE stack failed to update and then failed to roll
+          # back, so deleting it destroys real data — the one-way door that cost
+          # entry 1 of Porth's EMS upgrade log. porth-install.yml was hardened
+          # for this in #61; this workflow never was, and was safe only because
+          # `case` matches literals and UPDATE_ROLLBACK_FAILED is a different
+          # string from ROLLBACK_FAILED. That is luck, not design.
+          #
+          # The supported recovery is continue-update-rollback, which is what
+          # the branch below does. It is idempotent, and it fails loudly if the
+          # underlying cause has not been fixed — which is the useful behaviour,
+          # because retrying the deploy without fixing it would fail anyway.
           for STACK in aws-sam-cli-managed-default "$SAM_STACK_NAME"; do
             STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
               --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
             echo "$STACK state: $STATUS"
             case "$STATUS" in
+              UPDATE_ROLLBACK_FAILED)
+                echo "  $STACK is UPDATE_ROLLBACK_FAILED — a live stack whose update"
+                echo "  and rollback both failed. Continuing the rollback; NEVER deleting."
+                aws cloudformation continue-update-rollback --stack-name "$STACK"
+
+                # continue-update-rollback is ASYNCHRONOUS. For the first few
+                # seconds the stack still reads UPDATE_ROLLBACK_FAILED — the
+                # state we started in — before moving to
+                # UPDATE_ROLLBACK_IN_PROGRESS. Treating that first reading as
+                # terminal aborts the recovery it just asked for, which is
+                # exactly what run 32448951412 did.
+                #
+                # So UPDATE_ROLLBACK_FAILED only counts as a real failure once
+                # progress has actually been observed.
+                SEEN_PROGRESS=0
+                RECOVERED=0
+                for _ in $(seq 1 90); do
+                  sleep 10
+                  ROLLBACK_STATE=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+                    --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
+                  echo "    $ROLLBACK_STATE"
+                  case "$ROLLBACK_STATE" in
+                    UPDATE_ROLLBACK_IN_PROGRESS|UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS)
+                      SEEN_PROGRESS=1
+                      ;;
+                    UPDATE_ROLLBACK_COMPLETE|UPDATE_COMPLETE)
+                      echo "  Recovered — the stack can be updated again."
+                      RECOVERED=1
+                      break
+                      ;;
+                    UPDATE_ROLLBACK_FAILED)
+                      if [ "$SEEN_PROGRESS" -eq 1 ]; then
+                        echo "::error::continue-update-rollback did not clear $STACK."
+                        echo "The resource that blocked the rollback still cannot be reverted —"
+                        echo "fix the underlying permission or use --resources-to-skip by hand."
+                        exit 1
+                      fi
+                      echo "    (unchanged so far — the call is asynchronous, still waiting)"
+                      ;;
+                  esac
+                done
+                if [ "$RECOVERED" -ne 1 ]; then
+                  echo "::error::$STACK did not reach UPDATE_ROLLBACK_COMPLETE within 15 minutes."
+                  exit 1
+                fi
+                ;;
               REVIEW_IN_PROGRESS|ROLLBACK_COMPLETE|CREATE_FAILED|ROLLBACK_FAILED|DELETE_FAILED)
                 echo "  Deleting $STACK (state $STATUS) so it can be recreated cleanly..."
                 aws cloudformation delete-stack --stack-name "$STACK"
@@ -321,6 +451,29 @@ jobs:
 
       - name: SAM deploy (infrastructure)
         run: |
+          set -euo pipefail
+
+          # Overrides that are only passed when they have a value. `Key=` with
+          # an empty value is not "the empty string" to SAM — it is a malformed
+          # override, and the deploy dies before reaching CloudFormation:
+          #
+          #   Error: Invalid value for '--parameter-overrides':
+          #   PorthContextSigningKeyArn= is not a valid format
+          #
+          # (run 32443190291). Omitting the key lets the template's own default
+          # apply, which is what "absent" is supposed to mean. Anything optional
+          # belongs in this array rather than in the fixed list below.
+          #
+          # Expanded as ${OPTIONAL[@]+"${OPTIONAL[@]}"} and not as
+          # "${OPTIONAL[@]}". Under `set -u` the bare form treats an EMPTY array
+          # as an unbound variable on bash < 4.4 — the runner has 5.2 and would
+          # be fine, but the guard costs nothing and this step is one of the few
+          # places where "works on the runner" and "works" can diverge.
+          OPTIONAL=()
+          if [ -n "${PORTH_CONTEXT_KEY_ARN:-}" ]; then
+            OPTIONAL+=("PorthContextSigningKeyArn=${PORTH_CONTEXT_KEY_ARN}")
+          fi
+
           sam deploy \
             --stack-name ${{ env.SAM_STACK_NAME }} \
             --region ${{ env.AWS_REGION }} \
@@ -333,11 +486,14 @@ jobs:
               PorthAuthorizerFunctionArn=${{ env.PORTH_AUTHORIZER_ARN }} \
               PorthAuthorizerFunctionRoleArn=${{ env.PORTH_AUTHORIZER_ROLE_ARN }} \
               SampleApiDomainName='sample-api.porth-sample.ems.estynsoftware.cloud' \
-              PorthEnvSlot=prod \
+              PorthEnvSlot=${{ env.PORTH_ENV_SLOT }} \
               AcmCertificateArn=${{ vars.ACM_CERTIFICATE_ARN }} \
               CloudFrontAlias='*.porth-sample.ems.estynsoftware.cloud' \
               CloudFrontApexAlias='porth-sample.ems.estynsoftware.cloud' \
               PorthEnvironment=dev \
+              PorthBranch=${{ env.PORTH_BRANCH }} \
+              PorthEventBusName=${{ env.PORTH_EVENT_BUS }} \
+              ${OPTIONAL[@]+"${OPTIONAL[@]}"} \
             --no-fail-on-empty-changeset
 
       - name: Diagnose SAM managed-bucket failure

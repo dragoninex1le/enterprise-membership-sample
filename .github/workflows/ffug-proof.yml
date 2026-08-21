@@ -1,0 +1,153 @@
+name: ffug — prove tenant isolation
+
+# The evidence run for PORTH-587, and the shape PORTH-553 asks for: journeys
+# driven by a workflow_dispatch, with the GitHub run as the evidence pack of
+# record. It reads and invokes; it deploys nothing and writes nothing.
+#
+# Two stages, in the order they were asked for:
+#   A. the bus created the tenant in ffug's table, with its own prime
+#   B. a synchronous call returns that tenant's digest, and two tenants
+#      disagree on an identical payload
+#
+# PRECONDITION: at least one tenant must have been created AFTER the ffug
+# lifecycle consumer was deployed. A tenant that already existed gets no prime
+# retroactively. Run 'Porth - seed testbed tenants', or create one in the admin
+# UI, then run this.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  SAM_STACK_NAME: enterprise-membership-sample
+
+jobs:
+  prove:
+    name: A - tenant seeded from the bus, B - synchronous call
+    runs-on: ubuntu-latest
+    environment: sample-app-deploy
+    env:
+      PORTH_STACK_NAME: ${{ vars.PORTH_STACK_NAME || 'serverlessrepo-porth-components' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Two OIDC assumptions in one job, and they are NOT role chaining. The UAT
+      # runner's trust policy accepts sts:AssumeRoleWithWebIdentity only, so no
+      # other role can assume it — configure-aws-credentials requests a fresh
+      # OIDC token each time it runs, which is what makes the second step work.
+      #
+      # This first one is the deploy role: it is the identity that can read the
+      # stack outputs and CodeArtifact. It deliberately holds no kms:Sign.
+      - name: Configure AWS credentials (deploy role, for discovery)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve what the proof needs
+        run: |
+          set -euo pipefail
+
+          sample_output() {
+            aws cloudformation describe-stacks --stack-name "$SAM_STACK_NAME" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text
+          }
+          porth_param() {
+            aws cloudformation describe-stacks --stack-name "$PORTH_STACK_NAME" \
+              --query "Stacks[0].Parameters[?ParameterKey=='$1'].ParameterValue" --output text
+          }
+
+          FFUG_FUNCTION_ARN=$(sample_output FfugFunctionArn)
+          FFUG_TABLE_NAME=$(sample_output FfugTableName)
+          UAT_ROLE_ARN=$(sample_output PorthUatRunnerRoleArn)
+          PORTH_BRANCH=$(porth_param Environment)
+
+          # The signer needs the key. Taken from the STACK'S OWN PARAMETERS,
+          # not from SSM: deploy.yml already resolved it once and passed it in,
+          # and the deploy role's SSM access is the thing that cannot be relied
+          # on (run 32442832244). DescribeStacks is already permitted, and this
+          # way the proof signs with exactly the key the deployed function was
+          # told to verify against — reading SSM again could disagree with it.
+          CONTEXT_KEY_ARN=$(aws cloudformation describe-stacks \
+            --stack-name "$SAM_STACK_NAME" \
+            --query "Stacks[0].Parameters[?ParameterKey=='PorthContextSigningKeyArn'].ParameterValue" \
+            --output text)
+          WIRED=$(sample_output FfugInternalPlaneWired)
+          if [ "$WIRED" != "yes" ]; then
+            echo "::error::The stack reports FfugInternalPlaneWired=$WIRED."
+            echo "ffug deployed as the bus consumer only, with no context verifier."
+            echo "Stage A (the tenant's salt) will work; stage B cannot — every"
+            echo "synchronous call is refused at the boundary."
+            echo "Fix: grant ssm:GetParameter on /porth/* to sample-app-deploy-role,"
+            echo "then re-run Deploy Admin UI."
+            exit 1
+          fi
+
+          MISSING=()
+          [ -z "$FFUG_FUNCTION_ARN" ] || [ "$FFUG_FUNCTION_ARN" == "None" ] && MISSING+=("FfugFunctionArn")
+          [ -z "$FFUG_TABLE_NAME" ] || [ "$FFUG_TABLE_NAME" == "None" ] && MISSING+=("FfugTableName")
+          [ -z "$UAT_ROLE_ARN" ] || [ "$UAT_ROLE_ARN" == "None" ] && MISSING+=("PorthUatRunnerRoleArn")
+          [ -z "$CONTEXT_KEY_ARN" ] || [ "$CONTEXT_KEY_ARN" == "None" ] && MISSING+=("context-signing-key-arn")
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "::error::could not resolve: ${MISSING[*]}"
+            echo "If FfugLifecycleFunctionArn and friends are absent, the stack predates"
+            echo "PORTH-587 — run 'Deploy Admin UI' on main first."
+            exit 1
+          fi
+
+          {
+            echo "FFUG_FUNCTION_ARN=$FFUG_FUNCTION_ARN"
+            echo "FFUG_TABLE_NAME=$FFUG_TABLE_NAME"
+            echo "UAT_ROLE_ARN=$UAT_ROLE_ARN"
+            echo "PORTH_CONTEXT_SIGNING_KEY_ALIAS=$CONTEXT_KEY_ARN"
+          } >> "$GITHUB_ENV"
+
+          echo "ffug function : $FFUG_FUNCTION_ARN"
+          echo "ffug table    : $FFUG_TABLE_NAME"
+          echo "porth branch  : $PORTH_BRANCH"
+
+      # Under the deploy role, because the UAT runner has no CodeArtifact grant.
+      # The login writes a 12-hour token into pip's config, so the install
+      # survives the role switch below.
+      - name: Configure pip for CodeArtifact and install porth-common
+        run: |
+          set -euo pipefail
+          aws codeartifact login --tool pip \
+            --domain porth --domain-owner 084847995635 \
+            --repository porth-py --region "$AWS_REGION"
+          python -m pip install --quiet -r lambdas/requirements.txt
+
+      # The identity that actually runs the proof. This is the one holding
+      # kms:Sign, lambda:InvokeFunction on ffug, and read-only on its table —
+      # and holding no write to anything.
+      - name: Assume the Porth UAT runner role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.UAT_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: ffug-proof
+
+      - name: Which identity is running the proof
+        run: aws sts get-caller-identity
+
+      - name: Prove it
+        run: python scripts/ffug_proof.py | tee proof.txt
+
+      - name: Publish the evidence
+        if: always()
+        run: |
+          {
+            echo '## ffug tenant-isolation proof'
+            echo '```'
+            cat proof.txt 2>/dev/null || echo '(no output - the run failed before the script)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
