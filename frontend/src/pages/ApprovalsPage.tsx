@@ -27,21 +27,33 @@ function StatusBadge({ status }: { status: string }) {
   )
 }
 
+interface Probe {
+  partition: string
+  expect: 'allow' | 'deny'
+  allowed: boolean
+  detail: string
+  pass: boolean
+}
+
 interface Identity {
   tenant_id: string
   narrowed: boolean
   app_table: string
   role: string | null
-  app_table_reachable: boolean
-  detail: string
+  probes: Probe[]
+  isolated: boolean
 }
 
-// PORTH-585 made the role a per-request decision; this shows which one was made.
-// Without it, a page served under the wrong credentials looks exactly like one
-// served under the right ones — right up until something is denied.
+// Shows what the request was REFUSED, not only what it could read.
+//
+// The first version of this reported a successful read and called it proof. It
+// was not: reading your own data shows the credentials work and says nothing
+// about what is kept out, which is the whole property. The role name now comes
+// from sts:GetCallerIdentity rather than being inferred, and two deliberately
+// forbidden reads are attempted on every load.
 function IdentityStrip({ identity }: { identity: Identity | null }) {
   if (!identity) return null
-  const ok = identity.app_table_reachable
+  const ok = identity.isolated
   return (
     <div
       className={`mb-4 rounded-md border px-3 py-2 text-xs ${
@@ -49,14 +61,32 @@ function IdentityStrip({ identity }: { identity: Identity | null }) {
            : 'border-amber-200 bg-amber-50 text-amber-900'
       }`}
     >
-      <span className="font-semibold">Served as: </span>
-      <span className="font-mono">{identity.role ?? (ok ? 'this app\u2019s own role' : 'unknown')}</span>
-      <span className="mx-2 text-gray-400">|</span>
-      <span className="font-semibold">tenant: </span>
-      <span className="font-mono">{identity.tenant_id}</span>
-      <span className="mx-2 text-gray-400">|</span>
-      <span>{identity.narrowed ? 'narrowed credentials' : 'ambient identity'}</span>
-      {!ok && <div className="mt-1 font-mono opacity-80">{identity.detail}</div>}
+      <div>
+        <span className="font-semibold">Served as: </span>
+        <span className="font-mono">{identity.role ?? 'unknown'}</span>
+        <span className="mx-2 text-gray-400">|</span>
+        <span className="font-semibold">tenant: </span>
+        <span className="font-mono">{identity.tenant_id}</span>
+        <span className="mx-2 text-gray-400">|</span>
+        <span>{identity.narrowed ? 'narrowed credentials' : 'ambient identity'}</span>
+      </div>
+      <table className="mt-2 font-mono text-[11px]">
+        <tbody>
+          {identity.probes.map(probe => (
+            <tr key={probe.partition}>
+              <td className="pr-3">{probe.pass ? '\u2713' : '\u2717'}</td>
+              <td className="pr-3">{probe.partition}</td>
+              <td className="pr-3 opacity-70">expected {probe.expect}</td>
+              <td className="opacity-70">{probe.detail}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="mt-1">
+        {ok
+          ? 'Isolated: this tenant\u2019s partition is readable and the two forbidden ones are refused by IAM.'
+          : 'NOT isolated on the evidence above \u2014 a read that should have been refused was allowed, or the tenant\u2019s own read failed.'}
+      </div>
     </div>
   )
 }
