@@ -12,6 +12,11 @@ on:
     paths:
       - 'lambdas/ffug/**'
       - 'lambdas/requirements.txt'
+      # The proof script recomputes ffug's digest and scans for its sort key.
+      # Both couplings are invisible at runtime — a rename leaves it scanning
+      # for a key nothing writes, finding nothing, and reporting the same thing
+      # a broken consumer reports.
+      - 'scripts/ffug_proof.py'
       # PORTH-587 — the suite now asserts against the template, because the
       # half of this slice that does the isolating is IAM and never appears in
       # a code diff. A template change that quietly restores ffug's ambient

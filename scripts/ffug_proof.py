@@ -41,12 +41,23 @@ from boto3.dynamodb.conditions import Attr
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lambdas"))
 from ffug import keys, salt  # noqa: E402
 
-FUNCTION_ARN = os.environ["FFUG_FUNCTION_ARN"]
-TABLE_NAME = os.environ["FFUG_TABLE_NAME"]
-
 #: The same payload for every tenant. That it is identical is the entire point:
 #: any difference in the answers has to come from the tenant, not the input.
 PAYLOAD = {"invoice": "INV-0001", "amount": 12345, "currency": "GBP"}
+
+
+def _env(name: str) -> str:
+    """Read a required setting at USE time, not at import.
+
+    Module-level ``os.environ[...]`` makes the module unimportable without the
+    whole environment present, which means it cannot be tested — and the test
+    that catches a rename of ``keys.PROJECTION_SK`` is the only thing standing
+    between that rename and a proof run that scans for a sort key nothing uses.
+    """
+    value = os.environ.get(name, "").strip()
+    if not value:
+        fail(f"{name} is not set - the proof workflow should have exported it.")
+    return value
 
 
 @dataclass
@@ -72,7 +83,7 @@ def fail(message: str, *remedy: str) -> None:
 
 def scan_projections() -> list[dict]:
     """Every tenant ffug knows about, and the prime it holds for each."""
-    table = boto3.resource("dynamodb").Table(TABLE_NAME)
+    table = boto3.resource("dynamodb").Table(_env("FFUG_TABLE_NAME"))
     rows, start_key = [], None
     while True:
         kwargs = {
@@ -97,7 +108,7 @@ def stage_a() -> list[dict]:
     rows = scan_projections()
     if not rows:
         fail(
-            f"{TABLE_NAME} holds no tenant projections.",
+            f"{_env('FFUG_TABLE_NAME')} holds no tenant projections.",
             "ffug mints a tenant's prime when Porth emits tenant.created. No rows",
             "means no such event has been delivered SINCE ffug's consumer was",
             "deployed — tenants that already existed do not get one retroactively.",
@@ -149,7 +160,7 @@ def stage_b(tenants: list[dict]) -> None:
             trace_id=f"ffug-proof-{tenant_id}",
         )
         response = client.invoke(
-            FunctionName=FUNCTION_ARN,
+            FunctionName=_env("FFUG_FUNCTION_ARN"),
             Payload=json.dumps(
                 {"porth_context": envelope.to_payload_field(), "op": "hash", "payload": PAYLOAD}
             ).encode(),
