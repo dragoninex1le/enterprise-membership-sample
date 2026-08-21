@@ -373,11 +373,47 @@ jobs:
           # A stack left in REVIEW_IN_PROGRESS (failed --resolve-s3) or
           # ROLLBACK_COMPLETE / *_FAILED (failed initial CREATE) cannot be
           # updated — it must be deleted before it can be recreated cleanly.
+          #
+          # UPDATE_ROLLBACK_FAILED is NOT in that list and must never be added to
+          # it. It means a LIVE stack failed to update and then failed to roll
+          # back, so deleting it destroys real data — the one-way door that cost
+          # entry 1 of Porth's EMS upgrade log. porth-install.yml was hardened
+          # for this in #61; this workflow never was, and was safe only because
+          # `case` matches literals and UPDATE_ROLLBACK_FAILED is a different
+          # string from ROLLBACK_FAILED. That is luck, not design.
+          #
+          # The supported recovery is continue-update-rollback, which is what
+          # the branch below does. It is idempotent, and it fails loudly if the
+          # underlying cause has not been fixed — which is the useful behaviour,
+          # because retrying the deploy without fixing it would fail anyway.
           for STACK in aws-sam-cli-managed-default "$SAM_STACK_NAME"; do
             STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
               --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
             echo "$STACK state: $STATUS"
             case "$STATUS" in
+              UPDATE_ROLLBACK_FAILED)
+                echo "  $STACK is UPDATE_ROLLBACK_FAILED — a live stack whose update"
+                echo "  and rollback both failed. Continuing the rollback; NEVER deleting."
+                aws cloudformation continue-update-rollback --stack-name "$STACK"
+                for _ in $(seq 1 60); do
+                  sleep 10
+                  ROLLBACK_STATE=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+                    --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
+                  echo "    $ROLLBACK_STATE"
+                  case "$ROLLBACK_STATE" in
+                    UPDATE_ROLLBACK_COMPLETE|UPDATE_COMPLETE)
+                      echo "  Recovered — the stack can be updated again."
+                      break
+                      ;;
+                    UPDATE_ROLLBACK_FAILED)
+                      echo "::error::continue-update-rollback did not clear $STACK."
+                      echo "The resource that blocked the rollback still cannot be reverted —"
+                      echo "fix the underlying permission or use --resources-to-skip by hand."
+                      exit 1
+                      ;;
+                  esac
+                done
+                ;;
               REVIEW_IN_PROGRESS|ROLLBACK_COMPLETE|CREATE_FAILED|ROLLBACK_FAILED|DELETE_FAILED)
                 echo "  Deleting $STACK (state $STATUS) so it can be recreated cleanly..."
                 aws cloudformation delete-stack --stack-name "$STACK"
