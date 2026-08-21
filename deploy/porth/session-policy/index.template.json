@@ -1,9 +1,14 @@
 {
-  "roles": {
-    "tenant": "porth-tenant-{{ENV}}",
-    "platform_admin": "porth-platform-admin-{{ENV}}"
-  },
-  "context_rules": [],
-  "paths": { "/": "tenant-scoped-default" },
-  "platform_paths": { "/": "platform-scoped-default" }
+  "context_rules": [
+    { "match": { "host_pattern": "*" }, "context_hint": "porth" }
+  ],
+  "bindings": {
+    "porth:/": {
+      "role_types": ["tenant", "platform-admin"],
+      "role_arn": "arn:aws:iam::{account}:role/porth-${role_type}-{{ENV}}",
+      "session_policy_arns": [
+        "arn:aws:iam::{account}:policy/porth-${role_type}-session-{{ENV}}"
+      ]
+    }
+  }
 }
