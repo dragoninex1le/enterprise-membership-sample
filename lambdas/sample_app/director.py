@@ -32,9 +32,10 @@ from __future__ import annotations
 
 import os
 
+import boto3
+
 from porth_common.director import Director as PorthDirector
 from porth_common.director import DirectorMiddleware as _BaseDirectorMiddleware
-from porth_common.protocols.cloud_clients import DOCUMENT_STORE
 
 from .repository import SampleAppRepository
 
@@ -53,21 +54,40 @@ class SampleAppDirector(PorthDirector):
 
     @property
     def repository(self) -> SampleAppRepository:
-        """This app's table, reached through the request's own credentials.
+        """This app's own table, reached with this app's own credentials.
 
-        ``self.resource(...)`` is the seam: the connection is cached and scoped
-        to this tenant's credentials, so a handler cannot reach another tenant's
-        partition even by asking. The old middleware built this from raw STS keys
-        per request, which worked and cached nothing and renewed nothing.
+        Deliberately NOT ``self.resource(...)`` (PORTH-616). That returns Porth's
+        tenant-narrowed credentials, and those are scoped to PORTH's tables:
 
-        The argument is a CAPABILITY, not an AWS service name — DOCUMENT_STORE,
-        which on AWS maps to DynamoDB and elsewhere would be Firestore or Cosmos
-        DB. Passing ``"dynamodb"`` raised UnknownCapabilityError at runtime and
-        the app 500'd on every page (PORTH-615). The constant is imported rather
-        than spelled, so the same mistake is an ImportError next time.
+            AccessDeniedException: User: assumed-role/porth-tenant-dev/porth-tenant
+            is not authorized to perform: dynamodb:Query on
+            table/porth-sample-app-dev
+
+        Which is correct behaviour, not a missing grant. porth-tenant-dev is
+        Porth's role. Adding this app's table to it would put a consumer's data
+        in Porth's IAM, and the next consumer's after that — Porth's session
+        policy would grow a row per consuming application, which is the opposite
+        of a boundary.
+
+        So the app's table is the app's problem, protected by the app's own
+        Lambda execution role (DynamoDBCrudPolicy on SampleAppTable in
+        template.yml). Tenant isolation for THIS table is enforced by its key
+        design — every row is ``pk = TENANT#{tenant_id}`` — using the tenant the
+        Director resolved from the authorizer, which no handler can forge or
+        override.
+
+        The distinction worth keeping straight: Porth's credentials protect
+        Porth's data at the IAM layer; this app's data is isolated by the key it
+        is written under, with the tenant supplied by Porth. Those are different
+        mechanisms and only the first can live in ``self.resource``.
+
+        This was never exercised before because the app's API had no authorizer,
+        so no STS credentials ever reached it and the old middleware silently
+        used the ambient identity — the behaviour restored here, now with the
+        reason written down.
         """
         if getattr(self, "_repository", None) is None:
-            self._repository = SampleAppRepository(self.resource(DOCUMENT_STORE))
+            self._repository = SampleAppRepository(boto3.resource("dynamodb"))
         return self._repository
 
 
