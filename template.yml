@@ -389,9 +389,21 @@ Resources:
           PORTH_ENVIRONMENT: !Ref PorthEnvironment
           AWS_ACCOUNT_ID: !Ref AWS::AccountId
           CLOUDFRONT_ALIAS: !Ref CloudFrontAlias
-      Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref SampleAppTable
+      # PORTH-586: NO DynamoDBCrudPolicy on this table, deliberately.
+      #
+      # This function serves authorized requests, and every one of them arrives
+      # with credentials the authorizer minted for it — SampleAppTenantRole,
+      # narrowed to one tenant by session tags. A standing grant here would sit
+      # underneath that as unconditioned CRUD on the whole table, every tenant,
+      # and the narrowing above it would be advisory: any path that lost its
+      # credentials would keep working, silently, against everyone's rows.
+      #
+      # Porth removed exactly this from its own API function in PORTH-550, for
+      # exactly this reason. Nothing to fall back to is the point.
+      #
+      # SampleAppEventConsumerFunction below keeps its grant: no authorizer runs
+      # for an EventBridge delivery, so it has no request credentials and its
+      # execution role is the only identity available to it.
       Events:
         ApiProxy:
           Type: HttpApi

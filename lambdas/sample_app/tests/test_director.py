@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from porth_common.protocols.cloud_clients import DOCUMENT_STORE
 from sample_app.director import SampleAppDirector
 from sample_app.dependencies import require_permission
 
@@ -114,47 +115,94 @@ def test_no_director_at_all_is_401_not_403():
 # --------------------------------------------------------------------------
 
 
-def test_the_repository_uses_the_apps_own_credentials(monkeypatch):
-    """Not Porth's tenant-narrowed ones (PORTH-616).
+def test_the_repository_uses_the_requests_own_credentials(monkeypatch):
+    """The narrowed connection, not the ambient identity (PORTH-586).
 
-    self.resource() returns credentials scoped to PORTH's tables, and this app's
-    table is not one of them:
+    This is the inverse of what PORTH-616 asserted, because what arrives changed.
+    Then, a catch-all binding handed every request Porth's ``porth-tenant-{env}``
+    role, which correctly refused this app's table, and the ambient execution
+    role was the only workable source. Now the session-policy index binds this
+    app's host to its own role, so ``self.resource()`` yields credentials that
+    are granted this table and narrowed to one tenant.
 
-        AccessDeniedException: assumed-role/porth-tenant-dev/porth-tenant is not
-        authorized to perform: dynamodb:Query on table/porth-sample-app-dev
-
-    That is correct behaviour. Fixing it by adding the app's table to Porth's
-    role would put a consumer's data in Porth's IAM, and the next consumer's
-    after that.
-
-    The previous version of this test stubbed `resource` and asserted only that
-    it was CALLED — which is exactly why the wrong credential source passed
-    review twice.
+    Asserted on the SOURCE, in both directions — that the narrowed connection is
+    used AND that the ambient one is not. Asserting only that ``resource`` was
+    called is how the wrong credential source passed review twice before, and
+    the version of this test that checked a call rather than an outcome is the
+    reason PORTH-616 existed at all.
     """
     import sample_app.director as director_module
 
     director = _director(tenant_id="ems-test", permissions="")
-    used_porth_credentials = []
+    narrowed_capabilities = []
+    ambient_calls = []
 
-    monkeypatch.setattr(
-        SampleAppDirector,
-        "resource",
-        lambda self, capability: used_porth_credentials.append(capability),
-    )
     class _Resource:
         def Table(self, name):
             return object()
 
-    monkeypatch.setattr(director_module.boto3, "resource", lambda service: _Resource())
+    monkeypatch.setattr(
+        SampleAppDirector,
+        "resource",
+        lambda self, capability: narrowed_capabilities.append(capability) or _Resource(),
+    )
+    monkeypatch.setattr(
+        director_module,
+        "boto3",
+        type("_NoBoto", (), {"resource": staticmethod(
+            lambda *a, **k: ambient_calls.append(a) or _Resource())})(),
+        raising=False,
+    )
 
     repository = director.repository
 
-    assert not used_porth_credentials, (
-        "the app reached its own table through Porth's tenant credentials; those "
-        "are scoped to Porth's tables and this one is not among them"
+    assert narrowed_capabilities == [DOCUMENT_STORE], (
+        "the repository was not built from the request's narrowed connection; "
+        f"resource() saw {narrowed_capabilities}"
+    )
+    assert not ambient_calls, (
+        "the repository reached its table on the ambient execution role. That "
+        "grant is gone from SampleAppFunction, so this would fail at runtime "
+        "with AccessDenied rather than quietly reading every tenant's rows"
     )
     assert repository is director.repository, "a new connection per access"
 
+
+def test_the_request_serving_function_holds_no_standing_table_grant():
+    """Narrowing is only a boundary while there is nothing underneath it.
+
+    A DynamoDBCrudPolicy on SampleAppFunction is unconditioned CRUD on the whole
+    table for every tenant. With one present, any path that lost its narrowed
+    credentials would keep working against everyone's rows and nothing would
+    say so — which is what PORTH-550 removed from Porth's own API function.
+    """
+    import pathlib
+    import re
+
+    template = (pathlib.Path(__file__).resolve().parents[3] / "template.yml").read_text()
+    block = re.search(
+        r"\n  SampleAppFunction:\n(.*?)\n  SampleAppEventConsumerFunction:",
+        template,
+        re.S,
+    )
+    assert block, "SampleAppFunction not found in template.yml"
+
+    # Comments only, stripped — the first version of this test matched the
+    # comment explaining the grant's absence and failed on the very change it
+    # was written to protect.
+    yaml_only = "\n".join(
+        line for line in block.group(1).splitlines()
+        if not line.strip().startswith("#")
+    )
+    assert "DynamoDBCrudPolicy" not in yaml_only, (
+        "SampleAppFunction holds a standing grant on its table again. The "
+        "request path is served by credentials the authorizer minted; a role "
+        "underneath them makes the narrowing advisory."
+    )
+    assert "Policies:" not in yaml_only, (
+        "SampleAppFunction grew a Policies block. Whatever it grants, it grants "
+        "on the ambient identity, underneath the request's narrowing."
+    )
 
 
 # --------------------------------------------------------------------------
