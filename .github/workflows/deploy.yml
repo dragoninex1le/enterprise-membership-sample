@@ -395,24 +395,47 @@ jobs:
                 echo "  $STACK is UPDATE_ROLLBACK_FAILED — a live stack whose update"
                 echo "  and rollback both failed. Continuing the rollback; NEVER deleting."
                 aws cloudformation continue-update-rollback --stack-name "$STACK"
-                for _ in $(seq 1 60); do
+
+                # continue-update-rollback is ASYNCHRONOUS. For the first few
+                # seconds the stack still reads UPDATE_ROLLBACK_FAILED — the
+                # state we started in — before moving to
+                # UPDATE_ROLLBACK_IN_PROGRESS. Treating that first reading as
+                # terminal aborts the recovery it just asked for, which is
+                # exactly what run 32448951412 did.
+                #
+                # So UPDATE_ROLLBACK_FAILED only counts as a real failure once
+                # progress has actually been observed.
+                SEEN_PROGRESS=0
+                RECOVERED=0
+                for _ in $(seq 1 90); do
                   sleep 10
                   ROLLBACK_STATE=$(aws cloudformation describe-stacks --stack-name "$STACK" \
                     --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
                   echo "    $ROLLBACK_STATE"
                   case "$ROLLBACK_STATE" in
+                    UPDATE_ROLLBACK_IN_PROGRESS|UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS)
+                      SEEN_PROGRESS=1
+                      ;;
                     UPDATE_ROLLBACK_COMPLETE|UPDATE_COMPLETE)
                       echo "  Recovered — the stack can be updated again."
+                      RECOVERED=1
                       break
                       ;;
                     UPDATE_ROLLBACK_FAILED)
-                      echo "::error::continue-update-rollback did not clear $STACK."
-                      echo "The resource that blocked the rollback still cannot be reverted —"
-                      echo "fix the underlying permission or use --resources-to-skip by hand."
-                      exit 1
+                      if [ "$SEEN_PROGRESS" -eq 1 ]; then
+                        echo "::error::continue-update-rollback did not clear $STACK."
+                        echo "The resource that blocked the rollback still cannot be reverted —"
+                        echo "fix the underlying permission or use --resources-to-skip by hand."
+                        exit 1
+                      fi
+                      echo "    (unchanged so far — the call is asynchronous, still waiting)"
                       ;;
                   esac
                 done
+                if [ "$RECOVERED" -ne 1 ]; then
+                  echo "::error::$STACK did not reach UPDATE_ROLLBACK_COMPLETE within 15 minutes."
+                  exit 1
+                fi
                 ;;
               REVIEW_IN_PROGRESS|ROLLBACK_COMPLETE|CREATE_FAILED|ROLLBACK_FAILED|DELETE_FAILED)
                 echo "  Deleting $STACK (state $STATUS) so it can be recreated cleanly..."
