@@ -209,6 +209,8 @@ jobs:
             echo "::warning::Could not read /porth/${PORTH_BRANCH}/infra/context-signing-key-arn."
             echo "::warning::ffug deploys as the BUS CONSUMER ONLY - tenants still get a salt,"
             echo "::warning::but every synchronous call is refused because there is no verifier."
+            echo "::warning::CONFIRMED by run 32443190291: the role has neither"
+            echo "::warning::ssm:GetParameter nor ssm:GetParameters on this path."
             echo "::warning::Fix: grant ssm:GetParameter on /porth/* to sample-app-deploy-role"
             echo "::warning::(source of truth: Components infra/receiving-account-templates/"
             echo "::warning::sample-app-deploy-role.yaml; the LIVE role needs it applied too)."
@@ -390,6 +392,29 @@ jobs:
 
       - name: SAM deploy (infrastructure)
         run: |
+          set -euo pipefail
+
+          # Overrides that are only passed when they have a value. `Key=` with
+          # an empty value is not "the empty string" to SAM — it is a malformed
+          # override, and the deploy dies before reaching CloudFormation:
+          #
+          #   Error: Invalid value for '--parameter-overrides':
+          #   PorthContextSigningKeyArn= is not a valid format
+          #
+          # (run 32443190291). Omitting the key lets the template's own default
+          # apply, which is what "absent" is supposed to mean. Anything optional
+          # belongs in this array rather than in the fixed list below.
+          #
+          # Expanded as ${OPTIONAL[@]+"${OPTIONAL[@]}"} and not as
+          # "${OPTIONAL[@]}". Under `set -u` the bare form treats an EMPTY array
+          # as an unbound variable on bash < 4.4 — the runner has 5.2 and would
+          # be fine, but the guard costs nothing and this step is one of the few
+          # places where "works on the runner" and "works" can diverge.
+          OPTIONAL=()
+          if [ -n "${PORTH_CONTEXT_KEY_ARN:-}" ]; then
+            OPTIONAL+=("PorthContextSigningKeyArn=${PORTH_CONTEXT_KEY_ARN}")
+          fi
+
           sam deploy \
             --stack-name ${{ env.SAM_STACK_NAME }} \
             --region ${{ env.AWS_REGION }} \
@@ -409,7 +434,7 @@ jobs:
               PorthEnvironment=dev \
               PorthBranch=${{ env.PORTH_BRANCH }} \
               PorthEventBusName=${{ env.PORTH_EVENT_BUS }} \
-              PorthContextSigningKeyArn=${{ env.PORTH_CONTEXT_KEY_ARN }} \
+              ${OPTIONAL[@]+"${OPTIONAL[@]}"} \
             --no-fail-on-empty-changeset
 
       - name: Diagnose SAM managed-bucket failure
