@@ -20,6 +20,15 @@ def _event(ctx: dict) -> dict:
 
 
 def _director(**ctx) -> SampleAppDirector:
+    """A Director as the authorizer produces one.
+
+    PORTH-594 — `environment` defaults in here because the authorizer always
+    sends it and the key is built from it. That this helper had no environment
+    at all, and that the repository raised the moment one was required, is the
+    same gap in miniature: a fixture that cannot represent an axis cannot notice
+    the axis is missing. Override it to assert on the refusal.
+    """
+    ctx.setdefault("environment", "e-test")
     return SampleAppDirector(_event(ctx))
 
 
@@ -253,11 +262,27 @@ def test_the_handler_scopes_by_the_directors_tenant(client, mock_dynamodb):
         "KeyConditionExpression"
     ]
 
-    assert "TENANT#t-test" in _condition_values(condition), (
-        "the query was not scoped to the Director's tenant. str() on a boto3 "
-        "condition hides its operands, so this walks the expression instead — "
-        "an assertion against the repr passes no matter which tenant was used."
+    assert "ENV#e-test#TENANT#t-test" in _condition_values(condition), (
+        "the query was not scoped to the Director's tenant AND environment. "
+        "str() on a boto3 condition hides its operands, so this walks the "
+        "expression instead — an assertion against the repr passes no matter "
+        "which tenant was used."
     )
+
+
+def test_a_director_without_an_environment_cannot_build_a_repository():
+    """PORTH-594's fail-closed half, asserted rather than assumed.
+
+    An empty environment composes ENV##TENANT#{tenant}: a key that writes
+    successfully, matches no session policy, and is never read back. The symptom
+    would be "the invoice I just created is not in the list", several layers from
+    the cause — so the repository refuses to exist instead.
+    """
+    from sample_app.repository import ScopeMissingError
+
+    director = _director(tenant_id="t-1", environment="")
+    with pytest.raises(ScopeMissingError):
+        _ = director.repository
 
 
 def test_a_route_without_the_permission_is_refused(mock_dynamodb):

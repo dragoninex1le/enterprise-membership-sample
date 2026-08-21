@@ -12,11 +12,10 @@ class CreateBillRequest(BaseModel):
 
 @router.get("/bills", dependencies=[Depends(require_permission("ap.bills.read"))])
 def list_bills(director: SampleAppDirector = Depends(porth)) -> list[dict]:
-    return director.repository.list_bills(director.tenant_id)
+    return director.repository.list_bills()
 
 @router.post("/bills", dependencies=[Depends(require_permission("ap.bills.write"))])
 def create_bill(body: CreateBillRequest, director: SampleAppDirector = Depends(porth)) -> dict:
     return director.repository.create_bill(
-        director.tenant_id,
         {**body.model_dump(), "created_by": director.user_id},
     )

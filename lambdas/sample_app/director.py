@@ -79,8 +79,13 @@ class SampleAppDirector(PorthDirector):
         on this app's data becomes an IAM boundary rather than a convention. It
         was the key shape — every row written under ``pk = TENANT#{tenant_id}``
         — which is sound while every write goes through this repository and is
-        worth nothing the first time one does not. A query for another tenant's
-        partition is now refused by DynamoDB before this code is consulted.
+        worth nothing the first time one does not. PORTH-594 then put the
+        environment into that key as well, so the pattern the session policy
+        matches fences both axes rather than fencing the tenant in the key
+        and the environment on a session tag.
+
+        A query for another tenant's partition is now refused by DynamoDB
+        before this code is consulted.
 
         The ambient identity is gone rather than merely unused: SampleAppFunction
         no longer holds DynamoDBCrudPolicy on this table, so there is nothing to
@@ -94,7 +99,19 @@ class SampleAppDirector(PorthDirector):
         and its execution role is the only identity it can have.
         """
         if getattr(self, "_repository", None) is None:
-            self._repository = SampleAppRepository(self.resource(DOCUMENT_STORE))
+            # PORTH-594 — the repository is built FOR this request's scope, and
+            # both halves come from the authorizer's own resolution rather than
+            # from the environment. `environment` here is the ADR-Z8 slot; the
+            # PORTH_ENVIRONMENT that names the table is a different value.
+            #
+            # A missing scope raises in the repository's constructor rather than
+            # producing ENV##TENANT#… — a key that writes fine, matches no
+            # session policy, and is never read back.
+            self._repository = SampleAppRepository(
+                self.resource(DOCUMENT_STORE),
+                environment=self.environment,
+                tenant_id=self.tenant_id,
+            )
         return self._repository
 
 

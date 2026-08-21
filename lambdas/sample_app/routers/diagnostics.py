@@ -5,7 +5,7 @@ own data and inferred the rest. That is not proof. A page that renders proves
 the credentials work; it says nothing about what they are refused, and refusal
 is the entire property under test.
 
-So this asks three questions, and the interesting answers are the failures:
+So this asks four questions, and the interesting answers are the failures:
 
     who am I          sts:GetCallerIdentity through the request's own
                       credentials, which returns the assumed-role ARN. Not
@@ -14,12 +14,15 @@ So this asks three questions, and the interesting answers are the failures:
 
     my own partition  must be ALLOWED, or the app is broken.
 
-    someone else's    must be DENIED, or there is no boundary. Two probes, for
-                      two different holes.
+    someone else's    must be DENIED, or there is no boundary. THREE probes now,
+                      for three different holes — PORTH-594 put the environment
+                      in the key, so there is a second axis to get wrong and it
+                      is worth probing rather than assuming.
 
-Neither probe needs another tenant to exist, and neither writes anything. A
-denial is returned identically whether the partition is empty or full, which is
-the point: IAM refuses on the KEY, before any data is consulted.
+No probe needs another tenant or another environment to exist, and none
+writes anything. A denial is returned identically whether the partition is empty
+or full, which is the point: IAM refuses on the KEY, before any data is
+consulted.
 """
 from __future__ import annotations
 
@@ -85,27 +88,50 @@ def identity(director: SampleAppDirector = Depends(porth)) -> dict:
 
     table = director.resource(DOCUMENT_STORE).Table(TABLE_NAME)
 
-    own_allowed, own_detail = _read(table, f"TENANT#{tenant}")
+    # PORTH-594 — the probes take their partition from the REPOSITORY rather
+    # than composing one here. This endpoint previously built `TENANT#{tenant}`
+    # itself, and when the key gained its environment segment that literal
+    # would have stopped matching: the "expected allow" probe would have flipped
+    # to denied and this page would have reported the boundary as broken while
+    # it was working perfectly. A prober with its own copy of the key format
+    # tests its copy.
+    repo = director.repository
+    environment = repo.environment
+
+    own_allowed, own_detail = _read(table, repo.partition)
 
     # A partition that is not this tenant's and belongs to nobody. Proves the
     # plain case: another tenant's rows are unreachable.
-    other_allowed, other_detail = _read(table, "TENANT#__isolation_probe__")
+    other = f"ENV#{environment}#TENANT#__isolation_probe__"
+    other_allowed, other_detail = _read(table, other)
 
     # The prefix-extension hole, specifically. A LeadingKeys pattern written
     # TENANT#${tenant}* rather than the exact key plus TENANT#${tenant}#* would
     # admit this, and 'acme' would reach 'acme-staging' — the fault PORTH-593
     # found in Porth's own policy. Denied here means the pattern is right.
-    sibling_allowed, sibling_detail = _read(table, f"TENANT#{tenant}-probe")
+    sibling = f"{repo.partition}-probe"
+    sibling_allowed, sibling_detail = _read(table, sibling)
 
+    # The axis PORTH-594 added. This tenant, another environment: the same
+    # customer's data in a slot this session was not issued for. Before the key
+    # carried the environment there was nothing here to probe — the fence lived
+    # on a session tag, which is a real constraint but not one a key query can
+    # demonstrate. Now it can be shown rather than argued.
+    cross_env = f"ENV#__isolation_probe__#TENANT#{tenant}"
+    cross_env_allowed, cross_env_detail = _read(table, cross_env)
+
+    result["environment"] = environment
     result["probes"] = [
-        {"partition": f"TENANT#{tenant}", "expect": "allow",
+        {"partition": repo.partition, "expect": "allow",
          "allowed": own_allowed, "detail": own_detail, "pass": own_allowed},
-        {"partition": "TENANT#__isolation_probe__", "expect": "deny",
+        {"partition": other, "expect": "deny",
          "allowed": other_allowed, "detail": other_detail, "pass": not other_allowed},
-        {"partition": f"TENANT#{tenant}-probe", "expect": "deny",
+        {"partition": sibling, "expect": "deny",
          "allowed": sibling_allowed, "detail": sibling_detail, "pass": not sibling_allowed},
+        {"partition": cross_env, "expect": "deny",
+         "allowed": cross_env_allowed, "detail": cross_env_detail, "pass": not cross_env_allowed},
     ]
-    # Isolation is all three, not the first. Reading your own data proves the
+    # Isolation is all four, not the first. Reading your own data proves the
     # credentials work; only the refusals prove anything is being kept out.
     result["isolated"] = all(p["pass"] for p in result["probes"])
     return result
