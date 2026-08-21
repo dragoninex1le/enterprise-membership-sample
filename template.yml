@@ -288,7 +288,9 @@ Resources:
       RoleName: !Sub porth-sample-app-tenant-${PorthEnvironment}
       Description: >-
         Assumed by Porth's authorizer for requests to the sample app's API.
-        Narrowed to one tenant by the porth-tenant session tag.
+        The CEILING — this app's table and nothing else. Which tenant a given
+        session may read is decided by SampleAppSessionPolicy, passed per
+        request by the session-policy index.
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -296,23 +298,31 @@ Resources:
             Principal:
               AWS: !Ref PorthAuthorizerFunctionRoleArn
             # BOTH actions. sts:TagSession is not optional and its absence is
-            # silent: the tags are dropped, ${aws:PrincipalTag/porth-tenant}
-            # below resolves to nothing, matches no key, and the session can
-            # read nothing at all — with no error naming the cause.
+            # silent: the tags are dropped, the session policy's
+            # ${aws:PrincipalTag/porth-tenant} resolves to nothing, matches no
+            # key, and the session can read nothing at all.
             Action:
               - sts:AssumeRole
               - sts:TagSession
       Policies:
-        - PolicyName: TenantScopedAppTable
+        - PolicyName: AppTableCeiling
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              # Tenant isolation is the KEY, environment isolation is the TABLE.
-              # This table is per-environment by name (porth-sample-app-dev), so
-              # there is no ENV# prefix in its keys to condition on and writing
-              # one would constrain nothing. The slot is fenced by the second
-              # statement's condition instead, on the tag itself.
-              - Sid: TenantPartitionOnly
+              # No tenant condition here, deliberately (PORTH-586 review).
+              #
+              # Two layers with two jobs: the role says WHAT this application may
+              # ever touch, the session policy says WHICH TENANT this request may
+              # touch it for. Putting the tenant condition in the role collapses
+              # that — the role stops being reusable for anything that is not a
+              # single-tenant request, and the per-request layer the index exists
+              # to select stops carrying the decision it is there to carry.
+              #
+              # Effective permission is the intersection of the two, so this
+              # breadth is not reachable on its own: the authorizer always passes
+              # a session policy for this binding, and an index entry with none
+              # is what `porth-install check-session-index` reports.
+              - Sid: AppTableOnly
                 Effect: Allow
                 Action:
                   - dynamodb:GetItem
@@ -326,22 +336,63 @@ Resources:
                 Resource:
                   - !GetAtt SampleAppTable.Arn
                   - !Sub "${SampleAppTable.Arn}/index/*"
-                Condition:
-                  # Two patterns, both needed. The tenant's own record has PK
-                  # exactly TENANT#{tenant} with no trailing separator, so the
-                  # '#*' pattern alone cannot match it — the mistake PORTH-593
-                  # fixed in Porth's own policy. And the bare TENANT#{tenant}*
-                  # form is a PREFIX match, so 'acme' would reach 'acme-staging'.
-                  ForAllValues:StringLike:
-                    dynamodb:LeadingKeys:
-                      - "TENANT#${aws:PrincipalTag/porth-tenant}"
-                      - "TENANT#${aws:PrincipalTag/porth-tenant}#*"
-                  # A session from another slot cannot use this role at all.
-                  StringEquals:
-                    aws:PrincipalTag/porth-env: !Ref PorthEnvSlot
-              # Scan is absent on purpose. It populates no dynamodb:LeadingKeys,
-              # so ForAllValues:StringLike passes vacuously against it — granting
-              # it here would read as tenant-scoped while reaching every tenant.
+              # Scan is absent from the ceiling as well as the session policy. It
+              # populates no dynamodb:LeadingKeys, so ForAllValues:StringLike
+              # passes vacuously against it — granting it anywhere in this pair
+              # would read as tenant-scoped while reaching every tenant.
+
+  # The per-request narrowing, passed by the session-policy index as a
+  # PolicyArn on the assume. This is the isolating layer.
+  #
+  # PORTH-586 review: it did not exist. The binding passed an empty
+  # session_policy_arns and the tenant condition sat on the role, which worked
+  # and put the decision in the wrong place — check-session-index said as much,
+  # as a non-fatal advisory, and the advisory was right.
+  SampleAppSessionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub porth-sample-app-tenant-session-${PorthEnvironment}
+      Description: >-
+        Narrows an assumed porth-sample-app-tenant session to one tenant, via
+        the session tags Porth attaches to every assume.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: OneTenantPartition
+            Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:Query
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:BatchGetItem
+              - dynamodb:BatchWriteItem
+              - dynamodb:ConditionCheckItem
+            Resource:
+              - !GetAtt SampleAppTable.Arn
+              - !Sub "${SampleAppTable.Arn}/index/*"
+            Condition:
+              # Both patterns. This app's rows are written at exactly
+              # TENANT#{tenant} with no trailing separator, so '#*' alone cannot
+              # match them — the fault PORTH-593 found in Porth's own template.
+              # And the bare TENANT#{tenant}* form is a prefix match, so 'acme'
+              # would reach 'acme-staging'.
+              ForAllValues:StringLike:
+                dynamodb:LeadingKeys:
+                  - "TENANT#${aws:PrincipalTag/porth-tenant}"
+                  - "TENANT#${aws:PrincipalTag/porth-tenant}#*"
+              # The environment is NOT in the LeadingKeys, because it is not in
+              # the keys. This app's table is per-environment by NAME
+              # (porth-sample-app-{env}), unlike Porth's, whose rows carry an
+              # ENV#{slot}# prefix. Writing ENV# into these patterns would match
+              # nothing and deny every request while looking stricter.
+              #
+              # So the slot is fenced on the tag itself: a session carrying
+              # another environment's tag cannot use this policy at all. Same
+              # axis, expressed where it actually exists.
+              StringEquals:
+                aws:PrincipalTag/porth-env: !Ref PorthEnvSlot
 
   # API Gateway assumes this to call Porth's authorizer, which lives in another
   # stack. Scoped to that one function ARN and nothing else.
@@ -1038,6 +1089,11 @@ Outputs:
   SampleApiDomainRegionalHostedZoneId:
     Description: Hosted zone of the alias target, for the same upsert.
     Value: !GetAtt SampleAppApiDomain.RegionalHostedZoneId
+  SampleAppSessionPolicyArn:
+    Description: >-
+      The per-request narrowing the session-policy index passes on the assume.
+      Named by the binding in deploy/porth/session-policy/index.template.json.
+    Value: !Ref SampleAppSessionPolicy
   SampleAppTenantRoleArn:
     Description: >-
       The app's own base role, assumed by Porth's authorizer for requests to
