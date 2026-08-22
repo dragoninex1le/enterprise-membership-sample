@@ -452,6 +452,20 @@ Resources:
           PORTH_SERVICE_ID: sample-app
           PORTH_BRANCH: !Ref PorthBranch
           PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
+          # PORTH-604 — the key mint_token signs with. Only the SIGNER needs
+          # this: a verifier follows the `kid` in the token header, which is why
+          # ffug has never carried it and this was not missing there to notice.
+          #
+          # The ARN Porth publishes at /porth/{branch}/infra/context-signing-key-arn,
+          # not a reconstructed "alias/porth-context-{branch}". KMS accepts
+          # either as a KeyId, and a name assembled here would be a literal that
+          # has to keep agreeing with Porth's — the defect shape the upgrade
+          # log's standing note is about.
+          #
+          # Empty is a real state, not a misconfiguration: without the key this
+          # app deploys with no signer, and every internal call is refused at
+          # the boundary rather than sent unsigned.
+          PORTH_CONTEXT_SIGNING_KEY_ALIAS: !Ref PorthContextSigningKeyArn
           # No FFUG_FUNCTION_ARN. Where ffug lives is resolved from the endpoint
           # map at /porth/{branch}/service-endpoints, which is the whole point of
           # D7.4 — an address at the call site is an address that cannot follow
@@ -497,7 +511,18 @@ Resources:
         - Statement:
             - Sid: MintContextForInternalCalls
               Effect: Allow
-              Action: kms:Sign
+              Action:
+                - kms:Sign
+                # PORTH-604. Minting is two calls, not one. mint_token resolves
+                # the alias to the concrete key ARN it will name in `kid` —
+                # _resolve_kid() calls DescribeKey — and only then signs. The
+                # verifier follows `kid` rather than the alias, which is what
+                # gives rotation its dual-key window (M2) without a coordinated
+                # cutover; the cost is that the SIGNER has to look the key up.
+                #
+                # Granting Sign alone gets you AccessDenied on DescribeKey one
+                # frame earlier, wearing SigningUnavailableError.
+                - kms:DescribeKey
               Resource: !Ref PorthContextSigningKeyArn
             - Sid: CallFfug
               Effect: Allow
