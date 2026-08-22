@@ -13,6 +13,7 @@ These run in pytest rather than as a bespoke script in one workflow, so both
 the PR gate and the deploy gate execute them.
 """
 
+import json
 import pathlib
 import re
 
@@ -149,16 +150,71 @@ def test_the_narrowing_names_both_an_identity_and_a_rule(resources):
     running wide. Fail-closed, but a failure at runtime is not the same thing
     as one caught on the pull request.
 
-    The scope is a NAME, not a document. Porth's own deploy seeds the body at
-    /porth/{branch}/auth-session-policy/tenant-scoped-default, and it is the
-    same template the authorizer renders for a human caller — so the rule that
-    isolates ffug and the rule that isolates a browser session are one rule
-    with one place to change it.
+    The scope is a NAME, and it resolves to a document THIS stack deploys
+    (PORTH-600). It used to name Porth's `tenant-scoped-default`, which Porth's
+    own pipeline rewrites with --overwrite on every release — a change to the
+    platform's narrowing was a change to this service's, in a repo whose tests
+    would not have run.
     """
     env = resources["FfugFunction"]["Properties"]["Environment"]["Variables"]
 
     assert env["PORTH_SERVICE_DATA_IDENTITY"] == {"GetAtt": "FfugTenantRole.Arn"}
-    assert env["PORTH_SERVICE_DATA_SCOPE"] == "tenant-scoped-default"
+    assert env["PORTH_SERVICE_DATA_SCOPE"] == {
+        "Select": [4, {"Split": ["/", {"Ref": "FfugSessionPolicy"}]}]
+    }
+
+
+def test_the_scope_name_is_derived_from_the_document_not_spelled_twice(resources):
+    """Guards the Select arithmetic above against the parameter path changing.
+
+    `!Ref` on an SSM::Parameter yields its full name; the provider wants the
+    last segment. Written as two literals that must agree, this is the standing
+    defect shape from the EMS upgrade log — and the symptom would be a
+    NarrowingUnavailableError that reads like an unprovisioned tenant.
+    """
+    name = resources["FfugSessionPolicy"]["Properties"]["Name"]["Sub"]
+    index, _split = (
+        resources["FfugFunction"]["Properties"]["Environment"]["Variables"][
+            "PORTH_SERVICE_DATA_SCOPE"
+        ]["Select"]
+    )
+
+    assert name.split("/")[index] == "ffug-tenant-scoped"
+
+
+def test_ffug_deploys_its_own_narrowing_rule_and_does_not_borrow_porths(resources):
+    """The document itself: ffug's table, both key shapes, and no Scan.
+
+    Each half fences one axis. The session policy pins the tenant AND the
+    table; the role pins the table and any tenant. Porth's shared template says
+    Resource "*" deliberately — it is intersected with PorthTenantRole, which
+    supplies the table — so borrowing it left the session policy carrying none
+    of the isolation and the role carrying all of it.
+    """
+    document = resources["FfugSessionPolicy"]["Properties"]["Value"]["Sub"]
+
+    assert "${FfugTable.Arn}" in document, "the rule must name ffug's own table"
+    assert '"Resource":"*"' not in document
+
+    statement = json.loads(document.replace("${FfugTable.Arn}", "arn:table"))["Statement"][0]
+    assert "dynamodb:Scan" not in statement["Action"]
+
+    keys = statement["Condition"]["ForAllValues:StringLike"]["dynamodb:LeadingKeys"]
+    # The bare partition is the projection row — the salt lives there, and the
+    # '#*' pattern alone cannot match a key with no trailing separator.
+    assert keys == ["ENV#$env#TENANT#$tenant", "ENV#$env#TENANT#$tenant#*"]
+
+
+def test_the_session_policy_fits_inside_the_sts_ceiling(resources):
+    """STS caps an inline session policy at 2048 characters, and the render only
+    grows it. Porth's template stayed simple for this reason; ffug's names a
+    table ARN on top, so the headroom is worth asserting rather than assuming."""
+    document = resources["FfugSessionPolicy"]["Properties"]["Value"]["Sub"]
+    rendered = document.replace(
+        "${FfugTable.Arn}", "arn:aws:dynamodb:eu-west-2:000000000000:table/porth-ffug-dev"
+    )
+
+    assert len(rendered) < 2048, len(rendered)
 
 
 def test_ffug_can_read_the_template_its_narrowing_renders(resources):
