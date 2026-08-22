@@ -231,12 +231,19 @@ def test_the_request_serving_function_holds_no_standing_table_grant():
     # why it goes through director.build_context_envelope() and never
     # mint_token(). If a second call site appears, this is the comment to read.
     granted = set(re.findall(r"Action:\s*([a-z0-9]+:[A-Za-z]+)", yaml_only))
-    assert granted == {"kms:Sign", "lambda:InvokeFunction"}, (
+    assert granted == {"kms:Sign", "lambda:InvokeFunction", "ssm:GetParameter"}, (
         f"SampleAppFunction's standing grants changed: {sorted(granted)}. Only "
-        f"minting context and invoking ffug are allowed here — everything else "
-        f"a request needs comes from the credentials the authorizer minted for "
+        f"minting context, invoking ffug, and reading the two documents that "
+        f"resolve the internal plane are allowed here — everything else a "
+        f"request needs comes from the credentials the authorizer minted for "
         f"it, and a grant underneath those makes the narrowing advisory."
     )
+    # PORTH-603 — the parameter read is bounded to exactly the two documents
+    # ServiceClient needs. A path wildcard here would be a standing read over
+    # every parameter the install has, including the session-policy templates.
+    reads = re.findall(r"parameter/porth/\$\{PorthBranch\}/([^\s]+)", yaml_only)
+    assert sorted(reads) == ["service-endpoints", "services"], reads
+
     assert "kms:Verify" not in yaml_only, (
         "SampleAppFunction holds kms:Verify. It is the CALLER on the internal "
         "plane, not a receiver; holding Sign and Verify together would let it "
