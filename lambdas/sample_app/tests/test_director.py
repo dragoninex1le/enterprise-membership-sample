@@ -230,8 +230,21 @@ def test_the_request_serving_function_holds_no_standing_table_grant():
     # validated tenant — and ffug_client.py is the single call site, which is
     # why it goes through director.build_context_envelope() and never
     # mint_token(). If a second call site appears, this is the comment to read.
-    granted = set(re.findall(r"Action:\s*([a-z0-9]+:[A-Za-z]+)", yaml_only))
-    assert granted == {"kms:Sign", "lambda:InvokeFunction", "ssm:GetParameter"}, (
+    # Matches both `Action: kms:Sign` and a list item `- kms:Sign`, and anchors
+    # to end-of-line so an `arn:aws:ssm:...` Resource cannot be read as the
+    # action `arn:aws`. The single-form-only version of this silently found
+    # nothing the moment kms gained a second action (PORTH-604) — a guard that
+    # stops seeing its subject passes rather than fails.
+    granted = set(
+        re.findall(r"(?m)^\s*(?:Action:\s*|-\s+)([a-z0-9]+:[A-Za-z]+)\s*$", yaml_only)
+    )
+    assert granted, "the grant scraper matched nothing — it has stopped seeing its subject"
+    assert granted == {
+        "kms:Sign",
+        "kms:DescribeKey",
+        "lambda:InvokeFunction",
+        "ssm:GetParameter",
+    }, (
         f"SampleAppFunction's standing grants changed: {sorted(granted)}. Only "
         f"minting context, invoking ffug, and reading the two documents that "
         f"resolve the internal plane are allowed here — everything else a "
@@ -347,3 +360,65 @@ def test_a_write_route_needs_its_own_permission(mock_dynamodb):
 
     assert response.status_code == 403
     assert "ar.invoices.write" in response.json()["detail"]
+
+
+# --------------------------------------------------------------------------
+# what an ORIGINATING service needs, enumerated in one place
+# --------------------------------------------------------------------------
+
+
+def test_the_caller_carries_everything_the_internal_plane_reads():
+    """The checklist the allow-list above structurally cannot be.
+
+    Four separate deploys were spent discovering these one at a time, each
+    surfacing only after the previous was fixed, because every one of them is
+    read at a different depth of the same call and the first to fail hides the
+    rest:
+
+        ssm:GetParameter  /porth/{b}/services        D3 registry     (PORTH-603)
+        ssm:GetParameter  /porth/{b}/service-endpoints  D7.4 map     (PORTH-603)
+        PORTH_CONTEXT_SIGNING_KEY_ALIAS               mint_token     (PORTH-604)
+        kms:DescribeKey                               _resolve_kid   (PORTH-604)
+
+    An allow-list guards the ceiling and says nothing about absence. This is
+    the other half, and it is deliberately a flat list rather than anything
+    clever: the value is that a new requirement gets written down HERE, once,
+    instead of being found in production a fifth time.
+
+    Why the callee's configuration was no guide: ffug carries the registry read
+    but needs no signing key at all, because a verifier follows the `kid` in the
+    token header. Caller and receiver are not mirror images, and treating them
+    as such is what made each of these invisible.
+    """
+    import pathlib
+    import re
+
+    template = (pathlib.Path(__file__).resolve().parents[3] / "template.yml").read_text()
+    block = re.search(
+        r"\n  SampleAppFunction:\n(.*?)\n  SampleAppEventConsumerFunction:", template, re.S
+    )
+    assert block, "SampleAppFunction not found in template.yml"
+    # Comments stripped for the same reason as the test above: the comments here
+    # NAME these variables while explaining them, so an unstripped match would
+    # pass on the strength of the prose describing what is missing.
+    yaml_only = "\n".join(
+        line for line in block.group(1).splitlines() if not line.strip().startswith("#")
+    )
+    variables = set(re.findall(r"^\s{10}([A-Z_][A-Z_0-9]*):", yaml_only, re.M))
+
+    required = {
+        # this app's identity on the plane, and the audience ffug checks
+        "PORTH_SERVICE_ID",
+        # the CONFIGURATION axis — which /porth/{branch}/… documents to read
+        "PORTH_BRANCH",
+        # the ADR-Z8 DATA axis — which slot the envelope is minted for
+        "PORTH_FIXED_ENVIRONMENT",
+        # the key mint_token describes, then signs with
+        "PORTH_CONTEXT_SIGNING_KEY_ALIAS",
+    }
+    missing = required - variables
+    assert not missing, (
+        f"SampleAppFunction is missing {sorted(missing)}. Each is read at a "
+        f"different depth of one ServiceClient call, so the first to fail hides "
+        f"the rest — which is why these cost four deploys to find individually."
+    )
