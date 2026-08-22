@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
 
 from porth_common.context.envelope import EnvelopeError
@@ -48,7 +49,7 @@ from porth_common.internal_plane.config import (
     ServicesConfigError,
     UnknownServiceError,
 )
-from porth_common.protocols.cloud_clients import DOCUMENT_STORE
+from porth_common.protocols.cloud_clients import DOCUMENT_STORE, IDENTITY_BROKER
 
 from . import keys, salt
 
@@ -188,7 +189,125 @@ def _op_hash(event: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
     }
 
 
-_OPS = {"echo": _op_echo, "get": _op_get, "hash": _op_hash}
+#: A tenant and an environment that belong to nobody. Nothing needs to exist at
+#: these names — IAM refuses on the KEY, before any data is consulted, so a
+#: denial is returned identically whether the partition is empty or full.
+FOREIGN = "__isolation_probe__"
+
+_DENIED = ("AccessDenied", "AccessDeniedException", "not authorized")
+_ASSUMED_ROLE = re.compile(r"assumed-role/([^/\s]+)")
+
+
+def _attempt(description: str, expect: str, call) -> dict[str, Any]:
+    """Run one read under this request's narrowed credentials, report the outcome.
+
+    A refusal is a RESULT here, not a fault, so everything is caught. The
+    interesting field is ``partitions_seen``: on any read that succeeds it says
+    how many DISTINCT tenants came back. One is this tenant. More than one is
+    the breach, stated as a number rather than left for a reader to infer from
+    a row dump.
+    """
+    outcome: dict[str, Any] = {"attempt": description, "expect": expect}
+    try:
+        result = call()
+    except Exception as exc:  # noqa: BLE001 — being refused is the point
+        message = str(exc)
+        outcome["allowed"] = False
+        outcome["detail"] = (
+            "refused by IAM"
+            if any(marker in message for marker in _DENIED)
+            else message[:200]
+        )
+        outcome["partitions_seen"] = 0
+    else:
+        items = result.get("Items", [])
+        outcome["allowed"] = True
+        outcome["partitions_seen"] = len({str(item.get("pk", "")) for item in items})
+        outcome["detail"] = f"{result.get('Count', len(items))} row(s)"
+    outcome["pass"] = outcome["allowed"] == (expect == "allow")
+    return outcome
+
+
+def _op_isolation_probe(event: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
+    """What can ffug's own narrowed session actually reach in ffug's own table?
+
+    The question this exists to settle is "if we just scan the table, what do we
+    get?" — and the answer is worth stating before reading the code, because it
+    is not the one the design invites you to expect.
+
+    **A scan cannot be bounded to a tenant.** ``dynamodb:LeadingKeys`` binds to
+    the partition key of the item being accessed, and a Scan names no key, so
+    the condition key is absent from the request context and
+    ``ForAllValues:StringLike`` passes VACUOUSLY against it. Granting Scan under
+    that condition does not return this tenant's rows; it returns every tenant's.
+    It is the one action no key condition can constrain — the same trap Porth
+    carries on its platform session policy, which PORTH-580 exists to retire.
+
+    So ffug is granted no Scan at all, and the first attempt below is expected to
+    be REFUSED. That is the stronger result: not "you asked for everything and
+    were handed your own share", but "you cannot ask the question". The three
+    queries that follow show the boundary from the other side — this tenant's
+    partition readable, a foreign tenant and a foreign environment refused.
+
+    ``_active_projection`` is deliberately NOT called first. This probe reports
+    on IAM, and a tenant whose bus event has not arrived should see its own
+    partition allowed and empty rather than a provisioning error standing in for
+    an isolation answer.
+    """
+    table = director.table
+    environment, tenant_id = director.environment, director.tenant_id
+
+    def query(partition: str):
+        return lambda: table.query(
+            KeyConditionExpression="pk = :pk",
+            ExpressionAttributeValues={":pk": partition},
+            Limit=25,
+        )
+
+    own = keys.partition(environment, tenant_id)
+    foreign_tenant = keys.partition(environment, FOREIGN)
+    foreign_env = keys.partition(FOREIGN, tenant_id)
+
+    attempts = [
+        _attempt("scan the whole table", "deny", lambda: table.scan(Limit=25)),
+        _attempt(f"query {own}", "allow", query(own)),
+        _attempt(f"query {foreign_tenant}", "deny", query(foreign_tenant)),
+        _attempt(f"query {foreign_env}", "deny", query(foreign_env)),
+    ]
+
+    # The role STS actually issued, asked through the same narrowed credentials
+    # everything else here uses. A client built from the ambient identity would
+    # answer confidently about the wrong principal. GetCallerIdentity needs no
+    # permission — it is answerable even to a session that is denied everything.
+    try:
+        arn = director.client(IDENTITY_BROKER).get_caller_identity()["Arn"]
+        match = _ASSUMED_ROLE.search(arn)
+        role = match.group(1) if match else arn
+    except Exception as exc:  # noqa: BLE001
+        role = None
+        log.warning("ffug.probe could not resolve its own identity: %s", exc)
+
+    return {
+        "ok": True,
+        "operation": "isolation_probe",
+        "table": TABLE_NAME,
+        "environment": environment,
+        "tenant_id": tenant_id,
+        "role": role,
+        "attempts": attempts,
+        # Every attempt, not the readable one. A successful read of your own
+        # partition proves the credentials work and says nothing about what is
+        # kept out, which is the entire property under test.
+        "isolated": all(attempt["pass"] for attempt in attempts),
+    }
+
+
+_OPS = {
+    "echo": _op_echo,
+    "get": _op_get,
+    "hash": _op_hash,
+    "isolation_probe": _op_isolation_probe,
+}
 
 
 def _build_director(event: dict[str, Any], context: Any) -> FfugDirector:

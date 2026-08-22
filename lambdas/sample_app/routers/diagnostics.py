@@ -34,6 +34,7 @@ from porth_common.protocols.cloud_clients import DOCUMENT_STORE, IDENTITY_BROKER
 
 from ..dependencies import porth
 from ..director import TABLE_NAME, SampleAppDirector
+from ..ffug_client import isolation_probe
 
 router = APIRouter(prefix="/sample/diagnostics", tags=["diagnostics"])
 
@@ -134,4 +135,16 @@ def identity(director: SampleAppDirector = Depends(porth)) -> dict:
     # Isolation is all four, not the first. Reading your own data proves the
     # credentials work; only the refusals prove anything is being kept out.
     result["isolated"] = all(p["pass"] for p in result["probes"])
+
+    # The same question asked of a DIFFERENT service's table, over the internal
+    # plane (PORTH-599). The probes above run on credentials the authorizer
+    # minted for this browser session; these run on credentials ffug narrowed
+    # for ITSELF, from a signed envelope, with no authorizer anywhere in the
+    # path. Two planes, one boundary — and only the second one is what the ffug
+    # fixture exists to demonstrate.
+    #
+    # Nothing about the tenant is sent. ffug takes it from the envelope, which
+    # is why the panel can claim the caller could not have asked about anyone
+    # else: there is no field in which to have asked.
+    result["ffug"] = isolation_probe(director)
     return result

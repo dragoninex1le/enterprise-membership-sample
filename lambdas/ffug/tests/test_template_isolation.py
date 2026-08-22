@@ -138,6 +138,48 @@ def test_ffugs_only_route_to_data_is_its_tenant_role(resources):
     assert assumable == [{"GetAtt": "FfugTenantRole.Arn"}]
 
 
+def test_the_narrowing_names_both_an_identity_and_a_rule(resources):
+    """IAM says ffug MAY assume its tenant role. These say which role, by what rule.
+
+    Both are read inside the credentials provider and nowhere above it, so
+    nothing in ffug's own code mentions either — which is precisely why they
+    need asserting here. Neither has a default: lose the identity and there is
+    no role to narrow, lose the scope and there is no rule to narrow by, and
+    the provider raises NarrowingUnavailableError either way rather than
+    running wide. Fail-closed, but a failure at runtime is not the same thing
+    as one caught on the pull request.
+
+    The scope is a NAME, not a document. Porth's own deploy seeds the body at
+    /porth/{branch}/auth-session-policy/tenant-scoped-default, and it is the
+    same template the authorizer renders for a human caller — so the rule that
+    isolates ffug and the rule that isolates a browser session are one rule
+    with one place to change it.
+    """
+    env = resources["FfugFunction"]["Properties"]["Environment"]["Variables"]
+
+    assert env["PORTH_SERVICE_DATA_IDENTITY"] == {"GetAtt": "FfugTenantRole.Arn"}
+    assert env["PORTH_SERVICE_DATA_SCOPE"] == "tenant-scoped-default"
+
+
+def test_ffug_can_read_the_template_its_narrowing_renders(resources):
+    """The grant that makes the scope above reachable at all.
+
+    Easy to lose, because it is a permission on a different resource than the
+    one being isolated — the rule for reaching DynamoDB is fetched from the
+    parameter store. Without this read the narrowing refuses before it ever
+    reaches STS, and the symptom is a tenant that looks unprovisioned rather
+    than a grant that is missing.
+    """
+    reads = [
+        s for s in statements(resources["FfugFunctionRole"])
+        if s["Action"] == "ssm:GetParameter"
+    ]
+    assert reads, "ffug cannot fetch its session-policy template"
+
+    arns = [a["Sub"] for read in reads for a in read["Resource"]]
+    assert any(arn.endswith("/auth-session-policy/*") for arn in arns), arns
+
+
 # --- the tenant role's ceiling ----------------------------------------------
 
 

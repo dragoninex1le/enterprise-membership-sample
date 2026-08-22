@@ -42,8 +42,12 @@ log = logging.getLogger(__name__)
 FFUG_SERVICE_ID = "ffug"
 
 
-class FingerprintUnavailable(Exception):
-    """ffug could not be reached, or refused. Never fatal to an approval."""
+class FfugUnavailable(Exception):
+    """ffug could not be reached, or refused."""
+
+
+class FingerprintUnavailable(FfugUnavailable):
+    """The specific case above, for the approval path. Never fatal to an approval."""
 
 
 def fingerprint(director, document: dict[str, Any]) -> dict[str, str]:
@@ -87,3 +91,35 @@ def fingerprint(director, document: dict[str, Any]) -> dict[str, str]:
         director.tenant_id, str(body["digest"])[:12],
     )
     return {"prime": str(body["prime"]), "digest": str(body["digest"])}
+
+
+def isolation_probe(director) -> dict[str, Any]:
+    """Ask ffug what its OWN narrowed session can reach in its OWN table.
+
+    Never raises. This feeds a diagnostics panel whose job is to explain why
+    things are broken, so a failure has to arrive as something renderable — an
+    endpoint that 500s in the situation it exists to describe is no use.
+
+    Note what is not sent: no tenant, and no partition. There is no field for
+    either. ffug takes both from the signed envelope this call carries, which is
+    the property being demonstrated — the caller cannot ask about a tenant, only
+    about itself.
+    """
+    try:
+        body = ServiceClient(director).call(
+            FFUG_SERVICE_ID,
+            "isolation_probe",
+            {},
+            idempotent=True,
+            trace_id=getattr(director, "trace_id", None) or None,
+        )
+    except ServiceCallError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    if not isinstance(body, dict) or not body.get("ok"):
+        error = (body or {}).get("error", {}) if isinstance(body, dict) else {}
+        return {
+            "ok": False,
+            "error": f"{error.get('code', 'refused')}: {error.get('message', '')}",
+        }
+    return body
