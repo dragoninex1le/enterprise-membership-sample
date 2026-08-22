@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from porth_common.internal_plane.client import ServiceClient, ServiceCallError
+from porth_common.internal_plane.client import ServiceClient
 
 log = logging.getLogger(__name__)
 
@@ -71,11 +71,22 @@ def fingerprint(director, document: dict[str, Any]) -> dict[str, str]:
             idempotent=True,
             trace_id=getattr(director, "trace_id", None) or None,
         )
-    except ServiceCallError as exc:
-        # One family for every way the plane can fail: unregistered, suspended,
-        # unreachable, oversized, or the callee raising. Rendered to the
-        # approver as-is, because "approved but not fingerprinted — <this>" is
-        # more use than a generic apology.
+    except Exception as exc:  # noqa: BLE001 — see below; the breadth is the fix
+        # PORTH-603. This caught ServiceCallError only, and that was too narrow
+        # to hold the promise the caller makes.
+        #
+        # ServiceCallError covers the ways a CALL can fail — unregistered,
+        # suspended, unreachable, oversized, callee raising. It does not cover
+        # the ways the plane can fail to be RESOLVED: reading the registry and
+        # the endpoint map happens first, and a ConfigurationUnavailableError
+        # is not a ServiceCallError. So a missing ssm:GetParameter escaped this
+        # handler entirely and approve() returned 500 — with the approval
+        # already committed, because the decision is written before the
+        # fingerprint is sought.
+        #
+        # That is the exact failure this design says must not happen: a fixture
+        # service on the internal plane must not fail a business decision. The
+        # handler now matches the promise rather than one family of it.
         raise FingerprintUnavailable(str(exc)) from exc
 
     if not isinstance(body, dict) or not body.get("ok"):
@@ -117,7 +128,16 @@ def isolation_probe(director, probe_tenant: str = "") -> dict[str, Any]:
             idempotent=True,
             trace_id=getattr(director, "trace_id", None) or None,
         )
-    except ServiceCallError as exc:
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must not die
+        # Same widening as above, and it matters more here. This endpoint's one
+        # job is to explain why things are broken; catching only ServiceCallError
+        # made it 500 on a configuration fault — the page that should have
+        # rendered "ffug unreachable: could not read 'services' from
+        # /porth/dev/services" instead crashed and said nothing at all.
+        #
+        # Same shape as PORTH-612: a diagnostic that fails in the situation it
+        # exists to diagnose sends the reader looking somewhere else.
+        log.warning("sample_app.probe could not reach ffug: %s", exc)
         return {"ok": False, "error": str(exc)}
 
     if not isinstance(body, dict) or not body.get("ok"):
