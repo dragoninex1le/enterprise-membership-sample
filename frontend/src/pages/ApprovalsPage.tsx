@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { sampleApiClient } from '../api/sampleApp'
 import { usePorthContext } from '../context/PorthContext'
 import { PERMISSIONS } from '../constants'
@@ -14,6 +14,16 @@ interface Approval {
   submitted_by: string
   submitted_at: string
   status: string
+  /** PORTH-599 — ffug's answer, present once a decision has been fingerprinted.
+   *  The prime is the tenant's own, minted from the bus and readable by nothing
+   *  else; the digest is SHA256(prime : document). Empty is a real state, not a
+   *  blank: the record predates the fingerprint, or ffug was unreachable. */
+  fingerprint_prime?: string
+  fingerprint_digest?: string
+  /** Returned by the approve call only — what was hashed, so the number on the
+   *  screen can be checked by hand rather than believed. */
+  fingerprint_document?: Record<string, string>
+  fingerprint_error?: string
 }
 
 const STATUS_BADGE: Record<string, string> = {
@@ -98,6 +108,43 @@ function IdentityStrip({ identity }: { identity: Identity | null }) {
   )
 }
 
+// PORTH-599 — what ffug said, and what it said it about.
+//
+// Shown as the document AND the prime AND the result rather than just a hash,
+// because a bare digest proves nothing to the person looking at it. With all
+// three on screen you can recompute it yourself, and the claim being made is
+// checkable: this tenant's prime produced this number from this document, and
+// no other tenant's could, because ffug serving them cannot read this prime.
+function Fingerprint({ appr }: { appr: Approval }) {
+  if (appr.fingerprint_error) {
+    return (
+      <div className="text-xs text-amber-700">
+        approved, but not fingerprinted — {appr.fingerprint_error}
+      </div>
+    )
+  }
+  if (!appr.fingerprint_digest) return null
+  return (
+    <div className="space-y-0.5 font-mono text-[11px] text-gray-600">
+      {appr.fingerprint_document && (
+        <div>
+          <span className="text-gray-400">document </span>
+          {JSON.stringify(appr.fingerprint_document)}
+        </div>
+      )}
+      <div>
+        <span className="text-gray-400">primed with </span>
+        {appr.fingerprint_prime}
+        <span className="text-gray-400"> (this tenant\u2019s, from the bus)</span>
+      </div>
+      <div>
+        <span className="text-gray-400">sha256 </span>
+        {appr.fingerprint_digest}
+      </div>
+    </div>
+  )
+}
+
 export default function ApprovalsPage() {
   const { currentUser } = usePorthContext()
   const [approvals, setApprovals] = useState<Approval[]>([])
@@ -147,7 +194,14 @@ export default function ApprovalsPage() {
         setApprovals(prev =>
           prev.map(a =>
             a.record_id === recordId
-              ? { ...a, status: r.data.status ?? (action === 'approve' ? 'approved' : 'rejected') }
+              ? {
+                  ...a,
+                  status: r.data.status ?? (action === 'approve' ? 'approved' : 'rejected'),
+                  fingerprint_prime: r.data.fingerprint_prime,
+                  fingerprint_digest: r.data.fingerprint_digest,
+                  fingerprint_document: r.data.fingerprint_document,
+                  fingerprint_error: r.data.fingerprint_error,
+                }
               : a
           )
         )
@@ -192,7 +246,8 @@ export default function ApprovalsPage() {
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {approvals.map(appr => (
-                <tr key={appr.record_id} className="hover:bg-gray-50">
+                <Fragment key={appr.record_id}>
+                <tr className="hover:bg-gray-50">
                   <td className="px-4 py-3 text-sm font-mono text-gray-500">{appr.record_id.slice(0, 8)}</td>
                   <td className="px-4 py-3 text-sm text-gray-900 capitalize">{appr.record_type}</td>
                   <td className="px-4 py-3 text-sm text-gray-900">{appr.counterparty || '—'}</td>
@@ -223,6 +278,14 @@ export default function ApprovalsPage() {
                     </td>
                   )}
                 </tr>
+                {(appr.fingerprint_digest || appr.fingerprint_error) && (
+                  <tr className="bg-gray-50/60">
+                    <td colSpan={canWrite ? 8 : 7} className="px-4 pb-3 pt-0">
+                      <Fingerprint appr={appr} />
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               ))}
             </tbody>
           </table>

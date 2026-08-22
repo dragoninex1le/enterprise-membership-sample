@@ -93,6 +93,18 @@ def _conditional_check_failed(exc: Exception) -> bool:
     return code == "ConditionalCheckFailedException"
 
 
+#: Exactly what the fingerprint covers (PORTH-599). Named once and kept small
+#: on purpose: the point of showing a digest to a human is that they can see
+#: what went into it, and a document nobody can reproduce by hand proves nothing
+#: to the person looking at it.
+FINGERPRINT_FIELDS = ("record_type", "record_id", "counterparty", "amount")
+
+
+def fingerprint_document(approval: dict) -> dict:
+    """The substance of a record, in a fixed field order."""
+    return {field: approval.get(field, "") for field in FINGERPRINT_FIELDS}
+
+
 def _as_approval(record_type: str, spec: _RecordSpec, item: dict) -> dict:
     """One record, in the shape the approvals screen reads.
 
@@ -108,6 +120,12 @@ def _as_approval(record_type: str, spec: _RecordSpec, item: dict) -> dict:
         "status": item.get("status", ""),
         "submitted_by": item.get("submitted_by", ""),
         "submitted_at": item.get("submitted_at", ""),
+        # Present once ffug has fingerprinted the decision. Empty is a real
+        # state — the record was approved before the fingerprint existed, or
+        # ffug was unreachable — so the screen shows the difference rather than
+        # rendering a blank that reads as "no fingerprint was ever wanted".
+        "fingerprint_prime": item.get("fingerprint_prime", ""),
+        "fingerprint_digest": item.get("fingerprint_digest", ""),
     }
 
 #: The table NAME's environment — the deployment axis. Not the data axis; see
@@ -279,6 +297,26 @@ class SampleAppRepository:
                 ) from exc
             raise
         return _as_approval(spec.record_type, spec, resp.get("Attributes", {}))
+
+    def attach_fingerprint(self, record_type: str, record_id: str, *, prime: str, digest: str) -> dict:
+        """Record ffug's answer against the decision it describes.
+
+        Written after the transition rather than as part of it, deliberately.
+        The approval is the business outcome and must not fail because a fixture
+        service was unreachable; the fingerprint is evidence about that outcome
+        and can arrive late or not at all. Conditioned on the record existing so
+        this cannot conjure one — the same upsert trap PORTH-597 removed.
+        """
+        spec = _spec(record_type)
+        resp = self.table.update_item(
+            Key={"pk": self.partition, "sk": f"{spec.prefix}{record_id}"},
+            UpdateExpression="SET #p = :p, #d = :d",
+            ExpressionAttributeNames={"#p": "fingerprint_prime", "#d": "fingerprint_digest"},
+            ExpressionAttributeValues={":p": prime, ":d": digest},
+            ConditionExpression="attribute_exists(pk)",
+            ReturnValues="ALL_NEW",
+        )
+        return _as_approval(record_type, spec, resp.get("Attributes", {}))
 
     # -- derived -------------------------------------------------------------
 

@@ -208,9 +208,39 @@ def test_the_request_serving_function_holds_no_standing_table_grant():
         "request path is served by credentials the authorizer minted; a role "
         "underneath them makes the narrowing advisory."
     )
-    assert "Policies:" not in yaml_only, (
-        "SampleAppFunction grew a Policies block. Whatever it grants, it grants "
-        "on the ambient identity, underneath the request's narrowing."
+    # PORTH-599 narrowed this from "no Policies block at all".
+    #
+    # That assertion made a real argument — anything granted here sits on the
+    # ambient identity, underneath the request's narrowing — and it was right
+    # for an app that only ever touched its own table. Becoming an originating
+    # service on the internal plane requires two grants that are not data
+    # access and cannot be obtained per-request: minting a context envelope, and
+    # being allowed to call the callee. ADR-Z11 puts kms:Sign on exactly this
+    # kind of principal ("originating registered-service roles", Q10).
+    #
+    # So the guard becomes an ALLOW-LIST rather than a prohibition, which is
+    # stronger in the direction that matters: a third grant of any kind fails
+    # here, including any form of table access, however it is spelled.
+    #
+    # The residual risk is real and worth naming rather than asserting away.
+    # kms:Sign on this role is ambient: `mint_token` takes a tenant id as a
+    # free string, so a call site that built an envelope by hand could mint for
+    # a tenant other than the request's, and ffug would trust it. What prevents
+    # that is TS-MC.1 — envelopes are derivable only from a Director bound to a
+    # validated tenant — and ffug_client.py is the single call site, which is
+    # why it goes through director.build_context_envelope() and never
+    # mint_token(). If a second call site appears, this is the comment to read.
+    granted = set(re.findall(r"Action:\s*([a-z0-9]+:[A-Za-z]+)", yaml_only))
+    assert granted == {"kms:Sign", "lambda:InvokeFunction"}, (
+        f"SampleAppFunction's standing grants changed: {sorted(granted)}. Only "
+        f"minting context and invoking ffug are allowed here — everything else "
+        f"a request needs comes from the credentials the authorizer minted for "
+        f"it, and a grant underneath those makes the narrowing advisory."
+    )
+    assert "kms:Verify" not in yaml_only, (
+        "SampleAppFunction holds kms:Verify. It is the CALLER on the internal "
+        "plane, not a receiver; holding Sign and Verify together would let it "
+        "verify its own forgeries."
     )
 
 

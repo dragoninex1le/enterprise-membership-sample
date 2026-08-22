@@ -12,7 +12,12 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from ..dependencies import porth, require_permission
 from ..director import SampleAppDirector
-from ..repository import TransitionNotAllowedError, UnknownRecordTypeError
+from ..ffug_client import FingerprintUnavailable, fingerprint
+from ..repository import (
+    TransitionNotAllowedError,
+    UnknownRecordTypeError,
+    fingerprint_document,
+)
 
 router = APIRouter(prefix="/sample/approvals", tags=["approvals"])
 
@@ -40,7 +45,27 @@ def list_approvals(director: SampleAppDirector = Depends(porth)) -> list[dict]:
     dependencies=[Depends(require_permission("approvals.write"))],
 )
 def approve(record_type: str, record_id: str, director: SampleAppDirector = Depends(porth)) -> dict:
-    return _decide(director, record_type, record_id, approve=True)
+    """Approve a record, then have ffug fingerprint the decision (PORTH-599).
+
+    The order matters and so does the error handling. The approval is the
+    business outcome: it is committed first, and it does not fail because a
+    fixture service on the internal plane was unreachable. The fingerprint is
+    evidence ABOUT that outcome, so a failure to obtain it is reported on the
+    response rather than raised — visible, and not mistaken for "no fingerprint
+    was wanted here".
+    """
+    approval = _decide(director, record_type, record_id, approve=True)
+    document = fingerprint_document(approval)
+
+    try:
+        result = fingerprint(director, document)
+    except FingerprintUnavailable as exc:
+        return {**approval, "fingerprint_document": document, "fingerprint_error": str(exc)}
+
+    stored = director.repository.attach_fingerprint(
+        record_type, record_id, prime=result["prime"], digest=result["digest"]
+    )
+    return {**stored, "fingerprint_document": document}
 
 
 @router.post(

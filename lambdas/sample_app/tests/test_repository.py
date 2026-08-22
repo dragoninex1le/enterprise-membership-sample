@@ -183,7 +183,8 @@ def test_the_listed_shape_is_the_one_the_screen_reads():
     entry = repo.list_pending_approvals()[0]
 
     assert set(entry) == {"record_id", "record_type", "counterparty", "amount",
-                          "status", "submitted_by", "submitted_at"}
+                          "status", "submitted_by", "submitted_at",
+                          "fingerprint_prime", "fingerprint_digest"}
 
 
 # --- transitions are guarded by DynamoDB, not by a prior read ----------------
@@ -264,3 +265,71 @@ def test_an_unapprovable_record_type_is_refused():
     repo, _ = make_repo()
     with pytest.raises(UnknownRecordTypeError):
         repo.approve("purchase_order", "p-1")
+
+
+# --- the fingerprint ffug returns (PORTH-599) --------------------------------
+
+
+def test_the_fingerprint_document_is_the_records_substance():
+    """Small and fixed on purpose. The point of showing a digest to a human is
+    that they can see what went into it; a document nobody can reproduce by hand
+    proves nothing to the person looking at it."""
+    from sample_app.repository import fingerprint_document
+
+    doc = fingerprint_document({
+        "record_type": "invoice", "record_id": "i-1", "counterparty": "Acme",
+        "amount": "100", "status": "approved", "submitted_by": "u-1",
+    })
+
+    assert doc == {"record_type": "invoice", "record_id": "i-1",
+                   "counterparty": "Acme", "amount": "100"}
+
+
+def test_the_fingerprint_document_has_a_stable_field_order():
+    """Two calls must produce the same bytes, or the digest is not a
+    fingerprint. Guards against a future dict comprehension over a set."""
+    from sample_app.repository import fingerprint_document
+
+    a = fingerprint_document({"record_type": "invoice", "record_id": "i-1",
+                              "counterparty": "Acme", "amount": "100"})
+    b = fingerprint_document({"amount": "100", "counterparty": "Acme",
+                              "record_id": "i-1", "record_type": "invoice"})
+
+    assert list(a) == list(b)
+
+
+def test_attaching_a_fingerprint_cannot_conjure_a_record():
+    """Same upsert trap PORTH-597 removed, in the newest write."""
+    repo, table = make_repo()
+    table.update_item.return_value = {"Attributes": _invoice("approved")}
+
+    repo.attach_fingerprint("invoice", "i-1", prime="11", digest="abc")
+
+    kw = table.update_item.call_args[1]
+    assert kw["ConditionExpression"] == "attribute_exists(pk)"
+    assert kw["Key"] == {"pk": PARTITION, "sk": "INVOICE#i-1"}
+    assert kw["ExpressionAttributeValues"] == {":p": "11", ":d": "abc"}
+
+
+def test_a_listed_approval_carries_its_fingerprint_when_it_has_one():
+    repo, table = make_repo()
+    item = _invoice("pending_approval")
+    item.update({"fingerprint_prime": "11", "fingerprint_digest": "abc"})
+    table.query.side_effect = [{"Items": [item]}, {"Items": []}]
+
+    entry = repo.list_pending_approvals()[0]
+
+    assert entry["fingerprint_prime"] == "11"
+    assert entry["fingerprint_digest"] == "abc"
+
+
+def test_a_record_with_no_fingerprint_reports_empty_not_missing():
+    """Empty is a real state — approved before the fingerprint existed, or ffug
+    was unreachable — and the screen distinguishes it from 'never wanted'."""
+    repo, table = make_repo()
+    table.query.side_effect = [{"Items": [_invoice("pending_approval")]}, {"Items": []}]
+
+    entry = repo.list_pending_approvals()[0]
+
+    assert entry["fingerprint_prime"] == ""
+    assert entry["fingerprint_digest"] == ""

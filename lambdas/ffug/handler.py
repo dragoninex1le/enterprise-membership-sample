@@ -23,8 +23,10 @@ What that buys, stated precisely because the fixture exists to demonstrate it:
   create it: a caller arriving before the event is refused rather than served
   under an invented salt.
 
-Ops: ``echo`` (store a payload under the caller's tenant, hand it back), ``get``
-(read it back), ``hash`` (return ``SHA256(salt : payload)``). ``hash`` is the
+Operations: ``echo`` (store a payload under the caller's tenant, hand it back),
+``get`` (read it back), ``hash`` (return ``SHA256(salt : payload)``). Named in
+the ``operation`` field, which is what
+:class:`porth_common.internal_plane.client.ServiceClient` sends. ``hash`` is the
 addition, and it is the reason PORTH-587 amends the "no business logic" rule —
 see README.md. It writes nothing, so ``echo`` remains the only writer and the
 residue sweep stays a one-prefix question.
@@ -142,7 +144,7 @@ def _op_echo(event: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
         "payload": payload,
     }
     director.table.put_item(Item=item)
-    return {"ok": True, "op": "echo", "item_id": item_id, "payload": payload}
+    return {"ok": True, "operation": "echo", "item_id": item_id, "payload": payload}
 
 
 def _op_get(event: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
@@ -157,7 +159,7 @@ def _op_get(event: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
     item = result.get("Item")
     if item is None:
         raise FfugError("not_found", f"no item {item_id} for this tenant")
-    return {"ok": True, "op": "get", "item_id": item_id, "payload": item.get("payload")}
+    return {"ok": True, "operation": "get", "item_id": item_id, "payload": item.get("payload")}
 
 
 def _op_hash(event: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
@@ -180,7 +182,7 @@ def _op_hash(event: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
     prime = str(_active_projection(director)["prime"])
     return {
         "ok": True,
-        "op": "hash",
+        "operation": "hash",
         "prime": prime,
         "digest": salt.digest(prime, payload),
     }
@@ -230,14 +232,19 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
                 "no verified tenant context on this invocation",
             )
 
-        op = (event.get("op") or "echo").strip()
+        # `operation`, the D7.4 wire field. ServiceClient sends
+        # {"operation", "payload", "porth_context"}, so a service that reads
+        # `op` can be called by hand and not by the sanctioned client — which is
+        # the wrong way round, since the client is the supported route and the
+        # hand-rolled invoke is the one being designed out (PORTH-599).
+        op = (event.get("operation") or "echo").strip()
         fn = _OPS.get(op)
         if fn is None:
             raise FfugError("unknown_op", f"unknown op {op!r}")
 
         result = fn(event, director)
         log.info(
-            "ffug.served op=%s environment=%s tenant_id=%s source_service=%s trace_id=%s",
+            "ffug.served operation=%s environment=%s tenant_id=%s source_service=%s trace_id=%s",
             op,
             director.environment,
             director.tenant_id,

@@ -162,7 +162,15 @@ def stage_b(tenants: list[dict]) -> None:
         response = client.invoke(
             FunctionName=_env("FFUG_FUNCTION_ARN"),
             Payload=json.dumps(
-                {"porth_context": envelope.to_payload_field(), "op": "hash", "payload": PAYLOAD}
+                {
+                    "porth_context": envelope.to_payload_field(),
+                    # The D7.4 wire field. This script hand-builds the payload
+                    # because it is a UAT runner standing in for a caller, not a
+                    # service — but it speaks the same shape ServiceClient does,
+                    # or it would be testing a path nothing uses.
+                    "operation": "hash",
+                    "payload": PAYLOAD,
+                }
             ).encode(),
         )
         if response.get("FunctionError"):

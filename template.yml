@@ -444,6 +444,19 @@ Resources:
           PORTH_ENVIRONMENT: !Ref PorthEnvironment
           AWS_ACCOUNT_ID: !Ref AWS::AccountId
           CLOUDFRONT_ALIAS: !Ref CloudFrontAlias
+          # PORTH-599 — this app's identity on Porth's internal plane, and the
+          # callee it reaches. PORTH_SERVICE_ID must match a service registered
+          # in /porth/{branch}/services or ffug refuses the call; that document
+          # is seeded CREATE-ONLY, so adding a service to Components' default
+          # file does nothing to an install that already has one.
+          PORTH_SERVICE_ID: sample-app
+          PORTH_BRANCH: !Ref PorthBranch
+          PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
+          # No FFUG_FUNCTION_ARN. Where ffug lives is resolved from the endpoint
+          # map at /porth/{branch}/service-endpoints, which is the whole point of
+          # D7.4 — an address at the call site is an address that cannot follow
+          # configuration. The IAM grant below still names the ARN, because a
+          # permission has to name a resource; the CALLER does not.
       # PORTH-586: NO DynamoDBCrudPolicy on this table, deliberately.
       #
       # This function serves authorized requests, and every one of them arrives
@@ -459,6 +472,37 @@ Resources:
       # SampleAppEventConsumerFunction below keeps its grant: no authorizer runs
       # for an EventBridge delivery, so it has no request credentials and its
       # execution role is the only identity available to it.
+      #
+      # PORTH-599 — the first grants this function has held since PORTH-586
+      # stripped it, and neither is data access. Reaching ffug on the internal
+      # plane takes two, doing different jobs, and the split IS the design:
+      #
+      #   kms:Sign  mints the context envelope that tells ffug WHICH TENANT the
+      #             call is about. Never kms:Verify — this app is the caller,
+      #             not a receiver, and holding both would let it verify its own
+      #             forgeries.
+      #
+      #   Invoke    is the identity half. Being allowed to call ffug is a
+      #             property of this FUNCTION; the tenant travels in the
+      #             envelope. Nothing here hands ffug anything it could act
+      #             with, and ffug narrows its own credentials from the verified
+      #             envelope rather than borrowing ours.
+      #
+      # This is a second principal in the account able to mint context, which is
+      # deliberate and worth knowing: it is the breadth PORTH-589 exists to
+      # bound. A registered originating service is precisely who should hold
+      # Sign — but if that ticket lands an explicit key-policy Deny, this role
+      # needs to be on its allow-list or every approval stops being fingerprinted.
+      Policies:
+        - Statement:
+            - Sid: MintContextForInternalCalls
+              Effect: Allow
+              Action: kms:Sign
+              Resource: !Ref PorthContextSigningKeyArn
+            - Sid: CallFfug
+              Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !GetAtt FfugFunction.Arn
       Events:
         ApiProxy:
           Type: HttpApi

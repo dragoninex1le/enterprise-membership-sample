@@ -119,7 +119,7 @@ def test_tenant_comes_from_the_verified_claims_not_the_payload(porth, table):
     ``tenant_id`` is simply not a field this handler reads."""
     porth.arrives_as(tenant_id="acme")
 
-    h.handler({"op": "echo", "item_id": "i-1", "payload": 1, "tenant_id": "globex",
+    h.handler({"operation": "echo", "item_id": "i-1", "payload": 1, "tenant_id": "globex",
                "environment": "somewhere-else"})
 
     assert table.put_item.call_args[1]["Item"]["pk"] == "ENV#prod#TENANT#acme"
@@ -128,7 +128,7 @@ def test_tenant_comes_from_the_verified_claims_not_the_payload(porth, table):
 def test_an_invocation_with_no_context_is_refused(porth):
     porth.context = {}
 
-    assert err(h.handler({"op": "hash", "payload": 1})) == "missing_context"
+    assert err(h.handler({"operation": "hash", "payload": 1})) == "missing_context"
     assert err(h.handler({})) == "missing_context"
     assert err(h.handler(None)) == "missing_context"
 
@@ -152,7 +152,7 @@ def test_each_envelope_rejection_keeps_its_own_code(porth, table, exc, code):
     ffug's replies and Porth's audit-log lines share one vocabulary."""
     porth.raises(exc)
 
-    result = h.handler({"op": "hash", "payload": 1})
+    result = h.handler({"operation": "hash", "payload": 1})
 
     assert err(result) == code
     assert not table.put_item.called
@@ -166,7 +166,7 @@ def test_a_verified_envelope_from_an_unaccepted_service_is_its_own_fault(porth, 
     configuration, and they want different people looking at them."""
     porth.raises(exc)
 
-    assert err(h.handler({"op": "hash", "payload": 1})) == "source_service_refused"
+    assert err(h.handler({"operation": "hash", "payload": 1})) == "source_service_refused"
 
 
 def test_a_narrowing_failure_is_not_answered_it_is_raised(porth, monkeypatch):
@@ -179,7 +179,7 @@ def test_a_narrowing_failure_is_not_answered_it_is_raised(porth, monkeypatch):
     )
 
     with pytest.raises(ResourceUnavailableError):
-        h.handler({"op": "hash", "payload": 1})
+        h.handler({"operation": "hash", "payload": 1})
 
 
 # --- the tenant must have been provisioned by the bus ------------------------
@@ -190,16 +190,16 @@ def test_a_tenant_the_bus_has_not_announced_is_refused(porth):
     refused rather than served under an invented one."""
     porth.tenant_is_unknown()
 
-    assert err(h.handler({"op": "hash", "payload": 1})) == "tenant_not_provisioned"
+    assert err(h.handler({"operation": "hash", "payload": 1})) == "tenant_not_provisioned"
 
 
 def test_a_suspended_tenant_is_served_nothing(porth, table):
     """TS-MC.8 — refusal at event-delivery latency, not at cache TTL."""
     porth.tenant_is(status="suspended")
 
-    assert err(h.handler({"op": "hash", "payload": 1})) == "tenant_not_active"
-    assert err(h.handler({"op": "echo", "item_id": "i", "payload": 1})) == "tenant_not_active"
-    assert err(h.handler({"op": "get", "item_id": "i"})) == "tenant_not_active"
+    assert err(h.handler({"operation": "hash", "payload": 1})) == "tenant_not_active"
+    assert err(h.handler({"operation": "echo", "item_id": "i", "payload": 1})) == "tenant_not_active"
+    assert err(h.handler({"operation": "get", "item_id": "i"})) == "tenant_not_active"
     assert not table.put_item.called
 
 
@@ -208,14 +208,14 @@ def test_a_deleted_tenants_stripped_marker_is_not_a_salt(porth):
     moments ago. The marker has a status and no salt; it must not be usable."""
     porth.tenant_is(status="deleted", prime=None)
 
-    assert err(h.handler({"op": "hash", "payload": 1})) == "tenant_not_active"
+    assert err(h.handler({"operation": "hash", "payload": 1})) == "tenant_not_active"
 
 
 # --- hash: the demonstrable half --------------------------------------------
 
 
 def test_hash_returns_this_tenants_digest_and_the_salt_behind_it(porth):
-    result = h.handler({"op": "hash", "payload": {"amount": 100}})
+    result = h.handler({"operation": "hash", "payload": {"amount": 100}})
 
     assert result["ok"] is True
     assert result["prime"] == ACME_PRIME
@@ -228,11 +228,11 @@ def test_the_same_payload_under_two_tenants_gives_two_digests(porth):
     differs, and that permission is IAM's to grant."""
     porth.arrives_as(tenant_id="acme")
     porth.tenant_is(prime=ACME_PRIME)
-    acme = h.handler({"op": "hash", "payload": {"amount": 100}})
+    acme = h.handler({"operation": "hash", "payload": {"amount": 100}})
 
     porth.arrives_as(tenant_id="globex")
     porth.tenant_is(prime=GLOBEX_PRIME)
-    globex = h.handler({"op": "hash", "payload": {"amount": 100}})
+    globex = h.handler({"operation": "hash", "payload": {"amount": 100}})
 
     assert acme["digest"] != globex["digest"]
 
@@ -240,7 +240,7 @@ def test_the_same_payload_under_two_tenants_gives_two_digests(porth):
 def test_hash_reads_the_salt_from_this_tenants_partition_only(porth, table):
     porth.arrives_as(tenant_id="globex")
 
-    h.handler({"op": "hash", "payload": 1})
+    h.handler({"operation": "hash", "payload": 1})
 
     assert table.get_item.call_args[1]["Key"] == {
         "pk": "ENV#prod#TENANT#globex",
@@ -251,22 +251,22 @@ def test_hash_reads_the_salt_from_this_tenants_partition_only(porth, table):
 def test_hash_writes_nothing(porth, table):
     """Kept pure so ``echo`` stays the only writer and the residue sweep stays
     a one-prefix question."""
-    h.handler({"op": "hash", "payload": 1})
+    h.handler({"operation": "hash", "payload": 1})
 
     assert not table.put_item.called
 
 
 def test_hash_requires_a_payload(porth):
-    assert err(h.handler({"op": "hash"})) == "missing_payload"
+    assert err(h.handler({"operation": "hash"})) == "missing_payload"
 
 
 # --- echo and get, unchanged in contract, now on narrowed credentials --------
 
 
 def test_echo_stores_under_the_tenant_partition_and_hands_the_payload_back(porth, table):
-    result = h.handler({"op": "echo", "item_id": "i-1", "payload": {"hello": "world"}})
+    result = h.handler({"operation": "echo", "item_id": "i-1", "payload": {"hello": "world"}})
 
-    assert result == {"ok": True, "op": "echo", "item_id": "i-1", "payload": {"hello": "world"}}
+    assert result == {"ok": True, "operation": "echo", "item_id": "i-1", "payload": {"hello": "world"}}
     item = table.put_item.call_args[1]["Item"]
     assert item == {"pk": "ENV#prod#TENANT#acme", "sk": "ITEM#i-1", "payload": {"hello": "world"}}
 
@@ -283,7 +283,7 @@ def test_get_reads_back_under_the_same_keys(porth, table):
         {"Item": {"payload": {"hello": "world"}}},
     ]
 
-    result = h.handler({"op": "get", "item_id": "i-1"})
+    result = h.handler({"operation": "get", "item_id": "i-1"})
 
     assert result["payload"] == {"hello": "world"}
     assert table.get_item.call_args[1]["Key"] == {
@@ -295,15 +295,15 @@ def test_get_reads_back_under_the_same_keys(porth, table):
 def test_get_missing_item_is_a_typed_rejection(porth, table):
     table.get_item.side_effect = [{"Item": {"status": "active", "prime": ACME_PRIME}}, {}]
 
-    assert err(h.handler({"op": "get", "item_id": "nope"})) == "not_found"
+    assert err(h.handler({"operation": "get", "item_id": "nope"})) == "not_found"
 
 
 def test_echo_requires_item_id_and_payload(porth, table):
-    assert err(h.handler({"op": "echo", "payload": 1})) == "missing_item_id"
-    assert err(h.handler({"op": "echo", "item_id": "i-1"})) == "missing_payload"
+    assert err(h.handler({"operation": "echo", "payload": 1})) == "missing_item_id"
+    assert err(h.handler({"operation": "echo", "item_id": "i-1"})) == "missing_payload"
     assert not table.put_item.called
 
 
 def test_unknown_op_is_refused(porth, table):
-    assert err(h.handler({"op": "delete_everything"})) == "unknown_op"
+    assert err(h.handler({"operation": "delete_everything"})) == "unknown_op"
     assert not table.put_item.called
