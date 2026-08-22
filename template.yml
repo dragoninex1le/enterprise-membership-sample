@@ -503,6 +503,26 @@ Resources:
               Effect: Allow
               Action: lambda:InvokeFunction
               Resource: !GetAtt FfugFunction.Arn
+            # PORTH-603. ServiceClient consults BOTH before it picks a
+            # transport: the D3 registry, to refuse a suspended callee at the
+            # caller's end rather than only at the receiver's, and the D7.4
+            # endpoint map, because the whole point of D7.4 is that an address
+            # is configuration and not a call-site literal.
+            #
+            # Missing, the failure lands nowhere near the cause: approve() 500s
+            # inside the configuration provider, and the message names a
+            # parameter rather than the service call that wanted it.
+            #
+            # ffug's role has carried the registry read since PORTH-587. This
+            # was missed because it is the same permission on the OTHER end —
+            # the sibling-site defect the standing note in the EMS upgrade log
+            # is about, in the one shape a single-repo grep does not surface.
+            - Sid: ResolveTheInternalPlane
+              Effect: Allow
+              Action: ssm:GetParameter
+              Resource:
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/service-endpoints
       Events:
         ApiProxy:
           Type: HttpApi
