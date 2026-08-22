@@ -570,6 +570,57 @@ Resources:
         AttributeName: expires_at
         Enabled: true
 
+  # ── ffug's OWN narrowing rule (PORTH-600) ────────────────────────────────
+  #
+  # ffug used to point PORTH_SERVICE_DATA_SCOPE at `tenant-scoped-default` —
+  # Porth's template, seeded by Porth's own deploy. It worked, and it was wrong
+  # in three ways worth stating, because "it renders the same policy" is exactly
+  # the argument that keeps a shared document shared:
+  #
+  #   1. Porth's deploy writes that parameter with --overwrite on EVERY release.
+  #      A change to the platform's narrowing silently became a change to this
+  #      service's narrowing, in a repo whose tests would not have run.
+  #   2. Porth's template says Resource "*" ON PURPOSE — it is intersected with
+  #      PorthTenantRole, which supplies the table. Borrowed here, the only
+  #      thing keeping ffug off Porth's tables was FfugTenantRole. That is a
+  #      real fence, but it made the session policy carry none of the isolation
+  #      and the role carry all of it.
+  #   3. The fixture exists to show a SERVICE isolating itself. A service that
+  #      borrows the platform's rule has not demonstrated that.
+  #
+  # This document is ffug's, deployed with ffug, and names ffug's table. Now
+  # each half fences one axis: the session policy pins the tenant (and the
+  # table), the role pins the table (and any tenant), and neither alone is the
+  # whole rule.
+  #
+  # $env and $tenant are NOT CloudFormation — they are the markers
+  # substitute_markers() fills per request from the verified envelope. !Sub
+  # leaves them alone because it only reacts to ${...}.
+  #
+  # Both key shapes, and both are needed: the projection row's key is exactly
+  # ENV#{env}#TENANT#{tenant} with no trailing separator, so the '#*' pattern
+  # alone cannot match it and the salt would be unreadable — a failure that
+  # presents as an unprovisioned tenant (the fault PORTH-593 found in Porth's
+  # own policy). Do NOT collapse to ENV#$env#TENANT#$tenant* — a prefix match,
+  # so 'acme' would reach 'acme-staging'.
+  #
+  # No dynamodb:Scan, here or in the role. Scan names no key, so
+  # dynamodb:LeadingKeys is absent from the request context and ForAllValues
+  # passes VACUOUSLY — a Scan grant under this condition returns every tenant's
+  # rows, not this tenant's. It is the one action no key condition can bind.
+  FfugSessionPolicy:
+    Type: AWS::SSM::Parameter
+    Properties:
+      # The prefix is fixed by the configuration provider, which resolves the
+      # document `auth-session-policy/{name}` under /porth/{branch}. Living in
+      # Porth's namespace is not the same as being Porth's: the name is ours and
+      # nothing else writes it.
+      Name: !Sub /porth/${PorthBranch}/auth-session-policy/ffug-tenant-scoped
+      Type: String
+      Description: "ffug per-request tenant narrowing - rendered into an STS session policy (PORTH-600)."
+      Value: !Sub |-
+        {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:PutItem","dynamodb:Query","dynamodb:UpdateItem","dynamodb:DeleteItem","dynamodb:BatchGetItem","dynamodb:BatchWriteItem","dynamodb:ConditionCheckItem"],"Resource":"${FfugTable.Arn}","Condition":{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["ENV#$env#TENANT#$tenant","ENV#$env#TENANT#$tenant#*"]}}}]}
+
   # The identity ffug narrows FROM (PORTH-550 / PORTH-587). ffug's execution
   # role holds no data access of its own; it assumes this one per request with
   # an inline session policy naming the request's tenant, and the intersection
@@ -718,11 +769,13 @@ Resources:
           # rather than skipping the audience check.
           PORTH_SERVICE_ID: ffug
           PORTH_SERVICE_DATA_IDENTITY: !GetAtt FfugTenantRole.Arn
-          # Fetched by name as auth-session-policy/{name}, from the same
-          # documents the authorizer selects among — one place to change the
-          # narrowing rule rather than a copy that drifts (the defect entry 3
-          # of the EMS upgrade log describes).
-          PORTH_SERVICE_DATA_SCOPE: tenant-scoped-default
+          # Fetched by name as auth-session-policy/{name}. Derived from the
+          # parameter above rather than spelled again: !Ref on an SSM::Parameter
+          # returns its full name, and the provider wants only the last segment.
+          # Two literals that must agree is the exact shape the standing note in
+          # the EMS upgrade log is about — and the failure mode here is a
+          # NarrowingUnavailableError that reads like an unprovisioned tenant.
+          PORTH_SERVICE_DATA_SCOPE: !Select [4, !Split ["/", !Ref FfugSessionPolicy]]
           FFUG_TABLE_NAME: !Ref FfugTable
       # No Events — ffug is invoked directly (IAM/SigV4), never through a
       # public HTTP route. The internal plane is the whole point.
