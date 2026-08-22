@@ -118,6 +118,18 @@ def _active_projection(director: FfugDirector) -> dict[str, Any]:
         Key=keys.projection_key(environment, tenant_id)
     ).get("Item")
 
+    log.debug(
+        "ffug.projection tenant_id=%s found=%s status=%s has_salt=%s",
+        tenant_id,
+        row is not None,
+        (row or {}).get("status", "-"),
+        # PRESENCE, never the value. This repo's logs are world-readable
+        # (PORTH-533) and the standing rule is identifiers only — the salt is
+        # returned to the approver on purpose, and that is a different audience
+        # from a log line that outlives the request.
+        bool((row or {}).get("prime")),
+    )
+
     if row is None:
         raise FfugError(
             "tenant_not_provisioned",
@@ -181,11 +193,22 @@ def _op_hash(event: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
         raise FfugError("missing_payload", "payload is required for hash")
 
     prime = str(_active_projection(director)["prime"])
+    digest = salt.digest(prime, payload)
+    # Enough to correlate a screen against a log, and not enough to reconstruct
+    # anything: the digest PREFIX, and the canonical form's LENGTH rather than
+    # the canonical form. The payload is the caller's data and does not belong
+    # in a log that outlives the request.
+    log.debug(
+        "ffug.hashed tenant_id=%s canonical_bytes=%d digest=%s",
+        director.tenant_id,
+        len(salt.canonical(payload)),
+        digest[:12],
+    )
     return {
         "ok": True,
         "operation": "hash",
         "prime": prime,
-        "digest": salt.digest(prime, payload),
+        "digest": digest,
     }
 
 
@@ -361,6 +384,18 @@ def _op_isolation_probe(event: dict[str, Any], director: FfugDirector) -> dict[s
         role = None
         log.warning("ffug.probe could not resolve its own identity: %s", exc)
 
+    log.info(
+        "ffug.probe tenant_id=%s isolated=%s outcome=%s",
+        tenant_id,
+        all(a["pass"] for a in attempts),
+        # One token per attempt, in order, so a regression is visible in the log
+        # stream without opening the response body. A '!' is a probe that did
+        # not do what the boundary says it must.
+        " ".join(
+            f"{'ok' if a['pass'] else '!'}:{a['expect']}" for a in attempts
+        ),
+    )
+
     return {
         "ok": True,
         "operation": "isolation_probe",
@@ -412,10 +447,54 @@ def _build_director(event: dict[str, Any], context: Any) -> FfugDirector:
         raise FfugError("services_config_unreadable", str(exc)) from exc
 
 
+def _debug_identity(director: FfugDirector) -> None:
+    """At DEBUG only: who STS actually issued this request's session to.
+
+    The single most useful line when asking "is the narrowing real?" — it is
+    the assumed-role name, from the service that issued it, rather than
+    anything this code believes about itself. Behind a level check because it
+    costs a GetCallerIdentity per invocation, which a hot path should not pay
+    to reassure a reader.
+    """
+    if not log.isEnabledFor(logging.DEBUG):
+        return
+    try:
+        arn = director.client(IDENTITY_BROKER).get_caller_identity()["Arn"]
+        match = _ASSUMED_ROLE.search(arn)
+        log.debug("ffug.narrowed role=%s", match.group(1) if match else arn)
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must not fail a request
+        log.debug("ffug.narrowed role=? (%s)", exc)
+
+
 def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
     event = event or {}
     try:
+        # Before verification, so nothing here can be trusted and nothing here
+        # is claimed. Only the SHAPE of what arrived: which operation was asked
+        # for, and whether an envelope was present at all — which is the first
+        # thing you want when a call is being refused as unauthenticated.
+        log.debug(
+            "ffug.received operation=%s context_present=%s",
+            (event.get("operation") or "echo").strip(),
+            "porth_context" in event,
+        )
+
         director = _build_director(event, context)
+
+        # After verification, so every field here is a signed claim rather than
+        # something the caller asserted. The pairing with the line above is the
+        # point: what was sent, then what survived being checked.
+        log.debug(
+            "ffug.verified environment=%s tenant_id=%s source_service=%s "
+            "authenticated=%s internal=%s trace_id=%s",
+            director.environment,
+            director.tenant_id,
+            director.source_service or "-",
+            director.is_authenticated,
+            getattr(director, "is_internal_call", "?"),
+            director.trace_id or "-",
+        )
+        _debug_identity(director)
 
         if not director.is_authenticated:
             # No envelope at all, or one carrying no tenant. Refused rather than
