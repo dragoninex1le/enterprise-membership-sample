@@ -15,6 +15,7 @@ What is deliberately NOT faked: the refusal paths. Those are ffug's own logic
 and run for real.
 """
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -77,6 +78,7 @@ def porth(monkeypatch, table):
     class Controller:
         context = verified_context()
         table = None
+        store = None
 
         def arrives_as(self, **kwargs):
             self.context = verified_context(**kwargs)
@@ -100,8 +102,20 @@ def porth(monkeypatch, table):
     controller.table = table
 
     monkeypatch.setattr("porth_common.director.get_context", lambda _e: controller.context)
+    store = MagicMock(Table=lambda _n: table)
+    controller.store = store
+    monkeypatch.setattr(h.FfugDirector, "resource", lambda self, _capability: store)
+    # The identity broker, for the probe. Faked for the same reason as the
+    # resource above: what STS would answer is IAM's business, asserted against
+    # the template and witnessed live, not something a unit test should call.
     monkeypatch.setattr(
-        h.FfugDirector, "resource", lambda self, _capability: MagicMock(Table=lambda _n: table)
+        h.FfugDirector,
+        "client",
+        lambda self, _capability: MagicMock(
+            get_caller_identity=lambda: {
+                "Arn": "arn:aws:sts::1:assumed-role/ems-FfugTenantRole-ABC/porth-tenant"
+            }
+        ),
     )
     controller.tenant_is()
     return controller
@@ -307,3 +321,286 @@ def test_echo_requires_item_id_and_payload(porth, table):
 def test_unknown_op_is_refused(porth, table):
     assert err(h.handler({"operation": "delete_everything"})) == "unknown_op"
     assert not table.put_item.called
+
+
+# --- what the narrowed session can actually reach -----------------------------
+
+
+DENIED = Exception("AccessDeniedException: User is not authorized to perform this action")
+
+
+def attempt(result, needle):
+    """The probe row whose description contains *needle*.
+
+    By description, never by index. These were indexed until a fifth probe was
+    inserted in the middle: two assertions broke, and a third kept passing
+    against a different row that happened to expect the same outcome. A test
+    that survives by coincidence is worse than one that fails.
+    """
+    matches = [
+        a for a in result["attempts"]
+        if a["attempt"] == needle or needle in a["attempt"]
+    ]
+    exact = [a for a in matches if a["attempt"] == needle]
+    if exact:
+        # 'query ENV#…#TENANT#acme' is a substring of the sibling probe's
+        # 'query ENV#…#TENANT#acme-probe'. Prefer the exact row rather than
+        # making every caller invent a longer needle.
+        return exact[0]
+    assert len(matches) == 1, f"{needle!r} matched {len(matches)} attempts"
+    return matches[0]
+
+
+def narrowed_to(table, own_partition, store=None):
+    """Make the double behave the way a narrowed session does.
+
+    Not decoration. The earlier version of these tests let the double allow
+    every read, which made three of the four attempts "succeed" and the probe
+    report a breach it had invented. A fake that is more permissive than IAM
+    tests nothing; this one refuses exactly what LeadingKeys refuses — any
+    partition that is not the one the envelope named — and denies Scan outright
+    because ffug is granted none.
+    """
+    table.scan.side_effect = DENIED
+
+    def query(**kwargs):
+        if kwargs["ExpressionAttributeValues"][":pk"] != own_partition:
+            raise DENIED
+        return {"Items": [], "Count": 0}
+
+    table.query.side_effect = query
+
+    def batch_get_item(*, RequestItems):
+        # ForAllValues over every key in the batch: one foreign key refuses the
+        # whole request. Modelled rather than assumed, because "the batch came
+        # back with only my rows" is the outcome IAM does NOT produce and a
+        # lenient double would invent it.
+        for spec in RequestItems.values():
+            for key in spec["Keys"]:
+                if key["pk"] != own_partition:
+                    raise DENIED
+        return {"Responses": {}}
+
+    if store is not None:
+        store.batch_get_item = batch_get_item
+
+
+def test_the_probe_names_no_tenant_and_asks_only_about_its_own(porth, table):
+    """The question behind the whole fixture, asked the strict way.
+
+    The probe payload is empty — there is no tenant field, and adding one would
+    change nothing because the handler does not read one. Every partition it
+    queries is derived from the envelope, so a caller cannot aim this at anyone.
+    """
+    porth.arrives_as(tenant_id="globex")
+    narrowed_to(table, "ENV#prod#TENANT#globex", porth.store)
+
+    result = h.handler({"operation": "isolation_probe"})
+
+    assert result["tenant_id"] == "globex"
+    queried = [
+        call[1]["ExpressionAttributeValues"][":pk"] for call in table.query.call_args_list
+    ]
+    assert queried == [
+        "ENV#prod#TENANT#globex",
+        "ENV#prod#TENANT#__isolation_probe__",
+        "ENV#prod#TENANT#globex-probe",
+        "ENV#__isolation_probe__#TENANT#globex",
+    ]
+
+
+def test_a_scan_is_expected_to_be_refused_not_filtered(porth, table):
+    """The answer to "what do you get if we just scan the table?".
+
+    Nothing — the attempt is refused outright, and that is the intended result
+    rather than a gap. dynamodb:LeadingKeys binds to the key of the item being
+    accessed and a scan names none, so the condition passes vacuously; a scan
+    granted under it returns every tenant's rows. The isolation is that the
+    question cannot be asked.
+    """
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
+
+    result = h.handler({"operation": "isolation_probe"})
+    scan = attempt(result, "scan the whole table")
+
+    assert scan["expect"] == "deny"
+    assert scan["allowed"] is False
+    assert scan["detail"] == "refused by IAM"
+    assert result["isolated"] is True
+
+
+def test_a_scan_that_succeeds_is_a_breach_and_says_how_wide(porth, table):
+    """The guard on the test above, and the one that matters if Scan is ever
+    granted "just for diagnostics".
+
+    A scan does not fail loudly when it is wrongly permitted — it succeeds, and
+    the damage is only visible in what came back. So the count of DISTINCT
+    tenant partitions is carried on the result and the panel turns red on it.
+    """
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
+    table.scan.side_effect = None
+    table.scan.return_value = {
+        "Items": [
+            {"pk": "ENV#prod#TENANT#acme", "sk": "PROJECTION"},
+            {"pk": "ENV#prod#TENANT#globex", "sk": "PROJECTION"},
+        ],
+        "Count": 2,
+    }
+
+    result = h.handler({"operation": "isolation_probe"})
+    scan = attempt(result, "scan the whole table")
+
+    assert scan["allowed"] is True
+    assert scan["partitions_seen"] == 2
+    assert scan["pass"] is False
+    assert result["isolated"] is False
+
+
+def test_the_probe_reports_iam_not_provisioning(porth, table):
+    """An unannounced tenant must not read as an isolation failure.
+
+    ``_active_projection`` is deliberately not called: the probe answers what
+    the credentials permit, and a tenant whose bus event has not arrived should
+    see its own partition allowed and empty. Conflating the two is how an
+    empty projection came to look like a broken consumer in the first place.
+    """
+    porth.tenant_is_unknown()
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
+
+    result = h.handler({"operation": "isolation_probe"})
+
+    assert result["ok"] is True
+    assert result["isolated"] is True
+    assert attempt(result, "query ENV#prod#TENANT#acme")["allowed"] is True
+
+
+def test_the_probe_writes_nothing(porth, table):
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
+
+    h.handler({"operation": "isolation_probe"})
+
+    assert not table.put_item.called
+    assert not table.delete_item.called
+
+
+def test_one_foreign_key_in_a_batch_refuses_the_whole_request(porth, table):
+    """The Director test at its sharpest.
+
+    Two separate queries differ in their whole request. These differ in ONE
+    key, and FfugTenantRole's ceiling allows ENV#*#TENANT#* — every tenant — so
+    an unnarrowed or wrongly-narrowed session would be allowed both. The
+    refusal is attributable to the session policy and to nothing else.
+    """
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
+
+    batch = attempt(h.handler({"operation": "isolation_probe"}), "batch-get")
+
+    assert batch["allowed"] is False
+    assert batch["detail"] == "refused by IAM"
+    assert batch["pass"] is True
+
+
+def test_a_batch_that_answers_partially_fails_the_probe(porth, table):
+    """IAM refuses the request; it does not quietly return the readable half.
+
+    A result carrying only this tenant's row would mean something OTHER than
+    IAM did the filtering — application code, or a policy that bound nothing —
+    and that is exactly the comfortable-looking outcome this probe exists to
+    catch. Also covers the Responses/{table} shape, which reports zero rows if
+    it is read as though it were a Query.
+    """
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
+    porth.store.batch_get_item = lambda **_: {
+        "Responses": {"porth-ffug-dev": [{"pk": "ENV#prod#TENANT#acme", "sk": "PROJECTION"}]}
+    }
+
+    result = h.handler({"operation": "isolation_probe"})
+    batch = attempt(result, "batch-get")
+
+    assert batch["allowed"] is True
+    assert batch["partitions_seen"] == 1
+    assert batch["pass"] is False
+    assert result["isolated"] is False
+
+
+def test_a_prefix_extension_of_this_tenant_is_refused(porth, table):
+    """'acme' must not reach 'acme-staging'.
+
+    A LeadingKeys pattern written TENANT#$tenant* rather than the exact key
+    plus TENANT#$tenant#* admits exactly this, and PORTH-593 found that fault
+    in Porth's own policy — so it is a regression probe, not a hypothetical.
+    """
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
+
+    sibling = attempt(h.handler({"operation": "isolation_probe"}), "acme-probe")
+
+    assert sibling["expect"] == "deny"
+    assert sibling["allowed"] is False
+
+
+def test_a_named_real_tenant_is_probed_and_refused(porth, table):
+    """The negative test aimed at a partition that actually holds data.
+
+    Every other refusal here targets a tenant invented for the purpose. IAM
+    denies on the key before consulting data, so those are honest — but they
+    cannot tell a reader "refused" from "empty anyway". Naming a real tenant
+    can.
+    """
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
+
+    result = h.handler({"operation": "isolation_probe", "probe_tenant": "globex"})
+    named = attempt(result, "a real tenant")
+
+    assert result["probe_tenant"] == "globex"
+    assert named["attempt"].startswith("query ENV#prod#TENANT#globex")
+    assert named["allowed"] is False
+    assert result["isolated"] is True
+
+
+def test_naming_your_own_tenant_adds_no_probe(porth, table):
+    """It would assert 'deny' against the one partition that must be allowed,
+    and fail the whole strip on a typo."""
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
+
+    result = h.handler({"operation": "isolation_probe", "probe_tenant": "acme"})
+
+    assert not [a for a in result["attempts"] if "a real tenant" in a["attempt"]]
+    assert result["isolated"] is True
+
+
+def test_the_probe_never_returns_rows_only_counts(porth, table):
+    """If isolation IS broken, this endpoint must not become the reader.
+
+    Every attempt reports an outcome, a row count and a count of distinct
+    tenant partitions. No item body is carried, so even the failing case
+    reports the breach without widening it.
+    """
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
+    table.query.side_effect = None
+    table.query.return_value = {
+        "Items": [{"pk": "ENV#prod#TENANT#globex", "sk": "PROJECTION", "prime": "7"}],
+        "Count": 1,
+    }
+
+    result = h.handler({"operation": "isolation_probe", "probe_tenant": "globex"})
+
+    assert "7" not in json.dumps(result)
+    assert "prime" not in json.dumps(result)
+    assert result["isolated"] is False
+
+
+def test_everything_denied_is_a_failure_not_a_clean_sweep(porth, table):
+    """The vacuous-pass guard.
+
+    Five of the six rows pass BY being refused, so a wrong table name, a broken
+    role or no narrowing at all would render as a perfect score. The allow row
+    is what stops that, and this is the test that keeps it load-bearing.
+    """
+    table.scan.side_effect = DENIED
+    table.query.side_effect = DENIED
+    porth.store.batch_get_item = MagicMock(side_effect=DENIED)
+
+    result = h.handler({"operation": "isolation_probe"})
+
+    assert result["isolated"] is False
+    assert attempt(result, "query ENV#prod#TENANT#acme")["pass"] is False
