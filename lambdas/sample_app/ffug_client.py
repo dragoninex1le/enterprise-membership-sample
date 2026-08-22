@@ -1,60 +1,45 @@
 """Ask ffug to fingerprint a document for this request's tenant (PORTH-599).
 
-The one place this app crosses onto Porth's internal plane, and it is worth
-being precise about what travels:
+Thin on purpose. Everything about *how* a service is reached belongs to
+:class:`porth_common.internal_plane.client.ServiceClient`, and this module's
+only job is to name the service, the operation, and what is being hashed.
 
-**The tenant does not.** It is not a parameter here and there is no way to pass
-one. It rides inside a KMS-signed context envelope built by the Director, which
-got it from Porth's own resolution of the caller — so ffug learns which tenant
-this is from a signature it verifies, not from anything this app asserts. That
-is ADR-Z11's rule stated as code: *context propagates, credentials never do.*
+An earlier version of this file built its own Lambda client and invoked ffug
+directly. It worked, and it quietly gave up four things the sanctioned client
+holds — the reason `scripts/check_service_calls.py` fails Porth's build on
+exactly that shape:
 
-**Credentials do not either.** The invoke itself is plain IAM on this function's
-execution role. ffug then narrows ITS own credentials to the tenant in the
-verified envelope. Two services, two narrowings, one context — and at no point
-does one service hand the other something it could act with.
+* **the endpoint map.** A hand-rolled invoke hard-codes a transport and an
+  address at the call site, so it cannot follow ``/porth/{branch}/service-endpoints``
+  and only ever works in-install. The same ``call()`` works from a laptop
+  against the deployed service, because that difference is configuration.
+* **the retry rule.** botocore fixes retry behaviour at client construction, so
+  the default client silently retries. ``idempotent=`` is the caller's explicit
+  assertion, and the client keeps two clients so a non-idempotent operation is
+  genuinely attempted once rather than merely not looped over.
+* **the payload ceiling.** Refused at a stated limit instead of succeeding at
+  200 KB and failing unpredictably nearer the platform's.
+* **caller-side status.** The D3 registry is consulted BEFORE a transport is
+  chosen, so a suspended service refuses at both ends rather than only at the
+  receiver.
 
-What comes back is `SHA256(prime : document)`, where the prime was minted for
-this tenant by ffug's bus consumer on `tenant.created` and can be read by
-nothing else. Two tenants approving identical documents get different
-fingerprints, and neither could produce the other's: ffug serving tenant A holds
-a session that cannot read B's prime.
+What travels is unchanged and is the point. The tenant is not a parameter here
+and there is no way to pass one: it rides in a KMS-signed envelope the client
+builds from the Director, which got it from Porth's own resolution of the
+caller. The invoke itself is plain IAM. *Context propagates, credentials never
+do.*
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 from typing import Any
 
-import boto3
+from porth_common.internal_plane.client import ServiceClient, ServiceCallError
 
 log = logging.getLogger(__name__)
 
-FFUG_FUNCTION_ARN = os.environ.get("FFUG_FUNCTION_ARN", "")
-
-#: This app's registered identity on the D3 service registry. ffug validates it
-#: against `/porth/{branch}/services` and refuses an unregistered caller, so
-#: this string is not decoration — a name nobody registered is a refused call.
-SOURCE_SERVICE = "sample-app"
-AUDIENCE = "ffug"
-
-_lambda = None
-
-
-def _client():
-    """Module-level handle, built once per warm container.
-
-    Deliberately NOT `director.client(...)`. The Director's connections are
-    built from credentials narrowed to one tenant's DynamoDB partition; they
-    grant no Lambda invoke and never should. Being allowed to call ffug is a
-    property of this FUNCTION, not of the tenant whose request it is serving.
-    """
-    global _lambda
-    if _lambda is None:
-        _lambda = boto3.client("lambda")
-    return _lambda
+FFUG_SERVICE_ID = "ffug"
 
 
 class FingerprintUnavailable(Exception):
@@ -64,46 +49,33 @@ class FingerprintUnavailable(Exception):
 def fingerprint(director, document: dict[str, Any]) -> dict[str, str]:
     """Return ``{"prime": …, "digest": …}`` for *document* under this tenant.
 
+    ``idempotent=True`` is an honest assertion rather than a convenience:
+    hashing has no side effect, the same document under the same tenant yields
+    the same digest, and a repeat costs nothing. Defaulting to False here would
+    disable retries on an operation that is safe to repeat.
+
     Raises :class:`FingerprintUnavailable` with ffug's own reason. The caller
     decides what that means; approving a real invoice should not fail because a
     fixture service is unreachable, but the failure must be visible rather than
     swallowed into a blank field.
     """
-    if not FFUG_FUNCTION_ARN:
-        raise FingerprintUnavailable("FFUG_FUNCTION_ARN is not set on this function")
-
-    # The only sanctioned way to produce one. The tenant comes from THIS
-    # Director, which is bound to a validated tenant, so no call site can pass a
-    # tenant of its choosing — the property TS-MC.1 fails a build over.
-    envelope = director.build_context_envelope(
-        source_service=SOURCE_SERVICE,
-        audience=AUDIENCE,
-        trace_id=getattr(director, "trace_id", None) or None,
-    )
-
-    payload = {
-        "porth_context": envelope.to_payload_field(),
-        "op": "hash",
-        "payload": document,
-    }
-
     try:
-        response = _client().invoke(
-            FunctionName=FFUG_FUNCTION_ARN,
-            Payload=json.dumps(payload).encode("utf-8"),
+        body = ServiceClient(director).call(
+            FFUG_SERVICE_ID,
+            "hash",
+            document,
+            idempotent=True,
+            trace_id=getattr(director, "trace_id", None) or None,
         )
-    except Exception as exc:  # noqa: BLE001
-        raise FingerprintUnavailable(f"could not invoke ffug: {exc}") from exc
+    except ServiceCallError as exc:
+        # One family for every way the plane can fail: unregistered, suspended,
+        # unreachable, oversized, or the callee raising. Rendered to the
+        # approver as-is, because "approved but not fingerprinted — <this>" is
+        # more use than a generic apology.
+        raise FingerprintUnavailable(str(exc)) from exc
 
-    if response.get("FunctionError"):
-        # An unhandled error inside ffug is an infrastructure fault — most
-        # likely its STS narrowing — and is not something to render as a
-        # business outcome.
-        raise FingerprintUnavailable("ffug raised; see its log group")
-
-    body = json.loads(response["Payload"].read())
-    if not body.get("ok"):
-        error = body.get("error", {})
+    if not isinstance(body, dict) or not body.get("ok"):
+        error = (body or {}).get("error", {}) if isinstance(body, dict) else {}
         raise FingerprintUnavailable(
             f"{error.get('code', 'refused')}: {error.get('message', '')}"
         )
@@ -112,6 +84,6 @@ def fingerprint(director, document: dict[str, Any]) -> dict[str, str]:
     # document is this tenant's data and does not belong in a log line.
     log.info(
         "sample_app.fingerprint tenant_id=%s digest=%s",
-        director.tenant_id, body["digest"][:12],
+        director.tenant_id, str(body["digest"])[:12],
     )
-    return {"prime": str(body["prime"]), "digest": body["digest"]}
+    return {"prime": str(body["prime"]), "digest": str(body["digest"])}

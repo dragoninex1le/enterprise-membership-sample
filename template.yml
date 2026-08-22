@@ -452,7 +452,11 @@ Resources:
           PORTH_SERVICE_ID: sample-app
           PORTH_BRANCH: !Ref PorthBranch
           PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
-          FFUG_FUNCTION_ARN: !GetAtt FfugFunction.Arn
+          # No FFUG_FUNCTION_ARN. Where ffug lives is resolved from the endpoint
+          # map at /porth/{branch}/service-endpoints, which is the whole point of
+          # D7.4 — an address at the call site is an address that cannot follow
+          # configuration. The IAM grant below still names the ARN, because a
+          # permission has to name a resource; the CALLER does not.
       # PORTH-586: NO DynamoDBCrudPolicy on this table, deliberately.
       #
       # This function serves authorized requests, and every one of them arrives
