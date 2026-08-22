@@ -220,7 +220,17 @@ def _attempt(description: str, expect: str, call) -> dict[str, Any]:
         )
         outcome["partitions_seen"] = 0
     else:
-        items = result.get("Items", [])
+        items = result.get("Items")
+        if items is None:
+            # BatchGetItem answers under Responses/{table}, not Items. Normalised
+            # here so partitions_seen means the same thing on every attempt —
+            # a probe whose headline number is only populated for some of its
+            # rows reports "0 partitions" for a read that returned plenty.
+            items = [
+                row
+                for rows in (result.get("Responses") or {}).values()
+                for row in rows
+            ]
         outcome["allowed"] = True
         outcome["partitions_seen"] = len({str(item.get("pk", "")) for item in items})
         outcome["detail"] = f"{result.get('Count', len(items))} row(s)"
@@ -245,9 +255,24 @@ def _op_isolation_probe(event: dict[str, Any], director: FfugDirector) -> dict[s
 
     So ffug is granted no Scan at all, and the first attempt below is expected to
     be REFUSED. That is the stronger result: not "you asked for everything and
-    were handed your own share", but "you cannot ask the question". The three
-    queries that follow show the boundary from the other side — this tenant's
-    partition readable, a foreign tenant and a foreign environment refused.
+    were handed your own share", but "you cannot ask the question".
+
+    **What the scan does NOT settle, stated plainly.** It says nothing about the
+    Director. Denied, it is denied by the role's action list whether the Director
+    narrowed well, badly, or not at all; granted, it would return every tenant
+    either way. A scan is blind to narrowing in both directions.
+
+    What isolates the Director's contribution is attempt 3. FfugTenantRole's
+    ceiling permits ENV#*#TENANT#* — EVERY tenant — so a session that was not
+    narrowed, or narrowed to the wrong tenant, would be ALLOWED to read a
+    foreign partition. The denial there is attributable to the session policy
+    and to nothing else, which makes it the Director test.
+
+    Attempt 5 is that same test at its sharpest: one BatchGetItem carrying this
+    tenant's key AND a foreign one. Two separate queries differ in their whole
+    request; these differ in one key. DynamoDB evaluates LeadingKeys over every
+    key in the batch (ForAllValues), so the presence of the foreign key alone
+    decides it, and a partial answer is not a possible outcome.
 
     ``_active_projection`` is deliberately NOT called first. This probe reports
     on IAM, and a tenant whose bus event has not arrived should see its own
@@ -268,11 +293,30 @@ def _op_isolation_probe(event: dict[str, Any], director: FfugDirector) -> dict[s
     foreign_tenant = keys.partition(environment, FOREIGN)
     foreign_env = keys.partition(FOREIGN, tenant_id)
 
+    store = director.resource(DOCUMENT_STORE)
+
+    def batch_own_plus_foreign():
+        return store.batch_get_item(
+            RequestItems={
+                TABLE_NAME: {
+                    "Keys": [
+                        keys.projection_key(environment, tenant_id),
+                        keys.projection_key(environment, FOREIGN),
+                    ]
+                }
+            }
+        )
+
     attempts = [
-        _attempt("scan the whole table", "deny", lambda: table.scan(Limit=25)),
+        _attempt("scan the whole table, no filter", "deny", lambda: table.scan(Limit=25)),
         _attempt(f"query {own}", "allow", query(own)),
         _attempt(f"query {foreign_tenant}", "deny", query(foreign_tenant)),
         _attempt(f"query {foreign_env}", "deny", query(foreign_env)),
+        _attempt(
+            "batch-get this tenant AND a foreign one in ONE request",
+            "deny",
+            batch_own_plus_foreign,
+        ),
     ]
 
     # The role STS actually issued, asked through the same narrowed credentials

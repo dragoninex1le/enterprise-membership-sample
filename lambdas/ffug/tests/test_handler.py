@@ -77,6 +77,7 @@ def porth(monkeypatch, table):
     class Controller:
         context = verified_context()
         table = None
+        store = None
 
         def arrives_as(self, **kwargs):
             self.context = verified_context(**kwargs)
@@ -100,9 +101,9 @@ def porth(monkeypatch, table):
     controller.table = table
 
     monkeypatch.setattr("porth_common.director.get_context", lambda _e: controller.context)
-    monkeypatch.setattr(
-        h.FfugDirector, "resource", lambda self, _capability: MagicMock(Table=lambda _n: table)
-    )
+    store = MagicMock(Table=lambda _n: table)
+    controller.store = store
+    monkeypatch.setattr(h.FfugDirector, "resource", lambda self, _capability: store)
     # The identity broker, for the probe. Faked for the same reason as the
     # resource above: what STS would answer is IAM's business, asserted against
     # the template and witnessed live, not something a unit test should call.
@@ -327,7 +328,7 @@ def test_unknown_op_is_refused(porth, table):
 DENIED = Exception("AccessDeniedException: User is not authorized to perform this action")
 
 
-def narrowed_to(table, own_partition):
+def narrowed_to(table, own_partition, store=None):
     """Make the double behave the way a narrowed session does.
 
     Not decoration. The earlier version of these tests let the double allow
@@ -346,6 +347,20 @@ def narrowed_to(table, own_partition):
 
     table.query.side_effect = query
 
+    def batch_get_item(*, RequestItems):
+        # ForAllValues over every key in the batch: one foreign key refuses the
+        # whole request. Modelled rather than assumed, because "the batch came
+        # back with only my rows" is the outcome IAM does NOT produce and a
+        # lenient double would invent it.
+        for spec in RequestItems.values():
+            for key in spec["Keys"]:
+                if key["pk"] != own_partition:
+                    raise DENIED
+        return {"Responses": {}}
+
+    if store is not None:
+        store.batch_get_item = batch_get_item
+
 
 def test_the_probe_names_no_tenant_and_asks_only_about_its_own(porth, table):
     """The question behind the whole fixture, asked the strict way.
@@ -355,7 +370,7 @@ def test_the_probe_names_no_tenant_and_asks_only_about_its_own(porth, table):
     queries is derived from the envelope, so a caller cannot aim this at anyone.
     """
     porth.arrives_as(tenant_id="globex")
-    narrowed_to(table, "ENV#prod#TENANT#globex")
+    narrowed_to(table, "ENV#prod#TENANT#globex", porth.store)
 
     result = h.handler({"operation": "isolation_probe"})
 
@@ -379,7 +394,7 @@ def test_a_scan_is_expected_to_be_refused_not_filtered(porth, table):
     granted under it returns every tenant's rows. The isolation is that the
     question cannot be asked.
     """
-    narrowed_to(table, "ENV#prod#TENANT#acme")
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
 
     result = h.handler({"operation": "isolation_probe"})
     scan = result["attempts"][0]
@@ -398,7 +413,7 @@ def test_a_scan_that_succeeds_is_a_breach_and_says_how_wide(porth, table):
     the damage is only visible in what came back. So the count of DISTINCT
     tenant partitions is carried on the result and the panel turns red on it.
     """
-    narrowed_to(table, "ENV#prod#TENANT#acme")
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
     table.scan.side_effect = None
     table.scan.return_value = {
         "Items": [
@@ -426,7 +441,7 @@ def test_the_probe_reports_iam_not_provisioning(porth, table):
     empty projection came to look like a broken consumer in the first place.
     """
     porth.tenant_is_unknown()
-    narrowed_to(table, "ENV#prod#TENANT#acme")
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
 
     result = h.handler({"operation": "isolation_probe"})
 
@@ -436,9 +451,49 @@ def test_the_probe_reports_iam_not_provisioning(porth, table):
 
 
 def test_the_probe_writes_nothing(porth, table):
-    narrowed_to(table, "ENV#prod#TENANT#acme")
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
 
     h.handler({"operation": "isolation_probe"})
 
     assert not table.put_item.called
     assert not table.delete_item.called
+
+
+def test_one_foreign_key_in_a_batch_refuses_the_whole_request(porth, table):
+    """The Director test at its sharpest.
+
+    Two separate queries differ in their whole request. These differ in ONE
+    key, and FfugTenantRole's ceiling allows ENV#*#TENANT#* — every tenant — so
+    an unnarrowed or wrongly-narrowed session would be allowed both. The
+    refusal is attributable to the session policy and to nothing else.
+    """
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
+
+    batch = h.handler({"operation": "isolation_probe"})["attempts"][4]
+
+    assert batch["allowed"] is False
+    assert batch["detail"] == "refused by IAM"
+    assert batch["pass"] is True
+
+
+def test_a_batch_that_answers_partially_fails_the_probe(porth, table):
+    """IAM refuses the request; it does not quietly return the readable half.
+
+    A result carrying only this tenant's row would mean something OTHER than
+    IAM did the filtering — application code, or a policy that bound nothing —
+    and that is exactly the comfortable-looking outcome this probe exists to
+    catch. Also covers the Responses/{table} shape, which reports zero rows if
+    it is read as though it were a Query.
+    """
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
+    porth.store.batch_get_item = lambda **_: {
+        "Responses": {"porth-ffug-dev": [{"pk": "ENV#prod#TENANT#acme", "sk": "PROJECTION"}]}
+    }
+
+    result = h.handler({"operation": "isolation_probe"})
+    batch = result["attempts"][4]
+
+    assert batch["allowed"] is True
+    assert batch["partitions_seen"] == 1
+    assert batch["pass"] is False
+    assert result["isolated"] is False
