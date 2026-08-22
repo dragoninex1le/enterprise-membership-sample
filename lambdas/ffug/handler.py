@@ -292,6 +292,12 @@ def _op_isolation_probe(event: dict[str, Any], director: FfugDirector) -> dict[s
     own = keys.partition(environment, tenant_id)
     foreign_tenant = keys.partition(environment, FOREIGN)
     foreign_env = keys.partition(FOREIGN, tenant_id)
+    # The prefix-extension hole, specifically. A LeadingKeys pattern written
+    # TENANT#$tenant* rather than the exact key plus TENANT#$tenant#* admits
+    # this, and 'acme' reaches 'acme-staging'. Not hypothetical: PORTH-593
+    # found exactly that in Porth's own policy. Denied here means the pattern
+    # is the strict pair rather than a prefix.
+    sibling = f"{own}-probe"
 
     store = director.resource(DOCUMENT_STORE)
 
@@ -309,8 +315,13 @@ def _op_isolation_probe(event: dict[str, Any], director: FfugDirector) -> dict[s
 
     attempts = [
         _attempt("scan the whole table, no filter", "deny", lambda: table.scan(Limit=25)),
+        # The POSITIVE control, and it is load-bearing. Every other row here
+        # passes by being refused, so a fault that denied everything — a wrong
+        # table name, a broken role, no narrowing at all — would render as a
+        # clean sweep. This row is what stops the suite passing vacuously.
         _attempt(f"query {own}", "allow", query(own)),
         _attempt(f"query {foreign_tenant}", "deny", query(foreign_tenant)),
+        _attempt(f"query {sibling}", "deny", query(sibling)),
         _attempt(f"query {foreign_env}", "deny", query(foreign_env)),
         _attempt(
             "batch-get this tenant AND a foreign one in ONE request",
@@ -318,6 +329,25 @@ def _op_isolation_probe(event: dict[str, Any], director: FfugDirector) -> dict[s
             batch_own_plus_foreign,
         ),
     ]
+
+    # A partition that REALLY EXISTS, named by the caller (PORTH-598).
+    #
+    # Every probe above aims at a tenant invented for the purpose, so a refusal
+    # is honest but answers a slightly weaker question — IAM refuses on the key
+    # before consulting data, so an empty partition and a full one deny
+    # identically. That is the correct mechanism and it is also why the rows
+    # above cannot distinguish "refused" from "there was nothing there anyway"
+    # to someone reading the screen.
+    #
+    # Naming a real tenant closes that. It is safe to let the caller choose:
+    # the value scopes NOTHING — the Director's tenant still comes from the
+    # signed envelope, and this string only builds a partition we assert must
+    # be refused. Nor does a broken install turn this into a reader: the result
+    # carries counts, never rows.
+    probe_tenant = (event.get("probe_tenant") or "").strip()
+    if probe_tenant and probe_tenant != tenant_id:
+        named = keys.partition(environment, probe_tenant)
+        attempts.append(_attempt(f"query {named} (a real tenant)", "deny", query(named)))
 
     # The role STS actually issued, asked through the same narrowed credentials
     # everything else here uses. A client built from the ambient identity would
@@ -337,6 +367,7 @@ def _op_isolation_probe(event: dict[str, Any], director: FfugDirector) -> dict[s
         "table": TABLE_NAME,
         "environment": environment,
         "tenant_id": tenant_id,
+        "probe_tenant": probe_tenant or None,
         "role": role,
         "attempts": attempts,
         # Every attempt, not the readable one. A successful read of your own

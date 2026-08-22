@@ -65,7 +65,9 @@ def _read(table, partition: str) -> tuple[bool, str]:
 
 
 @router.get("/identity")
-def identity(director: SampleAppDirector = Depends(porth)) -> dict:
+def identity(
+    probe_tenant: str = "", director: SampleAppDirector = Depends(porth)
+) -> dict:
     tenant = director.tenant_id
     result: dict = {
         "tenant_id": tenant,
@@ -146,5 +148,5 @@ def identity(director: SampleAppDirector = Depends(porth)) -> dict:
     # Nothing about the tenant is sent. ffug takes it from the envelope, which
     # is why the panel can claim the caller could not have asked about anyone
     # else: there is no field in which to have asked.
-    result["ffug"] = isolation_probe(director)
+    result["ffug"] = isolation_probe(director, probe_tenant)
     return result

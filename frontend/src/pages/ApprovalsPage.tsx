@@ -70,6 +70,7 @@ interface FfugProbe {
   table?: string
   environment?: string
   tenant_id?: string
+  probe_tenant?: string | null
   role?: string | null
   attempts?: Attempt[]
   isolated?: boolean
@@ -146,7 +147,14 @@ function IdentityStrip({ identity }: { identity: Identity | null }) {
 // condition would pass vacuously and hand back EVERY tenant's rows. A scan
 // cannot be narrowed. So ffug is granted none, and the proof is that it cannot
 // ask the question rather than that it asked and was given only its share.
-function FfugStrip({ ffug }: { ffug?: FfugProbe }) {
+function FfugStrip({
+  ffug,
+  onProbe,
+}: {
+  ffug?: FfugProbe
+  onProbe: (tenant: string) => void
+}) {
+  const [named, setNamed] = useState('')
   if (!ffug) return null
   if (!ffug.ok) {
     return (
@@ -193,7 +201,32 @@ function FfugStrip({ ffug }: { ffug?: FfugProbe }) {
       <div className="mt-1">
         {ok
           ? 'ffug cannot scan its own table at all, and can query only the partition its envelope names. Nothing in the call said which tenant \u2014 there is no field in which it could have.'
-          : 'NOT isolated \u2014 a read that should have been refused was allowed. If the scan row is green, check how many tenant partitions it returned.'}
+          : 'NOT isolated \u2014 a read that should have been refused was allowed, or ffug\u2019s own partition was not readable. Check the row that failed.'}
+      </div>
+      {/* The refusals above all target a tenant invented for the purpose. IAM
+          denies on the key before consulting data, so they are honest, but they
+          cannot show a reader the difference between "refused" and "empty
+          anyway". Naming a tenant that really exists can. The value scopes
+          nothing: ffug still takes the tenant it SERVES from the envelope, and
+          this only builds a partition the probe asserts must be refused. */}
+      <div className="mt-2 flex items-center gap-2">
+        <span className="text-gray-500">Refuse me a real tenant:</span>
+        <input
+          value={named}
+          onChange={e => setNamed(e.target.value)}
+          placeholder="another tenant id"
+          className="rounded border border-gray-300 px-1.5 py-0.5 font-mono text-[11px]"
+        />
+        <button
+          onClick={() => onProbe(named.trim())}
+          disabled={!named.trim()}
+          className="rounded bg-gray-200 px-2 py-0.5 text-[11px] font-medium text-gray-800 hover:bg-gray-300 disabled:opacity-40"
+        >
+          Try to read it
+        </button>
+        {ffug.probe_tenant && (
+          <span className="text-gray-500">last probed {ffug.probe_tenant}</span>
+        )}
       </div>
     </div>
   )
@@ -269,13 +302,19 @@ export default function ApprovalsPage() {
       .catch(err => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false))
 
-    // Best effort, and deliberately not awaited with the list: a diagnostic
-    // that can break the page it diagnoses is worse than no diagnostic.
+    loadIdentity()
+  }, [currentUser])
+
+  // Best effort, and deliberately not awaited with the list: a diagnostic that
+  // can break the page it diagnoses is worse than no diagnostic.
+  function loadIdentity(probeTenant = '') {
     sampleApiClient
-      .get<Identity>('/sample/diagnostics/identity')
+      .get<Identity>('/sample/diagnostics/identity', {
+        params: probeTenant ? { probe_tenant: probeTenant } : undefined,
+      })
       .then(r => setIdentity(r.data))
       .catch(() => setIdentity(null))
-  }, [currentUser])
+  }
 
   function handleAction(appr: Approval, action: 'approve' | 'reject') {
     const recordId = appr.record_id
@@ -304,7 +343,7 @@ export default function ApprovalsPage() {
     <div>
       <h1 className="text-2xl font-bold text-gray-900 mb-1">Approvals</h1>
       <IdentityStrip identity={identity} />
-      <FfugStrip ffug={identity?.ffug} />
+      <FfugStrip ffug={identity?.ffug} onProbe={loadIdentity} />
       <p className="text-sm text-gray-500 mb-6">Review and approve/reject transactions — Controllers only</p>
 
       {error && (

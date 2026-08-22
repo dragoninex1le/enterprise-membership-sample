@@ -93,23 +93,27 @@ def fingerprint(director, document: dict[str, Any]) -> dict[str, str]:
     return {"prime": str(body["prime"]), "digest": str(body["digest"])}
 
 
-def isolation_probe(director) -> dict[str, Any]:
+def isolation_probe(director, probe_tenant: str = "") -> dict[str, Any]:
     """Ask ffug what its OWN narrowed session can reach in its OWN table.
 
     Never raises. This feeds a diagnostics panel whose job is to explain why
     things are broken, so a failure has to arrive as something renderable — an
     endpoint that 500s in the situation it exists to describe is no use.
 
-    Note what is not sent: no tenant, and no partition. There is no field for
-    either. ffug takes both from the signed envelope this call carries, which is
-    the property being demonstrated — the caller cannot ask about a tenant, only
-    about itself.
+    Note what is not sent: the tenant ffug SERVES. There is no field for it —
+    ffug takes it from the signed envelope this call carries, which is the
+    property being demonstrated.
+
+    ``probe_tenant`` is a different thing and is safe to let the caller choose:
+    it scopes nothing, and only names a partition the probe asserts must be
+    REFUSED. Its point is to aim a refusal at a tenant that really exists, so
+    the denial cannot be read as "there was nothing there anyway".
     """
     try:
         body = ServiceClient(director).call(
             FFUG_SERVICE_ID,
             "isolation_probe",
-            {},
+            {"probe_tenant": probe_tenant} if probe_tenant else {},
             idempotent=True,
             trace_id=getattr(director, "trace_id", None) or None,
         )
