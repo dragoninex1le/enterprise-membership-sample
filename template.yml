@@ -56,6 +56,24 @@ Parameters:
       function and cannot appear in a trust policy. Resolved from the Porth
       stack by deploy.yml.
 
+  FfugLogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+    Description: >-
+      PORTH-605 — how much ffug says about its own working. INFO carries the
+      served/probe verdicts; DEBUG adds what arrived, what survived
+      verification, which role STS issued the session to, whether the tenant's
+      projection was found, and the digest prefix.
+
+      A stack parameter rather than a code change so a demonstration can be
+      turned up and back down without a commit. Left at INFO because DEBUG
+      costs a GetCallerIdentity per invocation.
+
+      No level makes ffug log a salt, a payload body or a token — this repo's
+      logs are world-readable (PORTH-533) and that rule is asserted by a test,
+      not left to the level.
+
   PorthEnvSlot:
     Type: String
     Default: prod
@@ -822,6 +840,7 @@ Resources:
           # NarrowingUnavailableError that reads like an unprovisioned tenant.
           PORTH_SERVICE_DATA_SCOPE: !Select [4, !Split ["/", !Ref FfugSessionPolicy]]
           FFUG_TABLE_NAME: !Ref FfugTable
+          FFUG_LOG_LEVEL: !Ref FfugLogLevel
       # No Events — ffug is invoked directly (IAM/SigV4), never through a
       # public HTTP route. The internal plane is the whole point.
 
@@ -882,6 +901,10 @@ Resources:
           PORTH_BRANCH: !Ref PorthBranch
           PORTH_ENVIRONMENT: !Ref PorthEnvironment
           FFUG_TABLE_NAME: !Ref FfugTable
+          # The consumer reads the same variable, so one parameter turns up both
+          # halves of ffug. Its debug lines are where a projection that never
+          # arrived is explained.
+          FFUG_LOG_LEVEL: !Ref FfugLogLevel
       Events:
         TenantLifecycle:
           Type: EventBridgeRule

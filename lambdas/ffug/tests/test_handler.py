@@ -604,3 +604,58 @@ def test_everything_denied_is_a_failure_not_a_clean_sweep(porth, table):
 
     assert result["isolated"] is False
     assert attempt(result, "query ENV#prod#TENANT#acme")["pass"] is False
+
+
+# --- PORTH-605: what the service says about itself ---------------------------
+
+
+def test_no_log_line_at_any_level_carries_the_salt(porth, table, caplog):
+    """The one assertion that must not be left to the log LEVEL.
+
+    This repo's Actions logs are world-readable (PORTH-533) and CloudWatch
+    outlives the request either way. The prime is returned to the approver on
+    purpose — that is a different audience from a log line, and the standing
+    rule is identifiers only.
+
+    Runs at DEBUG deliberately: a rule that only holds at the default level is
+    not a rule, it is a coincidence.
+    """
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
+    with caplog.at_level("DEBUG", logger="ffug.handler"):
+        h.handler({"operation": "hash", "payload": {"amount": 100}})
+        h.handler({"operation": "isolation_probe"})
+
+    # getMessage() already interpolates; applying % again double-formats and
+    # raises on the first line that has more args than placeholders left.
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert ACME_PRIME not in logged, "the salt reached a log line"
+    assert "100" not in logged, "the payload body reached a log line"
+
+
+def test_debug_shows_the_call_surviving_verification(porth, table, caplog):
+    """The pair a reader actually wants: what ARRIVED, then what SURVIVED.
+
+    `ffug.received` is emitted before the Director exists, so nothing in it is
+    trusted — it reports the shape of the invocation. `ffug.verified` is emitted
+    after, so every field in it is a signed claim.
+    """
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
+    with caplog.at_level("DEBUG", logger="ffug.handler"):
+        h.handler({"operation": "hash", "payload": 1})
+
+    lines = [r.getMessage() for r in caplog.records]
+    assert any(line.startswith("ffug.received operation=hash") for line in lines)
+    assert any("ffug.verified" in line and "tenant_id=acme" in line for line in lines)
+    assert any("ffug.projection" in line and "has_salt=True" in line for line in lines)
+
+
+def test_the_probe_verdict_is_visible_without_turning_debug_on(porth, table, caplog):
+    """A regression in the boundary should be findable in the log stream, not
+    only by reading a response body someone has to think to look at."""
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
+    with caplog.at_level("INFO", logger="ffug.handler"):
+        h.handler({"operation": "isolation_probe"})
+
+    lines = [r.getMessage() for r in caplog.records]
+    verdict = [line for line in lines if line.startswith("ffug.probe")]
+    assert verdict and "isolated=True" in verdict[0], lines
