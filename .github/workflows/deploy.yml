@@ -524,6 +524,37 @@ jobs:
               ${OPTIONAL[@]+"${OPTIONAL[@]}"} \
             --no-fail-on-empty-changeset
 
+      - name: Register ffug's response signing key (PORTH-623/625)
+        if: env.FFUG_RESPONSE_KEY_ARN != ''
+        run: |
+          set -euo pipefail
+
+          # Registration is porth-install's job, not this workflow's and not
+          # Terraform's. The command resolves the ARN (an alias would be a valid
+          # thing to hand it and an invalid thing to store), refuses a key that
+          # is not SIGN_VERIFY/ECC_NIST_P256, captures the public half with
+          # kms:GetPublicKey, MERGES into whatever is already at
+          # signing-keys/ffug, and validates the result through the same code
+          # the runtime loads it with — so a document this refuses can never
+          # reach a verifier.
+          #
+          # One document PER SERVICE (PORTH-625). The pre-0.0.11 shared registry
+          # at /porth/{branch}/signing-keys is dead; if one exists on an install
+          # that ran a 0.0.10 deploy, delete it — it is a plausible-looking
+          # document at a plausible-looking path, and the next person debugging
+          # a signing problem will edit it and watch nothing happen.
+          #
+          # Idempotent, so it runs every deploy rather than once by hand: a key
+          # that is already registered re-registers to the same value, and an
+          # install that lost the parameter heals on the next deploy.
+          pip install --quiet 'porth-install>=0.3.2'
+
+          porth-install signing-key register \
+            --service ffug \
+            --direction response \
+            --key-arn "${FFUG_RESPONSE_KEY_ARN}" \
+            --branch "${PORTH_BRANCH}"
+
       - name: Diagnose SAM managed-bucket failure
         if: failure()
         run: |

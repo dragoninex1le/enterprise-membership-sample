@@ -111,22 +111,31 @@ def test_ffug_can_reach_no_table_without_narrowing_first(resources):
 def test_a_conditional_grant_is_still_visible_to_these_assertions(resources):
     """Guards the helper above. If `statements()` stopped unwrapping `Fn::If`,
     every KMS assertion here would pass by finding nothing — the vacuous-pass
-    failure mode that makes a green suite worse than no suite."""
-    assert "kms:Verify" in actions(resources["FfugFunctionRole"])
+    failure mode that makes a green suite worse than no suite.
+
+    The subject moved to the UAT runner when ffug's conditional kms:Verify was
+    deleted (PORTH-623, local verification). It has to be a grant that is
+    ACTUALLY wrapped in `Fn::If`, or the guard stops guarding while still
+    passing — which is the exact failure it exists to catch, one level up.
+    """
     assert "kms:Sign" in actions(resources["PorthUatRunnerRole"])
 
 
-def test_ffug_verifies_context_and_can_never_mint_it(resources):
-    """Head of Security condition H1, expressed where it is enforced.
+def test_ffug_holds_no_kms_at_all_and_therefore_cannot_mint(resources):
+    """Head of Security condition H1, and it got stronger.
 
-    ffug is a receiver. Its role attempting kms:Sign and being denied is what
-    UAT-4 witnesses live, so granting Sign here would not merely widen a
-    permission — it would delete the demonstration.
+    ffug is a receiver. It used to hold kms:Verify and never kms:Sign; as of
+    porth-common 0.0.11 it verifies locally against the trust document, so it
+    holds no KMS permission whatsoever. This role having nothing to sign with
+    is what UAT-4 witnesses live, and granting Sign here would not merely widen
+    a permission — it would delete the demonstration.
+
+    Asserted as "no kms:* at all" rather than "no kms:Sign", because that is now
+    the true property and the weaker form would pass while a Verify crept back.
     """
     granted = actions(resources["FfugFunctionRole"])
 
-    assert "kms:Verify" in granted
-    assert "kms:Sign" not in granted
+    assert not [a for a in granted if a.startswith("kms:")], sorted(granted)
 
 
 def test_ffugs_only_route_to_data_is_its_tenant_role(resources):
@@ -408,22 +417,27 @@ def test_only_these_two_may_mint_and_ffug_is_not_one_of_them(template):
         assert resources == [{"Ref": "PorthContextSigningKeyArn"}], (role, resources)
 
 
-def test_ffugs_verify_grant_is_the_one_local_verification_will_delete(template):
-    """Today ffug verifies with KMS; PORTH-623 makes that unnecessary.
+def test_nothing_verifies_with_kms_because_verification_is_local(template):
+    """The grant that used to be here is gone, and its absence is the design.
 
-    One key, because everything that calls ffug signs with the install key. The
-    statement is conditional only because IAM rejects an empty Resource.
+    porth-common 0.0.11 carries each key's public half in the trust document and
+    checks ECDSA-P256 locally, so there is no KMS call at verify time. Two
+    things fall out, and the second is the one that cost time before:
 
-    It is pinned rather than left loose because its REMOVAL is the change to
-    watch for: when the trust list carries public keys and receivers verify
-    ECDSA-P256 locally, this grant goes and the N-by-N Verify matrix goes with
-    it. Removing it before that porth-common release refuses every crossing,
-    since the installed version still calls kms:Verify at runtime.
+    * the N-by-N Verify grant matrix disappears — every receiver needed Verify
+      on every key that might sign to it, and that list grew with the install;
+    * a missing grant can no longer masquerade as `bad_signature`. There is no
+      grant to miss, so the failure that read as forgery and was actually IAM
+      cannot occur.
+
+    Asserted as a whole-template property rather than on one role, because the
+    way this regresses is someone adding Verify back "just for this service".
     """
-    verifiers = _grants(template, "kms:Verify")
-
-    assert set(verifiers) == {"FfugFunctionRole"}, sorted(verifiers)
-    assert verifiers["FfugFunctionRole"] == [{"Ref": "PorthContextSigningKeyArn"}]
+    assert _grants(template, "kms:Verify") == {}, (
+        "kms:Verify reappeared. Verification is local as of porth-common "
+        "0.0.11 — a Verify grant means something is calling KMS at verify time "
+        "again, which is the grant matrix and the misleading failure both back."
+    )
 
 
 def test_the_app_has_no_signing_key_of_its_own(template):

@@ -79,52 +79,62 @@ terraform plan
 Both `*.hcl` copies and `*.tfvars` are gitignored. The defaults already name
 EMS's two minting services, so a plan needs no var file.
 
-## After applying — two more steps, and nothing works until both are done
+## After applying — registration, which is not Terraform's job
 
-Applying creates the keys and publishes their ARNs to
-`/porth/{branch}/infra/signing-key-arn/{service}`. It grants nothing and
-registers nothing.
+Applying creates the key and publishes its ARN to
+`/porth/{branch}/infra/signing-key-arn/ffug/response`. It registers nothing.
 
-### 1. The deploy passes the ARN
-
-`deploy.yml` reads `/porth/{branch}/infra/signing-key-arn/ffug/response` and
-passes it as `FfugResponseSigningKeyArn`.
-
-Nothing grants Sign on it yet — the completion role that signs callbacks arrives
-with PORTH-620. The parameter is declared now so the wiring is visible rather
-than appearing all at once later.
-
-**Verification is moving local.** Today `FfugFunctionRole` holds `kms:Verify` on
-the install key, because the installed porth-common calls `kms:Verify` at
-runtime. PORTH-623 replaces that: the trust list carries each key's public key
-and receivers check ECDSA-P256 themselves. That deletes the N-by-N Verify grant
-matrix and makes the design's most misleading failure impossible — today a
-missing Verify grant surfaces as `bad_signature`, indistinguishable from
-forgery. Do not remove the grant before the porth-common release that does local
-verification; removing it early refuses every crossing.
-
-### 2. The bindings are merged into the trust list
-
-`/porth/{branch}/signing-keys` binds `kid → service_id`, and it is the union of
-every participant's bindings — Porth publishes its own for `porth`. Validate
-before seeding:
+Registration is `porth-install signing-key register`, and the deploy runs it on
+every deploy:
 
 ```bash
-terraform output -json signing_keys_document > ems-keys.json
+porth-install signing-key register --service ffug --direction response --key-arn "$ARN" --branch dev
 ```
+
+It resolves the ARN (an alias is a valid thing to hand it and an invalid thing to
+store), refuses a key that is not `SIGN_VERIFY`/`ECC_NIST_P256`, captures the
+public half with `kms:GetPublicKey`, merges into whatever is already at
+`/porth/{branch}/signing-keys/ffug`, and validates the result through the same
+code the runtime loads it with — so a document it refuses can never reach a
+verifier.
+
+This module deliberately emits **no trust document**. Rebuilding any of that
+here would be a second implementation of a contract that already has one.
+
+### One document per service
+
+`/porth/{branch}/signing-keys/{service_id}` — not one registry listing everybody
+(PORTH-625). A shared document needs every participant merging into it, and one
+pipeline that *writes* rather than merges silently removes everyone else's keys.
+
+The pre-0.0.11 single document at `/porth/{branch}/signing-keys` is **dead**. If
+an install ran a 0.0.10 deploy it will have one; delete it. It is a
+plausible-looking document at a plausible-looking path, so the next person
+debugging a signing problem will find it, edit it, and watch nothing happen.
 
 ```bash
-python -m porth_common.internal_plane.signing_trust ems-keys.json
+aws ssm delete-parameter --name /porth/dev/signing-keys --region us-east-1
 ```
 
-`kid` is the **concrete key ARN, never the alias**.
+EMS never adopted 0.0.10, so EMS should not have one.
 
-That output omits `direction` and `public_key` on purpose. `SigningKeyBinding`
-is declared `extra="forbid"`, so a document carrying fields the installed
-porth-common does not know does not get ignored — it fails to load, and a trust
-list that fails to load refuses every internal call on this install. The values
-are ready in the `signing_keys_pending_schema` output; move them across in the
-same change that takes the porth-common version which understands them.
+### What the deploy role needs
+
+The registration step calls KMS and writes SSM, so the deploy identity needs
+`kms:DescribeKey` and `kms:GetPublicKey` on this key, and `ssm:GetParameter` +
+`ssm:PutParameter` on `/porth/{branch}/signing-keys/ffug`. Absent those, the
+step fails loudly — which is the right direction, but it fails after the stack
+has already deployed.
+
+### No `kms:Verify`, anywhere
+
+Verification is local as of porth-common 0.0.11: the document carries the public
+half and receivers check ECDSA-P256 themselves. Two things that buys — the N-by-N
+Verify grant matrix disappears, and a missing grant can no longer surface as
+`bad_signature`, because there is no grant to miss.
+
+KMS is now touched by exactly one runtime operation in the whole design: a
+minting role signing with its own key.
 
 ## The trust list is fail-closed
 

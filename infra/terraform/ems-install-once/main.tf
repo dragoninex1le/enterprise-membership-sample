@@ -96,24 +96,6 @@ resource "aws_kms_alias" "service_signing" {
   target_key_id = aws_kms_key.service_signing[each.key].key_id
 }
 
-# Captured ONCE, here, rather than called per verification (PORTH-623, Richard
-# 2026-08-24). The trust document carries each key's public key and verifiers do
-# ECDSA-P256 locally, which deletes the N-by-N kms:Verify grant matrix outright
-# and makes the misleading failure impossible: there is no KMS call at verify
-# time left to be denied, so an AccessDenied can no longer masquerade as
-# `bad_signature`.
-#
-# Deciding factors on record: every signing key's policy can lock to its single
-# minter and never change as services join; Sign and Verify share the account's
-# ECC cryptographic-operations quota, so runtime Verify would have every callback
-# receipt competing with every mint for the same headroom; and per-call cost and
-# latency sit on the hot receive path.
-data "aws_kms_public_key" "service_signing" {
-  for_each = local.signing_keys
-
-  key_id = aws_kms_key.service_signing[each.key].arn
-}
-
 # A KMS key has no deterministic identifier — only its alias is predictable, and
 # an alias ARN cannot be the Resource of an IAM policy for key operations. So
 # the ARN is published where the deploy can read it.

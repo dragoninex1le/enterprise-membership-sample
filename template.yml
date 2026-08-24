@@ -599,10 +599,13 @@ Resources:
               Resource:
                 - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services
                 - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/service-endpoints
-                # PORTH-623 — read on every inbound internal call, and a minter
-                # needs it too: assert_signs_for runs against the same document
-                # whichever direction the crossing goes.
-                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/signing-keys
+                # PORTH-623/625 — one document PER SERVICE at
+                # signing-keys/{service_id}, so this is a prefix rather than an
+                # exact name. Verification fetches the document of the service
+                # the token CLAIMS to be from, by name; there is no registry to
+                # load and nothing here about services this call does not
+                # involve.
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/signing-keys/*
       Events:
         ApiProxy:
           Type: HttpApi
@@ -819,50 +822,40 @@ Resources:
               - Effect: Allow
                 Action: sts:AssumeRole
                 Resource: !GetAtt FfugTenantRole.Arn
-              # kms:Verify and NEVER kms:Sign (Head of Security condition H1).
+              # NO KMS AT ALL on this role, and H1 is stronger for it.
+              #
               # ffug is a receiver: it checks that context was minted by someone
               # entitled to mint it, and cannot mint any itself. This role
-              # attempting Sign and being denied is what UAT-4 witnesses live,
-              # so adding Sign here would not merely widen a permission — it
-              # would delete the demonstration.
+              # holding no kms:Sign is what UAT-4 witnesses live, so adding Sign
+              # here would not merely widen a permission — it would delete the
+              # demonstration.
               #
-              # Conditional only because IAM rejects an empty Resource. Without
-              # the key ffug has no verifier and refuses every call — loudly, at
-              # the boundary — which is the correct posture for a service that
-              # cannot check who is calling it.
+              # NO kms:Verify, and that absence is the design (PORTH-623,
+              # porth-common 0.0.11). The trust document carries each key's
+              # public half and the receiver checks ECDSA-P256 locally, so
+              # there is no KMS call at verify time at all.
               #
-              # One key, because everything that currently calls ffug signs with
-              # the install key: the sample app (whose request key it is) and the
-              # UAT runner (which mints as `porth`).
+              # Two things that buys, beyond the deleted N-by-N grant matrix:
+              # a missing grant can no longer surface as `bad_signature` —
+              # indistinguishable from forgery — because there is no grant to
+              # miss; and Verify no longer competes with Sign for the account's
+              # ECC cryptographic-operations quota on the hot receive path.
               #
-              # PORTH-623 RETIRES THIS STATEMENT ENTIRELY. Verification moves
-              # local — the trust list carries each key's public key and the
-              # receiver checks ECDSA-P256 itself — which deletes the N-by-N
-              # Verify matrix and makes the design's most misleading failure
-              # impossible: today a missing Verify grant surfaces as
-              # `bad_signature`, indistinguishable from forgery. It stays until
-              # the porth-common release that does local verification, because
-              # the installed version still calls kms:Verify at runtime and
-              # removing the grant early refuses every crossing.
-              - !If
-                - HasContextSigningKey
-                - Effect: Allow
-                  Action: kms:Verify
-                  Resource: !Ref PorthContextSigningKeyArn
-                - !Ref AWS::NoValue
+              # KMS is now touched by exactly one runtime operation in the whole
+              # design: a minting role signing with its own key.
               # The D3 service registry (is the calling service registered and
               # active?), the session-policy template the narrowing renders, and
-              # the signing-key trust list.
+              # the signing-key documents.
               #
-              # The trust list is read on EVERY inbound internal call — it is
+              # signing-keys/* is read on EVERY inbound internal call — it is
               # what turns the token's `kid` into "which service may claim to be
-              # the source". Fail-closed: unreadable means every call refused,
-              # so this grant is not optional for a receiver (PORTH-623).
+              # this source, and in which direction". Fail-closed: unreadable
+              # means every call refused, so it is not optional for a receiver.
               - Effect: Allow
                 Action: ssm:GetParameter
                 Resource:
                   - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services
-                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/signing-keys
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/signing-keys/*
                   - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/auth-session-policy/*
 
   FfugFunction:
@@ -1052,9 +1045,10 @@ Resources:
               # key-policy Deny, THIS ROLE must be on the allow-list or the ffug
               # UAT stops working.
               #
-              # ffug's own role holds kms:Verify and never this. The split is
+              # ffug's request-path role holds NO KMS at all — it verifies
+              # locally against the trust document (PORTH-623). The split is
               # the point: a compromised receiver cannot mint context for
-              # another tenant (H1).
+              # another tenant (H1), and now it has nothing to mint with.
               - !If
                 - HasContextSigningKey
                 - Effect: Allow
