@@ -41,3 +41,26 @@ blob-report/
 __pycache__/
 *.pyc
 *.pyo
+
+# Terraform. EMS's first Terraform module arrived with the per-service signing
+# keys; these ignores arrived with it rather than after the first `git add -A`
+# swept a provider binary into a commit, which is how Components learned it
+# (PORTH-606).
+#
+# .terraform/ holds provider binaries — hundreds of megabytes — and, with a
+# local backend, real state. State carries resource attributes in plaintext.
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+
+# Backend and variable copies name an account's bucket and its values. The
+# examples are tracked; the copies are not.
+*.tfvars
+*.tfvars.json
+backend.*.hcl
+!backend.example.hcl
+
+# NOT ignored, deliberately: .terraform.lock.hcl. It pins provider versions and
+# their hashes, which makes it a supply-chain control that belongs in the repo.
