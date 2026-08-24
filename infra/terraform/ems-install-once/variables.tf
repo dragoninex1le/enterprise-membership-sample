@@ -12,39 +12,51 @@ variable "porth_branch" {
   default     = "dev"
 }
 
-variable "service_signing_keys" {
+variable "signing_keys" {
   description = <<-EOT
-    EMS services that MINT context envelopes, each of which gets its own
-    asymmetric signing CMK (PORTH-623).
+    The `(service_id, direction)` pairs that need their own signing CMK.
 
-    Defaulted here, and that is the difference from Porth's install-once module:
-    that one defaults to empty because Porth does not know which services an
-    install runs. This module IS the install, so naming its own services is
-    exactly right.
+    **A key set is per direction** (PORTH-623, Richard 2026-08-24). A service's
+    request authority and its response authority are different kinds of
+    authority, so they are different keys, and a role holds Sign for at most one
+    pair. A compromised completion path therefore cannot mint a *request* even
+    as its own service — the signature proves which service produced it and
+    which kind it is.
 
-    Why one key per service rather than the shared install key: on a single key
-    `kms:Sign` is not "permission to sign as yourself" — it is permission to
-    mint context for any tenant, as any service, to any audience. The callback
-    pattern makes completion functions minters, so on a shared key the class of
-    verify-only receivers erodes one service at a time, each addition
-    individually reasonable, until there are none left. UAT-4 witnesses that
-    class.
+    **Provisioned as roles actually need them, never 2N up front.** Today that
+    is exactly one:
 
-    Values must match the `service_id` in `/porth/{branch}/services` and in the
-    `/porth/{branch}/signing-keys` trust list — that binding is what makes a
-    forged source cryptographically detectable rather than merely unregistered.
-    The pattern is the one porth-common's `SigningKeyBinding.service_id`
-    enforces; a value accepted here and rejected there would be a key nobody
-    could ever use.
+      ffug / response  — ffug signs only when it completes async work and calls
+                         back. It never originates a request.
+
+    Deliberately absent: a request key for the sample app. The app is not a
+    service in this model — the existing install key
+    (`PorthContextSigningKeyArn`) serves as the request key, so minting one here
+    would create a second request authority for the same party.
+
+    `service_id` must match `/porth/{branch}/services` and the trust list; the
+    pattern is the one porth-common's `SigningKeyBinding.service_id` enforces.
   EOT
-  type        = list(string)
-  default     = ["ffug", "sample-app"]
+  type = list(object({
+    service_id = string
+    direction  = string
+  }))
+  default = [
+    { service_id = "ffug", direction = "response" },
+  ]
 
   validation {
     condition = alltrue([
-      for s in var.service_signing_keys : can(regex("^[a-z][a-z0-9-]{0,62}$", s))
+      for k in var.signing_keys : can(regex("^[a-z][a-z0-9-]{0,62}$", k.service_id))
     ])
     error_message = "each service_id must match ^[a-z][a-z0-9-]{0,62}$ — the pattern porth-common's SigningKeyBinding enforces."
+  }
+
+  validation {
+    condition = alltrue([
+      for k in var.signing_keys : contains(["request", "response"], k.direction)
+    ])
+    error_message = "direction must be 'request' or 'response' — a request ingress accepts only request-direction kids, and a callback ingress only response-direction."
   }
 }
 

@@ -20,6 +20,9 @@
 data "aws_caller_identity" "current" {}
 
 locals {
+  # Keyed "service/direction" — unique per pair, and readable in plan output.
+  signing_keys = { for k in var.signing_keys : "${k.service_id}/${k.direction}" => k }
+
   common_tags = merge(
     {
       Project     = "enterprise-membership-sample"
@@ -44,16 +47,17 @@ locals {
 # here that quietly lacked the second statement would look identical in the
 # console.
 resource "aws_kms_key" "service_signing" {
-  for_each = toset(var.service_signing_keys)
+  for_each = local.signing_keys
 
-  description              = "EMS context-token signing key for ${each.value} (${var.porth_branch})"
+  description              = "EMS ${each.value.direction} signing key for ${each.value.service_id} (${var.porth_branch})"
   key_usage                = "SIGN_VERIFY"
   customer_master_key_spec = "ECC_NIST_P256"
   enable_key_rotation      = false # not supported for asymmetric keys
   deletion_window_in_days  = var.kms_deletion_window_days
   tags = merge(local.common_tags, {
     Component = "ContextSigning"
-    Service   = each.value
+    Service   = each.value.service_id
+    Direction = each.value.direction
   })
 
   policy = jsonencode({
@@ -86,10 +90,28 @@ resource "aws_kms_key" "service_signing" {
 # is the concrete key ARN, because an alias is a moving pointer and a trust list
 # pointing at one would trust whatever it was moved to.
 resource "aws_kms_alias" "service_signing" {
-  for_each = toset(var.service_signing_keys)
+  for_each = local.signing_keys
 
-  name          = "alias/porth-context-${each.value}-${var.porth_branch}"
-  target_key_id = aws_kms_key.service_signing[each.value].key_id
+  name          = "alias/porth-context-${each.value.service_id}-${each.value.direction}-${var.porth_branch}"
+  target_key_id = aws_kms_key.service_signing[each.key].key_id
+}
+
+# Captured ONCE, here, rather than called per verification (PORTH-623, Richard
+# 2026-08-24). The trust document carries each key's public key and verifiers do
+# ECDSA-P256 locally, which deletes the N-by-N kms:Verify grant matrix outright
+# and makes the misleading failure impossible: there is no KMS call at verify
+# time left to be denied, so an AccessDenied can no longer masquerade as
+# `bad_signature`.
+#
+# Deciding factors on record: every signing key's policy can lock to its single
+# minter and never change as services join; Sign and Verify share the account's
+# ECC cryptographic-operations quota, so runtime Verify would have every callback
+# receipt competing with every mint for the same headroom; and per-call cost and
+# latency sit on the hot receive path.
+data "aws_kms_public_key" "service_signing" {
+  for_each = local.signing_keys
+
+  key_id = aws_kms_key.service_signing[each.key].arn
 }
 
 # A KMS key has no deterministic identifier — only its alias is predictable, and
@@ -105,12 +127,15 @@ resource "aws_kms_alias" "service_signing" {
 # template can grant Sign or Verify on it, and the step that merges this
 # service's binding into /porth/{branch}/signing-keys.
 resource "aws_ssm_parameter" "service_signing_key_arn" {
-  for_each = toset(var.service_signing_keys)
+  for_each = local.signing_keys
 
-  name        = "/porth/${var.porth_branch}/infra/signing-key-arn/${each.value}"
-  description = "Context-token signing KMS key ARN for ${each.value}. Read by the EMS deploy."
+  name        = "/porth/${var.porth_branch}/infra/signing-key-arn/${each.value.service_id}/${each.value.direction}"
+  description = "EMS ${each.value.direction} signing key ARN for ${each.value.service_id}. Read by the EMS deploy."
   type        = "String"
-  value       = aws_kms_key.service_signing[each.value].arn
+  value       = aws_kms_key.service_signing[each.key].arn
   overwrite   = true
-  tags        = merge(local.common_tags, { Service = each.value })
+  tags = merge(local.common_tags, {
+    Service   = each.value.service_id
+    Direction = each.value.direction
+  })
 }

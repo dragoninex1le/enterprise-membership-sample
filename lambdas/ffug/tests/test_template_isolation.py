@@ -383,58 +383,65 @@ def _grants(template, action):
     return found
 
 
-def test_only_these_roles_may_mint_and_only_on_their_own_key(template):
+def test_only_these_two_may_mint_and_ffug_is_not_one_of_them(template):
     """The allow-list that stops the shared-key blast radius coming back.
 
     A new Sign grant is how it returns: one function at a time, each
-    individually reasonable. Components pins the same property on its own
-    template; this is the consuming half.
+    individually reasonable.
 
-    The sample app mints request envelopes; the UAT runner mints to drive the
-    journeys. Nothing else, and neither on a key belonging to anyone else.
+    Both signers hold the install key today, and that is correct rather than a
+    leftover — the app is not a service in the per-service key model
+    (PORTH-623), so the install key IS its request key. The UAT runner mints as
+    `porth` on the same key to drive the journeys.
+
+    ffug appears nowhere. It holds a RESPONSE key only, and nothing signs with
+    it until the completion role arrives with PORTH-620.
     """
     signers = _grants(template, "kms:Sign")
 
     assert set(signers) == {"SampleAppFunction", "PorthUatRunnerRole"}, (
-        f"kms:Sign grants changed: {sorted(signers)}. On a shared key Sign is "
-        f"permission to mint context for any tenant, as any service, to any "
-        f"audience — a new holder is a new forgery capability, not a widened "
-        f"permission."
+        f"kms:Sign grants changed: {sorted(signers)}. Sign on the install key "
+        f"mints context for any tenant, as any service, to any audience — a new "
+        f"holder is a new forgery capability, not a widened permission."
     )
-    assert signers["SampleAppFunction"] == [{"Ref": "SampleAppSigningKeyArn"}], (
-        "the sample app must sign with its OWN key — signing with "
-        "PorthContextSigningKeyArn is the shared-key problem PORTH-623 removed"
-    )
+    for role, resources in signers.items():
+        assert resources == [{"Ref": "PorthContextSigningKeyArn"}], (role, resources)
 
 
-def test_ffug_can_verify_every_key_that_may_legitimately_sign_to_it(template):
-    """Miss one and the failure lies to you.
+def test_ffugs_verify_grant_is_the_one_local_verification_will_delete(template):
+    """Today ffug verifies with KMS; PORTH-623 makes that unnecessary.
 
-    The verifier follows the token's own `kid`, so a receiver needs Verify on
-    every key that might have signed what arrives. A missing grant surfaces as
-    `bad_signature` — indistinguishable from forgery, and actually IAM.
+    One key, because everything that calls ffug signs with the install key. The
+    statement is conditional only because IAM rejects an empty Resource.
 
-    Two keys reach ffug: the sample app's, on every real crossing, and Porth's,
-    because the UAT runner mints as `porth` to drive the journeys.
+    It is pinned rather than left loose because its REMOVAL is the change to
+    watch for: when the trust list carries public keys and receivers verify
+    ECDSA-P256 locally, this grant goes and the N-by-N Verify matrix goes with
+    it. Removing it before that porth-common release refuses every crossing,
+    since the installed version still calls kms:Verify at runtime.
     """
     verifiers = _grants(template, "kms:Verify")
 
     assert set(verifiers) == {"FfugFunctionRole"}, sorted(verifiers)
-    assert sorted(map(str, verifiers["FfugFunctionRole"])) == sorted(
-        map(str, [{"Ref": "PorthContextSigningKeyArn"}, {"Ref": "SampleAppSigningKeyArn"}])
-    )
+    assert verifiers["FfugFunctionRole"] == [{"Ref": "PorthContextSigningKeyArn"}]
 
 
-def test_the_signing_key_parameters_are_separate_from_porths(template):
-    """Three parameters, not one reused three ways.
+def test_the_app_has_no_signing_key_of_its_own(template):
+    """The app is not a service, and re-adding a key for it would be a
+    regression that looks like symmetry.
 
-    The shared key is now Porth core's own service key. Collapsing these back to
-    one parameter would re-create the exact capability PORTH-623 removed, and it
-    would do so as a diff that looks like tidying.
+    A second key for the same party is a second REQUEST authority, not a
+    separation of concerns. What per-service keys separate is direction — and
+    ffug's response key is the only one this install needs, because ffug is the
+    only party that signs something other than a request.
     """
     parameters = template["Parameters"]
 
-    for name in ("PorthContextSigningKeyArn", "FfugSigningKeyArn", "SampleAppSigningKeyArn"):
+    assert "SampleAppSigningKeyArn" not in parameters, (
+        "the sample app must sign with the install key — a key of its own would "
+        "be a second request authority for the same party (PORTH-623)"
+    )
+    for name in ("PorthContextSigningKeyArn", "FfugResponseSigningKeyArn"):
         assert name in parameters, f"{name} is missing"
         assert parameters[name].get("Default") == "", (
             f"{name} must default to empty — absent a key the service deploys "

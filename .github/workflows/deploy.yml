@@ -218,32 +218,30 @@ jobs:
             echo "✅ Context signing key resolved - ffug's request path will be wired"
           fi
 
-          # PORTH-623 — the per-service signing keys. Same read and the same
-          # not-fatal posture, one parameter per service. Written by the
-          # porth-install-once Terraform module from its service_signing_keys
-          # list, so they are absent until that has been applied here.
+          # PORTH-623 — ffug's RESPONSE signing key. One key, not one per
+          # service: a key set is per DIRECTION, and keys are provisioned as
+          # roles actually need them rather than 2N up front. ffug never
+          # originates a request, so it has a response key and no request key;
+          # the app signs requests with the install key above, because the app
+          # is not a service in this model.
           #
-          # Absent is a real state, not an error: the template's conditions omit
-          # the matching KMS grant, and the leg that needed the key is refused at
-          # the boundary rather than sent unsigned.
-          for SVC in ffug sample-app; do
-            VAR="PORTH_SIGNING_KEY_$(echo "$SVC" | tr 'a-z-' 'A-Z_')"
-            ARN=$(aws ssm get-parameter \
-              --name "/porth/${PORTH_BRANCH}/infra/signing-key-arn/${SVC}" \
-              --query Parameter.Value --output text 2>/dev/null || echo "")
-            if [ -z "$ARN" ] || [ "$ARN" == "None" ]; then
-              ARN=""
-              echo "::warning::No signing key for '${SVC}' at"
-              echo "::warning::/porth/${PORTH_BRANCH}/infra/signing-key-arn/${SVC}."
-              echo "::warning::Apply porth-install-once with service_signing_keys"
-              echo "::warning::including '${SVC}', then merge its binding into"
-              echo "::warning::/porth/${PORTH_BRANCH}/signing-keys. Until both are"
-              echo "::warning::done, any crossing needing it is refused."
-            else
-              echo "✅ Signing key resolved for ${SVC}"
-            fi
-            echo "${VAR}=${ARN}" >> $GITHUB_ENV
-          done
+          # Absent is a real state, not an error. The template's condition omits
+          # the grant and the callback leg is refused at the boundary rather
+          # than sent unsigned.
+          FFUG_RESPONSE_KEY_ARN=$(aws ssm get-parameter \
+            --name "/porth/${PORTH_BRANCH}/infra/signing-key-arn/ffug/response" \
+            --query Parameter.Value --output text 2>/dev/null || echo "")
+          if [ -z "$FFUG_RESPONSE_KEY_ARN" ] || [ "$FFUG_RESPONSE_KEY_ARN" == "None" ]; then
+            FFUG_RESPONSE_KEY_ARN=""
+            echo "::warning::No response signing key for ffug at"
+            echo "::warning::/porth/${PORTH_BRANCH}/infra/signing-key-arn/ffug/response."
+            echo "::warning::Apply infra/terraform/ems-install-once, then merge"
+            echo "::warning::its binding into /porth/${PORTH_BRANCH}/signing-keys."
+            echo "::warning::Either alone leaves the callback leg unable to sign."
+          else
+            echo "✅ ffug response signing key resolved"
+          fi
+          echo "FFUG_RESPONSE_KEY_ARN=$FFUG_RESPONSE_KEY_ARN" >> $GITHUB_ENV
 
           echo "PORTH_CONTEXT_KEY_ARN=$CONTEXT_KEY_ARN" >> $GITHUB_ENV
           echo "PORTH_BRANCH=$PORTH_BRANCH" >> $GITHUB_ENV
@@ -500,11 +498,8 @@ jobs:
           if [ -n "${PORTH_CONTEXT_KEY_ARN:-}" ]; then
             OPTIONAL+=("PorthContextSigningKeyArn=${PORTH_CONTEXT_KEY_ARN}")
           fi
-          if [ -n "${PORTH_SIGNING_KEY_FFUG:-}" ]; then
-            OPTIONAL+=("FfugSigningKeyArn=${PORTH_SIGNING_KEY_FFUG}")
-          fi
-          if [ -n "${PORTH_SIGNING_KEY_SAMPLE_APP:-}" ]; then
-            OPTIONAL+=("SampleAppSigningKeyArn=${PORTH_SIGNING_KEY_SAMPLE_APP}")
+          if [ -n "${FFUG_RESPONSE_KEY_ARN:-}" ]; then
+            OPTIONAL+=("FfugResponseSigningKeyArn=${FFUG_RESPONSE_KEY_ARN}")
           fi
 
           sam deploy \

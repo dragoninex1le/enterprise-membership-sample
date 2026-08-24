@@ -22,14 +22,31 @@ of this install leaking into the shared module. Same ruling as the shipped
 services-config documents: nothing is set upstream; it is entirely down to the
 application that is going to use Porth.
 
-## Why one key per service
+## Why per-direction keys, and why only one
 
 On a single shared key, `kms:Sign` is not "permission to sign as yourself" — it
 is permission to mint context **for any tenant, as any service, to any
 audience**. That mattered less when only Porth minted. The callback pattern
-(PORTH-617) makes completion functions minters, so on a shared key the class of
-verify-only receivers erodes one service at a time, each addition individually
-reasonable, until there are none left. UAT-4 witnesses that class.
+makes completion functions minters, so on a shared key the class of verify-only
+receivers erodes one service at a time, each addition individually reasonable,
+until there are none left. UAT-4 witnesses that class.
+
+**A key set is per direction** (PORTH-623). Request authority and response
+authority are different kinds of authority, so they are different keys, and a
+role holds Sign for at most one `(service, direction)` pair — a compromised
+completion path cannot mint a *request* even as its own service.
+
+**Keys are provisioned as roles actually need them, never 2N up front.** Today
+this install needs exactly one:
+
+| service | direction | why |
+|---|---|---|
+| `ffug` | response | ffug signs only when it completes async work and calls back |
+
+Deliberately absent: a request key for the sample app. **The app is not a
+service in this model** — the existing install key is its request key, so
+minting one here would create a second request authority for the same party
+rather than separating anything.
 
 ## Bootstrapping the state bucket
 
@@ -68,20 +85,23 @@ Applying creates the keys and publishes their ARNs to
 `/porth/{branch}/infra/signing-key-arn/{service}`. It grants nothing and
 registers nothing.
 
-### 1. The deploy passes the ARNs
+### 1. The deploy passes the ARN
 
-`deploy.yml` reads both parameters and passes them as `FfugSigningKeyArn` and
-`SampleAppSigningKeyArn`. The template then grants:
+`deploy.yml` reads `/porth/{branch}/infra/signing-key-arn/ffug/response` and
+passes it as `FfugResponseSigningKeyArn`.
 
-| principal | grant | on |
-|---|---|---|
-| `SampleAppFunction` | `kms:Sign` + `kms:DescribeKey` | the sample app's key |
-| `FfugFunctionRole` | `kms:Verify` | the sample app's key **and** Porth's |
+Nothing grants Sign on it yet — the completion role that signs callbacks arrives
+with PORTH-620. The parameter is declared now so the wiring is visible rather
+than appearing all at once later.
 
-A receiver needs Verify on **every** key that might legitimately have signed
-what arrives, because the verifier follows the token's own `kid`. Miss one and
-it fails as `bad_signature` — indistinguishable from forgery, and actually a
-missing grant. It is the most misleading failure in this design.
+**Verification is moving local.** Today `FfugFunctionRole` holds `kms:Verify` on
+the install key, because the installed porth-common calls `kms:Verify` at
+runtime. PORTH-623 replaces that: the trust list carries each key's public key
+and receivers check ECDSA-P256 themselves. That deletes the N-by-N Verify grant
+matrix and makes the design's most misleading failure impossible — today a
+missing Verify grant surfaces as `bad_signature`, indistinguishable from
+forgery. Do not remove the grant before the porth-common release that does local
+verification; removing it early refuses every crossing.
 
 ### 2. The bindings are merged into the trust list
 
@@ -98,6 +118,13 @@ python -m porth_common.internal_plane.signing_trust ems-keys.json
 ```
 
 `kid` is the **concrete key ARN, never the alias**.
+
+That output omits `direction` and `public_key` on purpose. `SigningKeyBinding`
+is declared `extra="forbid"`, so a document carrying fields the installed
+porth-common does not know does not get ignored — it fails to load, and a trust
+list that fails to load refuses every internal call on this install. The values
+are ready in the `signing_keys_pending_schema` output; move them across in the
+same change that takes the porth-common version which understands them.
 
 ## The trust list is fail-closed
 

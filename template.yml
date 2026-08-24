@@ -186,36 +186,23 @@ Parameters:
       the request path has no verifier and refuses every call. Which half is
       wired is reported in the stack outputs rather than left to be discovered.
 
-  FfugSigningKeyArn:
+  FfugResponseSigningKeyArn:
     Type: String
     Default: ''
     Description: >
-      ARN of ffug's OWN context-signing key (PORTH-623), written to SSM by the
-      porth-install-once Terraform module at
-      /porth/{branch}/infra/signing-key-arn/ffug and resolved by deploy.yml.
+      ARN of ffug's RESPONSE-direction signing key (PORTH-623), created by
+      infra/terraform/ems-install-once and published to
+      /porth/{branch}/infra/signing-key-arn/ffug/response.
 
-      Separate from PorthContextSigningKeyArn on purpose. ffug signs only when
-      it completes asynchronous work and calls back; on the shared install key
-      that grant would be permission to mint context for any tenant, as any
-      service, to any audience. Per-service keys are what keep the class of
-      verify-only receivers — the one UAT-4 witnesses — from eroding a service
-      at a time.
+      Direction is the point. A service's request authority and its response
+      authority are different kinds of authority, so they are different keys,
+      and a role holds Sign for at most one pair — a compromised completion
+      path cannot mint a REQUEST even as ffug. ffug never originates a request,
+      so it has a response key and no request key at all.
 
-      Empty is a real state: ffug deploys with no signer and the callback leg is
-      refused at the boundary rather than sent unsigned.
-
-  SampleAppSigningKeyArn:
-    Type: String
-    Default: ''
-    Description: >
-      ARN of the sample app's OWN context-signing key (PORTH-623), from
-      /porth/{branch}/infra/signing-key-arn/sample-app.
-
-      This REPLACES the shared key for minting: the app used to sign request
-      envelopes with PorthContextSigningKeyArn, and that key is now Porth core's
-      own service key rather than everyone's. ffug must hold kms:Verify on this
-      key or every call it receives fails as bad_signature — which reads like a
-      forgery and is actually a missing grant.
+      Nothing grants Sign on this yet: the completion role that signs callbacks
+      arrives with PORTH-620. Declared here so the deploy can pass it and the
+      wiring is visible rather than appearing all at once later.
 
 Conditions:
 
@@ -223,11 +210,10 @@ Conditions:
   # an empty one. Absent the key, ffug deploys as the bus consumer only.
   HasContextSigningKey: !Not [!Equals [!Ref PorthContextSigningKeyArn, '']]
 
-  # PORTH-623. Same reason as above, one condition per key: IAM rejects an empty
-  # Resource, and these arrive independently — an install can have Porth's key
-  # seeded and its own service keys not yet applied.
-  HasFfugSigningKey: !Not [!Equals [!Ref FfugSigningKeyArn, '']]
-  HasSampleAppSigningKey: !Not [!Equals [!Ref SampleAppSigningKeyArn, '']]
+  # PORTH-623. Same reason as above: IAM rejects an empty Resource, and the
+  # keys arrive independently — an install can have Porth's key seeded and its
+  # own service keys not yet applied.
+  HasFfugResponseSigningKey: !Not [!Equals [!Ref FfugResponseSigningKeyArn, '']]
 
 Resources:
 
@@ -520,10 +506,14 @@ Resources:
           # Empty is a real state, not a misconfiguration: without the key this
           # app deploys with no signer, and every internal call is refused at
           # the boundary rather than sent unsigned.
-          # PORTH-623 — this app's own key. The variable name still says
-          # "ALIAS" because that is porth-common's contract; KMS takes an ARN
-          # or an alias as a KeyId, and an ARN is what Terraform publishes.
-          PORTH_CONTEXT_SIGNING_KEY_ALIAS: !Ref SampleAppSigningKeyArn
+          # PORTH-623 — the INSTALL key, deliberately. The app is not a service
+          # in this model: the existing install key IS its request key, so
+          # minting a second one for the same party would create a second
+          # request authority rather than separating anything.
+          #
+          # What per-service keys separate is the callback direction, and that
+          # is ffug's side (FfugResponseSigningKeyArn above).
+          PORTH_CONTEXT_SIGNING_KEY_ALIAS: !Ref PorthContextSigningKeyArn
           # No FFUG_FUNCTION_ARN. Where ffug lives is resolved from the endpoint
           # map at /porth/{branch}/service-endpoints, which is the whole point of
           # D7.4 — an address at the call site is an address that cannot follow
@@ -581,11 +571,10 @@ Resources:
                 # Granting Sign alone gets you AccessDenied on DescribeKey one
                 # frame earlier, wearing SigningUnavailableError.
                 - kms:DescribeKey
-              # PORTH-623 — the app's OWN key, not the shared install key.
-              # Sign on the shared key is not "sign as yourself": it mints
-              # context for any tenant, as any service, to any audience. The
-              # shared key is now Porth core's own service key.
-              Resource: !Ref SampleAppSigningKeyArn
+              # The install key. The app is not a service in the per-service
+              # key model (PORTH-623) — this key is its request key, and ffug
+              # already verifies it.
+              Resource: !Ref PorthContextSigningKeyArn
             - Sid: CallFfug
               Effect: Allow
               Action: lambda:InvokeFunction
@@ -842,26 +831,24 @@ Resources:
               # the boundary — which is the correct posture for a service that
               # cannot check who is calling it.
               #
-              # PORTH-623 — ONE STATEMENT PER KEY IT MAY VERIFY, and the list is
-              # the whole point. A receiver needs Verify on every key that might
-              # legitimately have signed what arrives, because the verifier
-              # follows the token's own `kid`. Miss one and the call fails as
-              # `bad_signature` — which reads like forgery and is a missing
-              # grant, the most misleading failure in this design.
+              # One key, because everything that currently calls ffug signs with
+              # the install key: the sample app (whose request key it is) and the
+              # UAT runner (which mints as `porth`).
               #
-              # Porth's key: the UAT runner mints as `porth` and invokes ffug.
+              # PORTH-623 RETIRES THIS STATEMENT ENTIRELY. Verification moves
+              # local — the trust list carries each key's public key and the
+              # receiver checks ECDSA-P256 itself — which deletes the N-by-N
+              # Verify matrix and makes the design's most misleading failure
+              # impossible: today a missing Verify grant surfaces as
+              # `bad_signature`, indistinguishable from forgery. It stays until
+              # the porth-common release that does local verification, because
+              # the installed version still calls kms:Verify at runtime and
+              # removing the grant early refuses every crossing.
               - !If
                 - HasContextSigningKey
                 - Effect: Allow
                   Action: kms:Verify
                   Resource: !Ref PorthContextSigningKeyArn
-                - !Ref AWS::NoValue
-              # The sample app's key: every real request crossing.
-              - !If
-                - HasSampleAppSigningKey
-                - Effect: Allow
-                  Action: kms:Verify
-                  Resource: !Ref SampleAppSigningKeyArn
                 - !Ref AWS::NoValue
               # The D3 service registry (is the calling service registered and
               # active?), the session-policy template the narrowing renders, and
