@@ -251,11 +251,13 @@ def test_the_request_serving_function_holds_no_standing_table_grant():
         f"request needs comes from the credentials the authorizer minted for "
         f"it, and a grant underneath those makes the narrowing advisory."
     )
-    # PORTH-603 — the parameter read is bounded to exactly the two documents
-    # ServiceClient needs. A path wildcard here would be a standing read over
-    # every parameter the install has, including the session-policy templates.
+    # PORTH-603/623 — the parameter read is bounded to exactly the three
+    # documents the internal plane needs: the D3 registry, the D7.4 endpoint
+    # map, and the signing-key trust list. A path wildcard here would be a
+    # standing read over every parameter the install has, including the
+    # session-policy templates.
     reads = re.findall(r"parameter/porth/\$\{PorthBranch\}/([^\s]+)", yaml_only)
-    assert sorted(reads) == ["service-endpoints", "services"], reads
+    assert sorted(reads) == ["service-endpoints", "services", "signing-keys"], reads
 
     assert "kms:Verify" not in yaml_only, (
         "SampleAppFunction holds kms:Verify. It is the CALLER on the internal "

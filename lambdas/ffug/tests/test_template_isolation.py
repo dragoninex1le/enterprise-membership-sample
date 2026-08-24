@@ -347,3 +347,97 @@ def test_iam_role_descriptions_are_iam_legal(resources):
             offenders.append(f"{name}: illegal {bad}")
 
     assert offenders == []
+
+
+# --- PORTH-623: one key per minting service ----------------------------------
+
+
+def _all_statements(node, path=()):
+    """Every IAM statement in the template, with the resource path that holds it.
+
+    Walks rather than indexing because the two shapes differ: an
+    `AWS::IAM::Role` carries `Properties.Policies[].PolicyDocument.Statement`,
+    while a SAM function's inline `Policies[].Statement` has no PolicyDocument
+    wrapper. A Sign-grant audit that only understood one shape would report a
+    clean sweep while missing the other — and `SampleAppFunction`, the one that
+    actually mints, uses the shape the role helper above cannot see.
+    """
+    if isinstance(node, dict):
+        if "Effect" in node and "Action" in node:
+            yield path, node
+        for key, value in node.items():
+            yield from _all_statements(value, path + (str(key),))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from _all_statements(value, path + (str(index),))
+
+
+def _grants(template, action):
+    """Resource names whose statements grant *action*, with the Resource given."""
+    found = {}
+    for path, statement in _all_statements(template.get("Resources", {})):
+        actions = statement["Action"]
+        actions = [actions] if isinstance(actions, str) else actions
+        if action in actions:
+            found.setdefault(path[0], []).append(statement.get("Resource"))
+    return found
+
+
+def test_only_these_roles_may_mint_and_only_on_their_own_key(template):
+    """The allow-list that stops the shared-key blast radius coming back.
+
+    A new Sign grant is how it returns: one function at a time, each
+    individually reasonable. Components pins the same property on its own
+    template; this is the consuming half.
+
+    The sample app mints request envelopes; the UAT runner mints to drive the
+    journeys. Nothing else, and neither on a key belonging to anyone else.
+    """
+    signers = _grants(template, "kms:Sign")
+
+    assert set(signers) == {"SampleAppFunction", "PorthUatRunnerRole"}, (
+        f"kms:Sign grants changed: {sorted(signers)}. On a shared key Sign is "
+        f"permission to mint context for any tenant, as any service, to any "
+        f"audience — a new holder is a new forgery capability, not a widened "
+        f"permission."
+    )
+    assert signers["SampleAppFunction"] == [{"Ref": "SampleAppSigningKeyArn"}], (
+        "the sample app must sign with its OWN key — signing with "
+        "PorthContextSigningKeyArn is the shared-key problem PORTH-623 removed"
+    )
+
+
+def test_ffug_can_verify_every_key_that_may_legitimately_sign_to_it(template):
+    """Miss one and the failure lies to you.
+
+    The verifier follows the token's own `kid`, so a receiver needs Verify on
+    every key that might have signed what arrives. A missing grant surfaces as
+    `bad_signature` — indistinguishable from forgery, and actually IAM.
+
+    Two keys reach ffug: the sample app's, on every real crossing, and Porth's,
+    because the UAT runner mints as `porth` to drive the journeys.
+    """
+    verifiers = _grants(template, "kms:Verify")
+
+    assert set(verifiers) == {"FfugFunctionRole"}, sorted(verifiers)
+    assert sorted(map(str, verifiers["FfugFunctionRole"])) == sorted(
+        map(str, [{"Ref": "PorthContextSigningKeyArn"}, {"Ref": "SampleAppSigningKeyArn"}])
+    )
+
+
+def test_the_signing_key_parameters_are_separate_from_porths(template):
+    """Three parameters, not one reused three ways.
+
+    The shared key is now Porth core's own service key. Collapsing these back to
+    one parameter would re-create the exact capability PORTH-623 removed, and it
+    would do so as a diff that looks like tidying.
+    """
+    parameters = template["Parameters"]
+
+    for name in ("PorthContextSigningKeyArn", "FfugSigningKeyArn", "SampleAppSigningKeyArn"):
+        assert name in parameters, f"{name} is missing"
+        assert parameters[name].get("Default") == "", (
+            f"{name} must default to empty — absent a key the service deploys "
+            f"with no signer and refuses at the boundary rather than sending "
+            f"something unsigned"
+        )

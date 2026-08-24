@@ -186,11 +186,48 @@ Parameters:
       the request path has no verifier and refuses every call. Which half is
       wired is reported in the stack outputs rather than left to be discovered.
 
+  FfugSigningKeyArn:
+    Type: String
+    Default: ''
+    Description: >
+      ARN of ffug's OWN context-signing key (PORTH-623), written to SSM by the
+      porth-install-once Terraform module at
+      /porth/{branch}/infra/signing-key-arn/ffug and resolved by deploy.yml.
+
+      Separate from PorthContextSigningKeyArn on purpose. ffug signs only when
+      it completes asynchronous work and calls back; on the shared install key
+      that grant would be permission to mint context for any tenant, as any
+      service, to any audience. Per-service keys are what keep the class of
+      verify-only receivers — the one UAT-4 witnesses — from eroding a service
+      at a time.
+
+      Empty is a real state: ffug deploys with no signer and the callback leg is
+      refused at the boundary rather than sent unsigned.
+
+  SampleAppSigningKeyArn:
+    Type: String
+    Default: ''
+    Description: >
+      ARN of the sample app's OWN context-signing key (PORTH-623), from
+      /porth/{branch}/infra/signing-key-arn/sample-app.
+
+      This REPLACES the shared key for minting: the app used to sign request
+      envelopes with PorthContextSigningKeyArn, and that key is now Porth core's
+      own service key rather than everyone's. ffug must hold kms:Verify on this
+      key or every call it receives fails as bad_signature — which reads like a
+      forgery and is actually a missing grant.
+
 Conditions:
 
   # PORTH-587. Both KMS grants name a key ARN in their Resource, and IAM rejects
   # an empty one. Absent the key, ffug deploys as the bus consumer only.
   HasContextSigningKey: !Not [!Equals [!Ref PorthContextSigningKeyArn, '']]
+
+  # PORTH-623. Same reason as above, one condition per key: IAM rejects an empty
+  # Resource, and these arrive independently — an install can have Porth's key
+  # seeded and its own service keys not yet applied.
+  HasFfugSigningKey: !Not [!Equals [!Ref FfugSigningKeyArn, '']]
+  HasSampleAppSigningKey: !Not [!Equals [!Ref SampleAppSigningKeyArn, '']]
 
 Resources:
 
@@ -483,7 +520,10 @@ Resources:
           # Empty is a real state, not a misconfiguration: without the key this
           # app deploys with no signer, and every internal call is refused at
           # the boundary rather than sent unsigned.
-          PORTH_CONTEXT_SIGNING_KEY_ALIAS: !Ref PorthContextSigningKeyArn
+          # PORTH-623 — this app's own key. The variable name still says
+          # "ALIAS" because that is porth-common's contract; KMS takes an ARN
+          # or an alias as a KeyId, and an ARN is what Terraform publishes.
+          PORTH_CONTEXT_SIGNING_KEY_ALIAS: !Ref SampleAppSigningKeyArn
           # No FFUG_FUNCTION_ARN. Where ffug lives is resolved from the endpoint
           # map at /porth/{branch}/service-endpoints, which is the whole point of
           # D7.4 — an address at the call site is an address that cannot follow
@@ -541,7 +581,11 @@ Resources:
                 # Granting Sign alone gets you AccessDenied on DescribeKey one
                 # frame earlier, wearing SigningUnavailableError.
                 - kms:DescribeKey
-              Resource: !Ref PorthContextSigningKeyArn
+              # PORTH-623 — the app's OWN key, not the shared install key.
+              # Sign on the shared key is not "sign as yourself": it mints
+              # context for any tenant, as any service, to any audience. The
+              # shared key is now Porth core's own service key.
+              Resource: !Ref SampleAppSigningKeyArn
             - Sid: CallFfug
               Effect: Allow
               Action: lambda:InvokeFunction
@@ -566,6 +610,10 @@ Resources:
               Resource:
                 - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services
                 - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/service-endpoints
+                # PORTH-623 — read on every inbound internal call, and a minter
+                # needs it too: assert_signs_for runs against the same document
+                # whichever direction the crossing goes.
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/signing-keys
       Events:
         ApiProxy:
           Type: HttpApi
@@ -793,18 +841,41 @@ Resources:
               # the key ffug has no verifier and refuses every call — loudly, at
               # the boundary — which is the correct posture for a service that
               # cannot check who is calling it.
+              #
+              # PORTH-623 — ONE STATEMENT PER KEY IT MAY VERIFY, and the list is
+              # the whole point. A receiver needs Verify on every key that might
+              # legitimately have signed what arrives, because the verifier
+              # follows the token's own `kid`. Miss one and the call fails as
+              # `bad_signature` — which reads like forgery and is a missing
+              # grant, the most misleading failure in this design.
+              #
+              # Porth's key: the UAT runner mints as `porth` and invokes ffug.
               - !If
                 - HasContextSigningKey
                 - Effect: Allow
                   Action: kms:Verify
                   Resource: !Ref PorthContextSigningKeyArn
                 - !Ref AWS::NoValue
+              # The sample app's key: every real request crossing.
+              - !If
+                - HasSampleAppSigningKey
+                - Effect: Allow
+                  Action: kms:Verify
+                  Resource: !Ref SampleAppSigningKeyArn
+                - !Ref AWS::NoValue
               # The D3 service registry (is the calling service registered and
-              # active?) and the session-policy template the narrowing renders.
+              # active?), the session-policy template the narrowing renders, and
+              # the signing-key trust list.
+              #
+              # The trust list is read on EVERY inbound internal call — it is
+              # what turns the token's `kid` into "which service may claim to be
+              # the source". Fail-closed: unreadable means every call refused,
+              # so this grant is not optional for a receiver (PORTH-623).
               - Effect: Allow
                 Action: ssm:GetParameter
                 Resource:
                   - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/signing-keys
                   - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/auth-session-policy/*
 
   FfugFunction:
