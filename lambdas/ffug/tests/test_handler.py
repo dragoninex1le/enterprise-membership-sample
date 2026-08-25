@@ -84,7 +84,12 @@ def porth(monkeypatch, table):
             self.context = verified_context(**kwargs)
 
         def raises(self, exc):
-            def boom(_event):
+            # Two parameters, because get_context gained `direction` in
+            # porth-common 0.0.11 (PORTH-623) — the ingress declares which
+            # direction it accepts so a response-direction kid presented at a
+            # request door is refused inside the library. Defaulted so the stub
+            # works whichever way the Director calls it.
+            def boom(_event, _direction=None):
                 raise exc
 
             monkeypatch.setattr("porth_common.director.get_context", boom)
@@ -101,7 +106,16 @@ def porth(monkeypatch, table):
     controller = Controller()
     controller.table = table
 
-    monkeypatch.setattr("porth_common.director.get_context", lambda _e: controller.context)
+    # NOTE: stubbing get_context also stubs out the direction wall it now
+    # enforces. That is the right trade here — these tests are about ffug's own
+    # logic, and the wall is porth-common's to prove — but it means no test in
+    # this file would notice if ffug's ingress started accepting the wrong
+    # direction. ffug takes the default (`expects=REQUEST`), which is correct
+    # for a request ingress; a callback ingress must pass Direction.RESPONSE.
+    monkeypatch.setattr(
+        "porth_common.director.get_context",
+        lambda _e, _direction=None: controller.context,
+    )
     store = MagicMock(Table=lambda _n: table)
     controller.store = store
     monkeypatch.setattr(h.FfugDirector, "resource", lambda self, _capability: store)
