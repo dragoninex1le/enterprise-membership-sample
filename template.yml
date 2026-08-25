@@ -345,6 +345,28 @@ Resources:
             Action:
               - sts:AssumeRole
               - sts:TagSession
+          # PORTH-621 — the internal plane's way in to the SAME data identity.
+          #
+          # Account root, NOT the callback role, and not by preference: naming
+          # that role here is a CloudFormation cycle, because it must reference
+          # this role to be granted sts:AssumeRole on it. Root trust means
+          # "assumable by any principal in this account that has been GRANTED
+          # AssumeRole on it" — the grant is the gate and it lives on the
+          # caller, where a reader looking for who can assume this will find it.
+          # Same shape as FfugTenantRole, for the same reason.
+          #
+          # One ceiling, narrowed two ways. A person's request narrows through
+          # SampleAppSessionPolicy on session TAGS; a verified callback narrows
+          # through the rendered document below, which the internal plane passes
+          # inline and which takes NO tags. A second role would mean two places
+          # that must keep agreeing about which table is this app's.
+          #
+          # No sts:TagSession here: narrowed_credentials() on the internal plane
+          # calls AssumeRole with no Tags at all.
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: sts:AssumeRole
       Policies:
         - PolicyName: AppTableCeiling
           PolicyDocument:
@@ -381,6 +403,26 @@ Resources:
               # populates no dynamodb:LeadingKeys, so ForAllValues:StringLike
               # passes vacuously against it — granting it anywhere in this pair
               # would read as tenant-scoped while reaching every tenant.
+
+  # PORTH-621 — the same narrowing, for a caller who arrived on the internal
+  # plane. A DIFFERENT mechanism from SampleAppSessionPolicy below, and the
+  # difference is forced rather than chosen: that one resolves
+  # ${aws:PrincipalTag/porth-tenant}, and the internal plane's assume passes no
+  # tags, so it would narrow to nothing and the session would read nothing at
+  # all. This is a template document rendered with the VERIFIED environment and
+  # tenant and passed inline.
+  #
+  # $env and $tenant are placeholders the configuration provider substitutes.
+  # They are not CloudFormation, which is why the !Sub above them does not touch
+  # them — and why a reviewer should read the two dollar signs differently.
+  SampleAppCallbackSessionPolicy:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /porth/${PorthBranch}/auth-session-policy/sample-app-tenant-scoped
+      Type: String
+      Description: "Sample app per-callback tenant narrowing - rendered into an STS session policy (PORTH-621)."
+      Value: !Sub |-
+        {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:PutItem","dynamodb:Query","dynamodb:UpdateItem","dynamodb:DeleteItem","dynamodb:BatchGetItem","dynamodb:BatchWriteItem","dynamodb:ConditionCheckItem"],"Resource":"${SampleAppTable.Arn}","Condition":{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["ENV#$env#TENANT#$tenant","ENV#$env#TENANT#$tenant#*"]}}}]}
 
   # The per-request narrowing, passed by the session-policy index as a
   # PolicyArn on the assume. This is the isolating layer.
@@ -614,6 +656,91 @@ Resources:
             ApiId: !Ref SampleAppApi
             Path: /sample/{proxy+}
             Method: ANY
+
+  # ── Sample app callback ingress (PORTH-621) ───────────────────────────────
+  #
+  # Where ffug's completion arrives. A separate function from the API, for two
+  # reasons that are structural rather than stylistic: SampleAppFunction is a
+  # Mangum/FastAPI handler that expects an API Gateway event and cannot read
+  # {operation, payload, porth_context}, and it holds no table grant at all.
+  #
+  # This is ffug's shape mirrored — an invoke ingress that builds a Director
+  # from a verified envelope and reaches data only through the narrowing that
+  # envelope justifies.
+
+  SampleAppCallbackFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # ASCII only - IAM rejects anything outside Latin-1 printable.
+      Description: "Sample app callback ingress - verifies ffug completions and narrows to the callback's own tenant (PORTH-621)."
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: sample-app-callback
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # The gate FfugTenantRole's root trust refers to, and this app's
+              # equivalent: being allowed to assume the data identity is a
+              # property of THIS function, stated here where it is visible.
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !GetAtt SampleAppTenantRole.Arn
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/service-endpoints
+                  # ffug's document, by name, when a token claiming to be from
+                  # ffug arrives. A prefix rather than an exact parameter, since
+                  # PORTH-625 split the trust list one document per service.
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/signing-keys/*
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/auth-session-policy/*
+              # NO KMS. Not an omission and not a narrowing of one — as of
+              # porth-common 0.0.11 the trust document carries the public key
+              # and verification is a local ECDSA check, so a kms:Verify grant
+              # here would mean something is calling KMS at verify time again.
+              #
+              # NO kms:Sign either, and that one is the property: this function
+              # receives completions and originates nothing. It is the mirror of
+              # ffug's request path holding no Sign, and it is asserted in
+              # test_template_isolation.py rather than left to be noticed.
+              #
+              # NO DynamoDB. Nothing to fall back to, so a narrowing failure is
+              # an AccessDenied rather than a quiet read of every tenant.
+
+  SampleAppCallbackFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub porth-sample-app-callback-${PorthEnvironment}
+      CodeUri: lambdas/
+      Handler: sample_app_callback.handler.handler
+      Runtime: python3.12
+      Timeout: 30
+      MemorySize: 256
+      Role: !GetAtt SampleAppCallbackFunctionRole.Arn
+      Environment:
+        Variables:
+          # The same registered identity the API function uses, and it must be:
+          # verify_callback recomputes the correlation hash from the callback's
+          # own verified `aud`, which is this string. A second spelling would
+          # make every authentic completion look like a mismatch.
+          PORTH_SERVICE_ID: sample-app
+          PORTH_BRANCH: !Ref PorthBranch
+          PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
+          PORTH_ENVIRONMENT: !Ref PorthEnvironment
+          PORTH_SERVICE_DATA_IDENTITY: !GetAtt SampleAppTenantRole.Arn
+          # Derived from the parameter's own name rather than spelled again —
+          # the two cannot disagree about which document is being asked for.
+          PORTH_SERVICE_DATA_SCOPE: !Select [4, !Split ["/", !Ref SampleAppCallbackSessionPolicy]]
+          # No signing key, deliberately. This end verifies and never mints.
 
   # ── Sample app EventBridge consumer Lambda ────────────────────────────────
 
@@ -1063,7 +1190,11 @@ Resources:
               # not.
               - Effect: Allow
                 Action: lambda:InvokeFunction
-                Resource: !GetAtt SampleAppFunction.Arn
+                # The CALLBACK ingress, not the API function. SampleAppFunction
+                # is a Mangum handler that cannot read an invoke event and holds
+                # no table grant; pointing here at the thing a human talks to
+                # would deliver every completion to a 500.
+                Resource: !GetAtt SampleAppCallbackFunction.Arn
               - Effect: Allow
                 Action:
                   - sqs:ReceiveMessage

@@ -104,6 +104,67 @@ def fingerprint(director, document: dict[str, Any]) -> dict[str, str]:
     return {"prime": str(body["prime"]), "digest": str(body["digest"])}
 
 
+#: Where ffug should deliver a completion. A service and an operation — never an
+#: address. The endpoint is resolved from the D7.4 map at send time, on ffug's
+#: side, so this app cannot hand a worker somewhere to post to and a compromised
+#: worker cannot be told to post somewhere else.
+FINGERPRINT_CALLBACK = {"service_id": "sample-app", "operation": "fingerprint-complete"}
+
+
+def fingerprint_async(director, document: dict[str, Any], *, trace_id: str) -> str:
+    """Ask ffug to fingerprint *document* later, and return the accepted trace id.
+
+    The crossing itself is as synchronous as any other — a RequestResponse
+    invoke that returns as soon as ffug has taken the work. What is asynchronous
+    is the *work*, and the answer comes back as a fresh crossing in the opposite
+    direction rather than as this call's return value.
+
+    ``trace_id`` is passed rather than derived, and it is the same value the
+    caller has already hashed into the record. It has to be: it rides in the
+    signed envelope, ffug persists it with the context, and it comes back in the
+    callback's claims as the only thing tying the answer to the question. Letting
+    this function mint one would mean the initiator hashed an identity the call
+    never carried, and every callback would look like a correlation mismatch.
+
+    ``idempotent=True`` is unchanged in meaning and is a narrower claim than it
+    looks: retrying THIS call is safe because it re-queues the same work under
+    the same trace, and a duplicate completion is the benign outcome the
+    correlation check tolerates by design.
+    """
+    try:
+        body = ServiceClient(director).call(
+            FFUG_SERVICE_ID,
+            "hash_async",
+            {"payload": document, "callback": FINGERPRINT_CALLBACK},
+            idempotent=True,
+            trace_id=trace_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — same breadth as fingerprint(), same reason
+        raise FingerprintUnavailable(str(exc)) from exc
+
+    if not isinstance(body, dict) or not body.get("ok"):
+        error = (body or {}).get("error", {}) if isinstance(body, dict) else {}
+        raise FingerprintUnavailable(
+            f"{error.get('code', 'refused')}: {error.get('message', '')}"
+        )
+
+    accepted = str(body.get("trace_id") or "")
+    if accepted != trace_id:
+        # Not a formality. The stored correlation hash is anchored to the trace
+        # WE sent; if ffug is working under a different one, every callback will
+        # arrive authentic and refuse to correlate, and the fault will look like
+        # a mismatch at the receiving end rather than a disagreement here.
+        raise FingerprintUnavailable(
+            f"ffug accepted the work under trace {accepted!r}, not {trace_id!r}"
+        )
+
+    log.info(
+        "sample_app.fingerprint_queued tenant_id=%s trace_id=%s",
+        director.tenant_id, trace_id,
+    )
+    return accepted
+
+
 def isolation_probe(director, probe_tenant: str = "") -> dict[str, Any]:
     """Ask ffug what its OWN narrowed session can reach in its OWN table.
 
