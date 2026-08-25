@@ -422,7 +422,6 @@ def test_the_caller_carries_everything_the_internal_plane_reads():
         # the ADR-Z8 DATA axis — which slot the envelope is minted for
         "PORTH_FIXED_ENVIRONMENT",
         # the key mint_token describes, then signs with
-        "PORTH_CONTEXT_SIGNING_KEY_ALIAS",
     }
     missing = required - variables
     assert not missing, (

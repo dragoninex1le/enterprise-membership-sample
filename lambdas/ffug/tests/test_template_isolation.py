@@ -631,69 +631,89 @@ def test_ffug_calls_back_to_the_ingress_and_not_to_the_api(resources):
     ]
 
 
-# --- a signer is configured for the direction it is entitled to (PORTH-622) ---
+# --- nothing names a signing key any more (PORTH-623) -----------------------
 
 
 def _alias_vars():
-    """The variable names porth-common actually reads, imported not restated.
+    """The variable names porth-common USED to read, imported not restated.
 
-    Spelling them here would make this test agree with a version of the library
-    nobody runs — the failure would be a green suite and a service that cannot
-    sign, which is exactly what happened.
+    Still imported rather than spelled, for the same reason as before: a test
+    that hardcodes the names agrees with a version of the library nobody runs.
+    Now they must be ABSENT, so the import doubles as the guard that the library
+    really did drop them — if `_ALIAS_ENV_VARS` comes back, this fails on the
+    import and someone reads why.
     """
-    from porth_common.context.envelope import _ALIAS_ENV_VARS
+    from porth_common.context import envelope
 
-    return _ALIAS_ENV_VARS["request"], _ALIAS_ENV_VARS["response"]
+    return getattr(envelope, "_ALIAS_ENV_VARS", None)
 
 
 def _env_of(resources, function):
     return resources[function]["Properties"].get("Environment", {}).get("Variables", {})
 
 
-def test_a_response_signer_names_the_response_variable(resources):
-    """The pairing the whole per-direction design rests on.
+def test_the_library_no_longer_reads_a_signing_key_from_the_environment():
+    """The change these template assertions rest on.
 
-    One variable per direction is not naming style: holding the capability to
-    sign a completion must not confer the capability to mint a request. A
-    service configured for one direction and asked for the other has no key and
-    refuses.
-
-    Setting the REQUEST variable to a RESPONSE key — which is what shipped for
-    one deploy — fails both ways at once. The worker could not sign a completion
-    (`SigningUnavailableError`, live), and anything asking it for a request
-    would have been served one signed with the response key.
+    A signer's key now comes from its own trust document, resolved by
+    (branch, service_id, direction). If the env-var table returns, the
+    assertions below stop meaning anything — a function could name a key again
+    and the library would honour it.
     """
-    request_var, response_var = _alias_vars()
-    env = _env_of(resources, "FfugWorkerFunction")
-
-    assert env.get(response_var) == {"Ref": "FfugResponseSigningKeyArn"}, (
-        f"the worker must name {response_var}; it is the only thing that lets it "
-        f"sign a completion, and the only key it holds is a response key"
-    )
-    assert request_var not in env, (
-        f"the worker sets {request_var}. That is request authority, and a "
-        f"completing service holding it is the collapse per-direction keys "
-        f"exist to prevent"
+    assert _alias_vars() is None, (
+        "porth_common.context.envelope._ALIAS_ENV_VARS is back — the signing key "
+        "is configurable again, and the template guards below are no longer the "
+        "whole story"
     )
 
 
-def test_a_request_signer_names_the_request_variable(resources):
-    """The mirror, so the two cannot be swapped without one of them failing."""
-    request_var, response_var = _alias_vars()
-    env = _env_of(resources, "SampleAppFunction")
+def test_no_function_names_a_signing_key(resources):
+    """One fact, one place.
 
-    assert env.get(request_var) == {"Ref": "PorthContextSigningKeyArn"}
-    assert response_var not in env, (
-        f"the app sets {response_var}. It originates work and completes none — "
-        f"response authority here would let it forge a completion to itself"
+    Naming the key here as well as in the trust document is a second source for
+    it, and the two can disagree while both look right. They did: the worker was
+    given the REQUEST variable pointing at its RESPONSE key, IAM correct, deploy
+    clean, failure on the fifth SQS redelivery.
+
+    Matched by PREFIX rather than by the two old names, so a third variable
+    invented for a third direction is caught too.
+    """
+    offenders = {
+        name: sorted(v for v in _env_of(resources, name) if "SIGNING_KEY" in v)
+        for name in resources
+        if resources[name].get("Type", "").endswith("Serverless::Function")
+    }
+    offenders = {k: v for k, v in offenders.items() if v}
+
+    assert not offenders, (
+        f"functions naming a signing key: {offenders}. The key follows from "
+        f"(service_id, direction) and is resolved from the service's own "
+        f"document — there is nothing here to point at it with."
     )
+
+
+def test_the_worker_still_holds_sign_on_the_response_key_only(resources):
+    """The IAM half is unchanged and still matters.
+
+    Removing the variable removed the way to point at the WRONG key. What stops
+    this role signing a request is still the grant: it holds Sign on ffug's
+    response key and on nothing else, so a request-direction lookup would
+    resolve an alias it cannot use.
+    """
+    found = actions(resources["FfugWorkerFunctionRole"])
+
+    assert "kms:Sign" in found
+    for statement in statements(resources["FfugWorkerFunctionRole"]):
+        acts = statement["Action"]
+        if "kms:Sign" in (acts if isinstance(acts, list) else [acts]):
+            assert statement["Resource"] == {"Ref": "FfugResponseSigningKeyArn"}
 
 
 def test_the_ingress_that_only_verifies_holds_no_signing_variable(resources):
-    """The callback ingress receives and originates nothing. Neither variable."""
-    request_var, response_var = _alias_vars()
+    """Unchanged in intent: the callback ingress receives and originates
+    nothing. It now holds no signing variable because nobody does, but the
+    assertion is kept pointed at this function specifically — it is the one
+    where a stray key would be a capability, not just clutter."""
     env = _env_of(resources, "SampleAppCallbackFunction")
 
-    assert request_var not in env and response_var not in env, (
-        f"the callback ingress is configured to sign: {sorted(env)}"
-    )
+    assert not [v for v in env if "SIGNING_KEY" in v], sorted(env)

@@ -69,7 +69,7 @@ def test_a_document_of_that_shape_actually_loads():
         "service_id": "ffug",
         "keys": [
             {
-                "kid": "arn:aws:kms:us-east-1:195950944420:key/00000000-0000-0000-0000-000000000000",
+                "alias": "alias/porth-context-ffug-response-dev",
                 "direction": "response",
                 "public_key": base64.b64encode(b"not a real key, but valid base64").decode(),
                 "description": "EMS ffug response",
@@ -80,7 +80,13 @@ def test_a_document_of_that_shape_actually_loads():
     parsed = validate_document(json.dumps(document), expected_service_id="ffug")
 
     assert parsed.service_id == "ffug"
-    assert parsed.entry_for(document["keys"][0]["kid"], parsed.keys[0].direction) is not None
+    # Resolved by DIRECTION, not by a key identifier. The document no longer
+    # stores a kid: the kid names which key made a signature and rides in the
+    # envelope, so what a reader needs here is the alias to sign with and the
+    # public key to check against (PORTH-623).
+    direction = parsed.keys[0].direction
+    assert parsed.signing_alias(direction) == document["keys"][0]["alias"]
+    assert parsed.public_keys_for(direction), "no key to verify a signature against"
 
 
 def test_the_app_gets_a_document_even_though_it_has_no_key_of_its_own():

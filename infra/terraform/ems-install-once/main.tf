@@ -161,7 +161,15 @@ locals {
         service_id       = service
         keys = [
           for key, pair in local.signing_keys : {
-            kid         = aws_kms_key.service_signing[key].arn
+            # The ALIAS, not the key ARN (PORTH-623, Richard 2026-08-25). This
+            # field answers "what does this service sign with", and an alias is
+            # the right answer precisely because it moves: rotation repoints it
+            # and the signer follows with no document edit.
+            #
+            # NOT the kid. The kid identifies which key produced a signature and
+            # already travels in the envelope header — storing a copy here would
+            # duplicate what the token carries.
+            alias       = aws_kms_alias.service_signing[key].name
             direction   = pair.direction
             public_key  = data.aws_kms_public_key.service_signing[key].public_key
             description = "EMS ${pair.service_id} ${pair.direction}"
@@ -179,7 +187,17 @@ locals {
         contract_version = 1
         service_id       = "sample-app"
         keys = [{
-          kid         = data.aws_ssm_parameter.install_signing_key_arn.value
+          # Constructed, and that is a weakness worth stating rather than
+          # hiding. Porth publishes its key's ARN at
+          # /porth/{branch}/infra/context-signing-key-arn but publishes no
+          # alias, so this literal has to keep agreeing with Porth's own
+          # `alias/porth-context-${Environment}`. If Porth renames it, this
+          # silently registers an alias nothing can sign with — and the failure
+          # appears at the first crossing, not here.
+          #
+          # The fix is upstream: Porth should publish its alias beside its ARN.
+          # Raised with the identity findings on PORTH-623.
+          alias       = "alias/porth-context-${var.porth_branch}"
           direction   = "request"
           public_key  = data.aws_kms_public_key.install_signing_key.public_key
           description = "EMS sample-app request (the install key)"
