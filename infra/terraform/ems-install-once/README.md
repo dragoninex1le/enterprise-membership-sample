@@ -118,13 +118,33 @@ aws ssm delete-parameter --name /porth/dev/signing-keys --region us-east-1
 
 EMS never adopted 0.0.10, so EMS should not have one.
 
+### Two registrations, not one
+
+The deploy registers **two** keys, and the second is the one that is easy to
+miss.
+
+| document | key | direction | why |
+|---|---|---|---|
+| `signing-keys/sample-app` | the **install** key | request | the app claims `sample-app` and signs with the install key |
+| `signing-keys/ffug` | ffug's own key | response | ffug signs only when it calls back |
+
+Verification resolves `(kid, source_service, direction)` by fetching the document
+of the service the token **claims to be from**. So the install key must appear
+under `sample-app` — without it every crossing that works today starts failing
+with `UnknownSigningServiceError`, because nothing else creates that document.
+
+The same kid legitimately appears in two documents: Porth registers it under
+`porth` for its own use, and it is the app's request key here. The duplicate-kid
+guard is *per document* on purpose — what it stops is one key serving both
+directions, which would undo the split.
+
 ### What the deploy role needs
 
-The registration step calls KMS and writes SSM, so the deploy identity needs
-`kms:DescribeKey` and `kms:GetPublicKey` on this key, and `ssm:GetParameter` +
-`ssm:PutParameter` on `/porth/{branch}/signing-keys/ffug`. Absent those, the
-step fails loudly — which is the right direction, but it fails after the stack
-has already deployed.
+The registration calls KMS and writes SSM, so the deploy identity needs
+`kms:DescribeKey` and `kms:GetPublicKey` on both keys, and `ssm:GetParameter` +
+`ssm:PutParameter` on `/porth/{branch}/signing-keys/*` — the **prefix**, because
+it writes two documents. Absent those, the step fails loudly, but after the
+stack has already deployed.
 
 ### No `kms:Verify`, anywhere
 

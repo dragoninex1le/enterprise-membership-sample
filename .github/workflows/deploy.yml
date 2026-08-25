@@ -524,8 +524,7 @@ jobs:
               ${OPTIONAL[@]+"${OPTIONAL[@]}"} \
             --no-fail-on-empty-changeset
 
-      - name: Register ffug's response signing key (PORTH-623/625)
-        if: env.FFUG_RESPONSE_KEY_ARN != ''
+      - name: Register this install's signing keys (PORTH-623/625)
         run: |
           set -euo pipefail
 
@@ -549,11 +548,44 @@ jobs:
           # install that lost the parameter heals on the next deploy.
           pip install --quiet 'porth-install>=0.3.2'
 
-          porth-install signing-key register \
-            --service ffug \
-            --direction response \
-            --key-arn "${FFUG_RESPONSE_KEY_ARN}" \
-            --branch "${PORTH_BRANCH}"
+          # TWO registrations, and the second is the one that is easy to miss.
+          #
+          # Verification resolves (kid, source_service, direction) by fetching
+          # the document of the service the token CLAIMS to be from. The sample
+          # app claims `sample-app` and signs with the INSTALL key — so the
+          # install key must appear in signing-keys/sample-app as a request key,
+          # or every crossing that works today starts failing with
+          # UnknownSigningServiceError.
+          #
+          # The same kid legitimately appears in two documents: Porth registers
+          # it under `porth` for its own use, and it is the app's request key
+          # here. The duplicate-kid guard is per document, deliberately — what
+          # it stops is one key serving both DIRECTIONS, which would undo the
+          # split.
+          if [ -n "${PORTH_CONTEXT_KEY_ARN:-}" ]; then
+            porth-install signing-key register \
+              --service sample-app \
+              --direction request \
+              --key-arn "${PORTH_CONTEXT_KEY_ARN}" \
+              --branch "${PORTH_BRANCH}"
+          else
+            echo "::warning::No context signing key — sample-app's request key"
+            echo "::warning::cannot be registered, so ffug will refuse its calls."
+          fi
+
+          # ffug signs only when it completes async work and calls back, so it
+          # has a response key and no request key at all.
+          if [ -n "${FFUG_RESPONSE_KEY_ARN:-}" ]; then
+            porth-install signing-key register \
+              --service ffug \
+              --direction response \
+              --key-arn "${FFUG_RESPONSE_KEY_ARN}" \
+              --branch "${PORTH_BRANCH}"
+          else
+            echo "::warning::No ffug response key yet — apply"
+            echo "::warning::infra/terraform/ems-install-once. The callback leg"
+            echo "::warning::cannot sign until it exists; nothing else is affected."
+          fi
 
       - name: Diagnose SAM managed-bucket failure
         if: failure()
