@@ -527,6 +527,11 @@ Resources:
           PORTH_ENVIRONMENT: !Ref PorthEnvironment
           AWS_ACCOUNT_ID: !Ref AWS::AccountId
           CLOUDFRONT_ALIAS: !Ref CloudFrontAlias
+          # PORTH-622 — the app configured no level at all, so it inherited
+          # Lambda's WARNING default and every log.info it makes was discarded.
+          # Reuses FfugLogLevel rather than adding a second knob: one dial for
+          # "how loud is this install" is the thing an operator actually wants.
+          SAMPLE_APP_LOG_LEVEL: !Ref FfugLogLevel
           # PORTH-599 — this app's identity on Porth's internal plane, and the
           # callee it reaches. PORTH_SERVICE_ID must match a service registered
           # in /porth/{branch}/services or ffug refuses the call; that document
