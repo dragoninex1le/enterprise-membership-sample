@@ -24,6 +24,14 @@ interface Approval {
    *  screen can be checked by hand rather than believed. */
   fingerprint_document?: Record<string, string>
   fingerprint_error?: string
+  /** PORTH-621 — 'queued' | 'complete' | absent. The three are genuinely
+   *  different and the screen has to say which: `queued` means ffug has the
+   *  work and the answer is coming, absent means no answer is coming at all.
+   *  Rendering the second as the first promises something that never arrives. */
+  fingerprint_status?: string
+  /** The instance identity this record's completion will carry. Shown so the
+   *  same value can be followed across the app, ffug, its worker and back. */
+  fingerprint_trace_id?: string
 }
 
 const STATUS_BADGE: Record<string, string> = {
@@ -247,6 +255,19 @@ function Fingerprint({ appr }: { appr: Approval }) {
       </div>
     )
   }
+  // PORTH-621 — the state that only exists because the work is asynchronous.
+  // The decision is committed and ffug has accepted the job; what is missing is
+  // the answer. The trace is shown because it is the one value that ties this
+  // row to four log groups.
+  if (appr.fingerprint_status === 'queued' && !appr.fingerprint_digest) {
+    return (
+      <div className="font-mono text-[11px] text-gray-500">
+        <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500 align-middle" />
+        <span className="ml-2 text-gray-400">queued with ffug — trace </span>
+        {appr.fingerprint_trace_id}
+      </div>
+    )
+  }
   if (!appr.fingerprint_digest) return null
   return (
     <div className="space-y-0.5 font-mono text-[11px] text-gray-600">
@@ -316,6 +337,46 @@ export default function ApprovalsPage() {
       .catch(() => setIdentity(null))
   }
 
+  // PORTH-621 — watch the rows whose answer has not arrived.
+  //
+  // Polled per RECORD rather than by refetching the list, and that is forced
+  // rather than preferred: /sample/approvals returns what awaits a decision, so
+  // an approved record leaves it the moment it is approved. Refetching would
+  // drop the very rows being watched.
+  //
+  // Keyed on a joined string, not the array. `approvals` is a new object on
+  // every merge, so an array dependency would tear down and rebuild the
+  // interval on each tick and it would never fire.
+  const queuedKeys = approvals
+    .filter(a => a.fingerprint_status === 'queued')
+    .map(a => `${a.record_type}/${a.record_id}`)
+    .join(',')
+
+  useEffect(() => {
+    if (!queuedKeys) return
+    const keys = queuedKeys.split(',')
+    const poll = () => {
+      keys.forEach(key => {
+        sampleApiClient
+          .get<Approval>(`/sample/approvals/${key}`)
+          .then(r => {
+            if (r.data?.fingerprint_status !== 'complete') return
+            setApprovals(prev =>
+              prev.map(a =>
+                `${a.record_type}/${a.record_id}` === key ? { ...a, ...r.data } : a
+              )
+            )
+          })
+          // Swallowed on purpose. A poll that fails is a poll that tries again;
+          // surfacing it in the page-level error banner would replace the
+          // approval list with a transient network message.
+          .catch(() => {})
+      })
+    }
+    const id = window.setInterval(poll, 3000)
+    return () => window.clearInterval(id)
+  }, [queuedKeys])
+
   function handleAction(appr: Approval, action: 'approve' | 'reject') {
     const recordId = appr.record_id
     sampleApiClient
@@ -331,6 +392,8 @@ export default function ApprovalsPage() {
                   fingerprint_digest: r.data.fingerprint_digest,
                   fingerprint_document: r.data.fingerprint_document,
                   fingerprint_error: r.data.fingerprint_error,
+                  fingerprint_status: r.data.fingerprint_status,
+                  fingerprint_trace_id: r.data.fingerprint_trace_id,
                 }
               : a
           )
@@ -409,7 +472,8 @@ export default function ApprovalsPage() {
                     </td>
                   )}
                 </tr>
-                {(appr.fingerprint_digest || appr.fingerprint_error) && (
+                {(appr.fingerprint_digest || appr.fingerprint_error ||
+                  appr.fingerprint_status === 'queued') && (
                   <tr className="bg-gray-50/60">
                     <td colSpan={canWrite ? 8 : 7} className="px-4 pb-3 pt-0">
                       <Fingerprint appr={appr} />

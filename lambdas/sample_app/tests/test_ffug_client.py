@@ -80,3 +80,90 @@ def test_the_reason_survives_to_the_screen(monkeypatch):
     _client_raising(monkeypatch, ConfigGone("could not read 'services' from /porth/dev/services"))
 
     assert "/porth/dev/services" in ffug_client.isolation_probe(_Director())["error"]
+
+
+# --- initiating asynchronous work (PORTH-621) --------------------------------
+
+
+class _Recording:
+    """A ServiceClient that records the call and answers as ffug would."""
+
+    def __init__(self, response):
+        self._response = response
+        self.seen = {}
+
+    def call(self, service_id, operation, payload=None, **kwargs):
+        self.seen = {"service_id": service_id, "operation": operation,
+                     "payload": payload, **kwargs}
+        return self._response
+
+
+def _client(monkeypatch, response):
+    recorder = _Recording(response)
+    monkeypatch.setattr(ffug_client, "ServiceClient", lambda _d: recorder)
+    return recorder
+
+
+def _accepted(trace="trace-1"):
+    return {"ok": True, "operation": "hash_async", "status": "queued", "trace_id": trace}
+
+
+def test_the_trace_sent_is_the_trace_the_caller_hashed(monkeypatch):
+    """Passed in, never minted here.
+
+    The initiator hashes a trace into the record before this runs. If this
+    function chose its own, the stored hash would name an identity the call
+    never carried and every callback would arrive authentic and refuse to
+    correlate — a failure that surfaces at the far end, hours later, looking
+    like a mismatch rather than a disagreement here.
+    """
+    recorder = _client(monkeypatch, _accepted("trace-1"))
+
+    ffug_client.fingerprint_async(_Director(), {"amount": "1"}, trace_id="trace-1")
+
+    assert recorder.seen["trace_id"] == "trace-1"
+    assert recorder.seen["operation"] == "hash_async"
+
+
+def test_the_callback_is_declared_as_a_service_and_an_operation(monkeypatch):
+    """Never an address. ffug resolves the endpoint from the D7.4 map at send
+    time, so this app cannot hand a worker somewhere to post to — and a worker
+    cannot be told to post somewhere else."""
+    recorder = _client(monkeypatch, _accepted())
+
+    ffug_client.fingerprint_async(_Director(), {"amount": "1"}, trace_id="trace-1")
+
+    callback = recorder.seen["payload"]["callback"]
+    assert callback == {"service_id": "sample-app", "operation": "fingerprint-complete"}
+    assert not any(k in str(callback).lower() for k in ("http", "arn:", "://"))
+
+
+def test_work_accepted_under_a_different_trace_is_a_failure_here(monkeypatch):
+    """Caught where the disagreement is, not where it eventually shows.
+
+    Every callback for this record would verify, correlate against the wrong
+    trace and be refused — reported at the receiving end as a mismatch, which
+    points at the wrong half of the system.
+    """
+    _client(monkeypatch, _accepted("some-other-trace"))
+
+    with pytest.raises(ffug_client.FingerprintUnavailable, match="some-other-trace"):
+        ffug_client.fingerprint_async(_Director(), {"amount": "1"}, trace_id="trace-1")
+
+
+def test_a_configuration_failure_is_still_not_a_500_on_the_async_path(monkeypatch):
+    """The same breadth as the synchronous call, for the same reason — and
+    stated separately because it is a second handler that could be narrowed
+    back to ServiceCallError without the first one noticing."""
+    _client_raising(monkeypatch, ConfigGone("no ssm:GetParameter on /porth/dev/services"))
+
+    with pytest.raises(ffug_client.FingerprintUnavailable):
+        ffug_client.fingerprint_async(_Director(), {"amount": "1"}, trace_id="trace-1")
+
+
+def test_a_refusal_from_ffug_carries_its_own_reason(monkeypatch):
+    _client(monkeypatch, {"ok": False, "error": {"code": "tenant_not_provisioned",
+                                                 "message": "no salt for this tenant"}})
+
+    with pytest.raises(ffug_client.FingerprintUnavailable, match="tenant_not_provisioned"):
+        ffug_client.fingerprint_async(_Director(), {"amount": "1"}, trace_id="trace-1")

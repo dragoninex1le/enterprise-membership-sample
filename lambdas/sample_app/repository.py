@@ -40,6 +40,13 @@ from boto3.dynamodb.conditions import Key
 #: spelling of it is a record that can never be found again.
 PENDING_APPROVAL = "pending_approval"
 
+#: Where a record's fingerprint has got to (PORTH-621). Three states, and the
+#: empty one is real: a record approved before ffug existed, or approved while
+#: it was unreachable, has never been in this lifecycle at all. Rendering that
+#: as "pending" would promise an answer that is never coming.
+FINGERPRINT_QUEUED = "queued"
+FINGERPRINT_COMPLETE = "complete"
+
 
 @dataclass(frozen=True)
 class _RecordSpec:
@@ -126,6 +133,14 @@ def _as_approval(record_type: str, spec: _RecordSpec, item: dict) -> dict:
         # rendering a blank that reads as "no fingerprint was ever wanted".
         "fingerprint_prime": item.get("fingerprint_prime", ""),
         "fingerprint_digest": item.get("fingerprint_digest", ""),
+        # PORTH-621. `queued` is the state that only exists because the work is
+        # asynchronous: the decision is committed and ffug has accepted the job,
+        # but no answer has arrived. The screen has to be able to say so, or a
+        # record mid-flight is indistinguishable from one ffug never saw.
+        "fingerprint_status": item.get("fingerprint_status", ""),
+        # The instance identity the callback will carry. Shown so the same value
+        # can be grepped across four log groups when the round trip is witnessed.
+        "fingerprint_trace_id": item.get("fingerprint_trace_id", ""),
     }
 
 #: The table NAME's environment — the deployment axis. Not the data axis; see
@@ -192,6 +207,20 @@ class SampleAppRepository:
                 if item.get("status") == PENDING_APPROVAL:
                     pending.append(_as_approval(record_type, spec, item))
         return sorted(pending, key=lambda a: a["submitted_at"])
+
+    def get_approval(self, record_type: str, record_id: str) -> dict | None:
+        """One record, in the shape the approvals screen reads.
+
+        `list_pending_approvals` returns only what is awaiting a decision, so an
+        approved record vanishes from it — which was fine while the fingerprint
+        arrived inside the approve call and is not fine now that it arrives
+        later. This is what a queued row is polled through (PORTH-621).
+        """
+        spec = _spec(record_type)
+        item = self.table.get_item(
+            Key={"pk": self.partition, "sk": f"{spec.prefix}{record_id}"}
+        ).get("Item")
+        return None if item is None else _as_approval(record_type, spec, item)
 
     # -- writes --------------------------------------------------------------
 
@@ -298,6 +327,84 @@ class SampleAppRepository:
             raise
         return _as_approval(spec.record_type, spec, resp.get("Attributes", {}))
 
+    def begin_fingerprint(
+        self, record_type: str, record_id: str, *, trace_id: str, correlation_hash: str
+    ) -> dict:
+        """Record that ffug has accepted the work, and what will identify the answer.
+
+        The correlation hash is stored **here**, at initiation, and that ordering
+        is the whole mechanism. Porth computes and compares; the application
+        stores. A hash derived when the callback arrives would be derived from
+        the callback, and would match itself.
+
+        Same `attribute_exists(pk)` guard as :meth:`attach_fingerprint`, for the
+        same reason: this must not be able to conjure a record.
+        """
+        spec = _spec(record_type)
+        resp = self.table.update_item(
+            Key={"pk": self.partition, "sk": f"{spec.prefix}{record_id}"},
+            # The prime and digest are removed rather than left standing. A
+            # re-approval showing the PREVIOUS answer beside a `queued` status
+            # reads as "here it is, still working", which is the one thing it is
+            # not — and the stale digest would verify against the old document.
+            UpdateExpression=(
+                "SET #s = :s, #t = :t, #h = :h REMOVE fingerprint_prime, fingerprint_digest"
+            ),
+            ExpressionAttributeNames={
+                "#s": "fingerprint_status",
+                "#t": "fingerprint_trace_id",
+                "#h": "fingerprint_correlation_hash",
+            },
+            ExpressionAttributeValues={
+                ":s": FINGERPRINT_QUEUED, ":t": trace_id, ":h": correlation_hash
+            },
+            ConditionExpression="attribute_exists(pk)",
+            ReturnValues="ALL_NEW",
+        )
+        return _as_approval(record_type, spec, resp.get("Attributes", {}))
+
+    def abandon_fingerprint(self, record_type: str, record_id: str) -> dict:
+        """Ffug never took the work, so remove the expectation of an answer.
+
+        REMOVE rather than a status of its own. A record left `queued` after a
+        call that was refused would wait forever for a completion nobody is
+        going to send, and would poll for it — the empty state is the accurate
+        one, and it is the state every record approved before ffug existed is
+        already in.
+        """
+        spec = _spec(record_type)
+        resp = self.table.update_item(
+            Key={"pk": self.partition, "sk": f"{spec.prefix}{record_id}"},
+            UpdateExpression=(
+                "REMOVE fingerprint_status, fingerprint_trace_id, "
+                "fingerprint_correlation_hash"
+            ),
+            ConditionExpression="attribute_exists(pk)",
+            ReturnValues="ALL_NEW",
+        )
+        return _as_approval(record_type, spec, resp.get("Attributes", {}))
+
+    def find_by_fingerprint_trace(self, trace_id: str) -> tuple[str, dict] | None:
+        """The record this trace identifies, within THIS tenant's partition.
+
+        The callback does not say which record it completes, and deliberately so.
+        If it did, a completing service could aim an authentic completion at a
+        different record — a class of confusion removed rather than validated.
+        What arrives is an identity the application itself minted and stored, so
+        the lookup is the app asking its own data a question about its own work.
+
+        Scoped by construction: `self.partition` is this repository's only
+        addressable key, and the credentials underneath refuse anything else, so
+        a trace id colliding across tenants resolves inside one of them.
+        """
+        if not trace_id:
+            return None
+        for record_type, spec in APPROVABLE.items():
+            for item in self._list(spec.prefix):
+                if item.get("fingerprint_trace_id") == trace_id:
+                    return record_type, item
+        return None
+
     def attach_fingerprint(self, record_type: str, record_id: str, *, prime: str, digest: str) -> dict:
         """Record ffug's answer against the decision it describes.
 
@@ -310,9 +417,15 @@ class SampleAppRepository:
         spec = _spec(record_type)
         resp = self.table.update_item(
             Key={"pk": self.partition, "sk": f"{spec.prefix}{record_id}"},
-            UpdateExpression="SET #p = :p, #d = :d",
-            ExpressionAttributeNames={"#p": "fingerprint_prime", "#d": "fingerprint_digest"},
-            ExpressionAttributeValues={":p": prime, ":d": digest},
+            UpdateExpression="SET #p = :p, #d = :d, #s = :s",
+            ExpressionAttributeNames={
+                "#p": "fingerprint_prime",
+                "#d": "fingerprint_digest",
+                "#s": "fingerprint_status",
+            },
+            ExpressionAttributeValues={
+                ":p": prime, ":d": digest, ":s": FINGERPRINT_COMPLETE
+            },
             ConditionExpression="attribute_exists(pk)",
             ReturnValues="ALL_NEW",
         )

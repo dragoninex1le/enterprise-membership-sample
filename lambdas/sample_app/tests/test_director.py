@@ -189,11 +189,13 @@ def test_the_request_serving_function_holds_no_standing_table_grant():
     import re
 
     template = (pathlib.Path(__file__).resolve().parents[3] / "template.yml").read_text()
-    block = re.search(
-        r"\n  SampleAppFunction:\n(.*?)\n  SampleAppEventConsumerFunction:",
-        template,
-        re.S,
-    )
+    # Ends at the next TOP-LEVEL thing — any line indented exactly two spaces —
+    # rather than at a named resource. Naming one made the boundary a fact about
+    # what happened to come next in the file: PORTH-621 inserted a role between
+    # the two, and this test read that role's grants as SampleAppFunction's. It
+    # failed, which is the good outcome, but it failed for a reason that had
+    # nothing to do with its subject.
+    block = re.search(r"\n  SampleAppFunction:\n(.*?)(?=\n  \S)", template, re.S)
     assert block, "SampleAppFunction not found in template.yml"
 
     # Comments only, stripped — the first version of this test matched the

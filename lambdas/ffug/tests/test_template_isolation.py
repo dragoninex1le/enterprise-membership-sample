@@ -553,3 +553,79 @@ def test_the_request_path_can_queue_work_but_not_drain_it(resources):
     assert "sqs:SendMessage" in found
     assert "sqs:ReceiveMessage" not in found
     assert "sqs:DeleteMessage" not in found
+
+
+# --- the callback ingress (PORTH-621) ----------------------------------------
+
+
+def test_the_callback_ingress_can_never_mint_context(resources):
+    """The mirror of ffug's request path holding no Sign, and the property that
+    makes the pair safe.
+
+    ffug holds a RESPONSE key and can only answer; this door accepts only
+    responses and can only receive. Give this role Sign and the route becomes a
+    way to originate work under a service identity — which is the thing
+    per-direction keys exist to prevent.
+    """
+    found = actions(resources["SampleAppCallbackFunctionRole"])
+
+    assert not [a for a in found if a.startswith("kms:")], (
+        f"the callback ingress holds KMS: {sorted(found)}. It verifies, and as "
+        f"of porth-common 0.0.11 verification is local — so even Verify here "
+        f"means something is calling KMS at verify time again."
+    )
+
+
+def test_the_callback_ingress_holds_no_standing_table_access(resources):
+    """It has a verified envelope, so it has a choice, and narrowing is only a
+    boundary while there is nothing underneath it."""
+    found = actions(resources["SampleAppCallbackFunctionRole"])
+
+    assert not [a for a in found if a.startswith("dynamodb:")], found
+    assert "sts:AssumeRole" in found, "it cannot narrow at all"
+
+
+def test_the_app_narrows_the_same_data_identity_on_both_planes(resources):
+    """One ceiling, two ways of narrowing it.
+
+    A second tenant role for the callback would be a second place that has to
+    keep agreeing about which table is this app's — and the two would diverge
+    the first time only one of them was updated.
+    """
+    env = resources["SampleAppCallbackFunction"]["Properties"]["Environment"]["Variables"]
+
+    assert env["PORTH_SERVICE_DATA_IDENTITY"] == {"GetAtt": "SampleAppTenantRole.Arn"}
+    assert env["PORTH_SERVICE_ID"] == "sample-app", (
+        "verify_callback recomputes the correlation hash from this service's own "
+        "registered id — a second spelling makes every authentic completion look "
+        "like a mismatch"
+    )
+
+
+def test_the_internal_planes_narrowing_does_not_depend_on_session_tags(resources):
+    """The two mechanisms are not interchangeable and the difference is silent.
+
+    `SampleAppSessionPolicy` resolves ${aws:PrincipalTag/porth-tenant}, and
+    `narrowed_credentials()` assumes with no Tags at all. Pointing the callback
+    at that policy would narrow to nothing, refuse everything, and read exactly
+    like a broken IAM grant.
+    """
+    document = resources["SampleAppCallbackSessionPolicy"]["Properties"]["Value"]["Sub"]
+
+    assert "PrincipalTag" not in document
+    assert "ENV#$env#TENANT#$tenant" in document
+
+
+def test_ffug_calls_back_to_the_ingress_and_not_to_the_api(resources):
+    """SampleAppFunction is a Mangum handler that cannot read an invoke event and
+    holds no table grant — every completion would land on a 500."""
+    grants = [
+        s for s in statements(resources["FfugWorkerFunctionRole"])
+        if "lambda:InvokeFunction" in (
+            s["Action"] if isinstance(s["Action"], list) else [s["Action"]]
+        )
+    ]
+
+    assert [g["Resource"] for g in grants] == [
+        {"GetAtt": "SampleAppCallbackFunction.Arn"}
+    ]
