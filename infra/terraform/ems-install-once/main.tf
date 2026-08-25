@@ -225,3 +225,119 @@ resource "aws_ssm_parameter" "service_signing_key_arn" {
     Direction = each.value.direction
   })
 }
+
+# ── The deploy role's app-specific grants (PORTH-620/621) ────────────────────
+#
+# Attached rather than owned. The role itself is CloudFormation's, from Porth's
+# receiving-account bootstrap; this is a separately-named inline policy beside
+# it, so a bootstrap update does not remove it and this module does not claim a
+# resource it did not create.
+#
+# Why these are not upstream: that template is instantiated for ANY receiving
+# product, parameterised by repo owner and name. It grants what every receiving
+# app needs. A work queue is not that — it exists because ffug, EMS's fixture,
+# has asynchronous work. Adding SQS there would widen a shared artifact for one
+# consumer, in the same way an empty-by-default `signing_keys` variable would
+# have. Same ruling as the keys above.
+#
+# Each statement below is here because a deploy failed without it, EXCEPT where
+# noted — and the noted one is the lesson: reasoning that a grant was "probably
+# covered by the existing prefix" is what made this two deploys instead of one.
+resource "aws_iam_role_policy" "deploy_role_async_work" {
+  count = var.deploy_role_name == "" ? 0 : 1
+
+  name = "porth-async-work"
+  role = var.deploy_role_name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        # CONFIRMED by run 32806570360: `sqs:createqueue` denied on
+        # porth-ffug-work-dlq-dev. SQS was a resource type this stack had never
+        # used, so nothing covered it even partially.
+        #
+        # Every action a lifecycle needs, not only Create. The redrive policy and
+        # visibility timeout are applied AFTER creation, an update reads tags
+        # back, and without DeleteQueue a rollback strands the stack in
+        # DELETE_FAILED — a worse place than the failure being fixed.
+        Sid    = "WorkQueuesForStack"
+        Effect = "Allow"
+        Action = [
+          "sqs:CreateQueue",
+          "sqs:DeleteQueue",
+          "sqs:GetQueueUrl",
+          "sqs:GetQueueAttributes",
+          "sqs:SetQueueAttributes",
+          "sqs:ListQueueTags",
+          "sqs:TagQueue",
+          "sqs:UntagQueue",
+        ]
+        # `porth-*`, not the stack prefix. These queues follow the FUNCTION
+        # naming convention in this stack — porth-ffug-work-dev beside
+        # porth-ffug-dev — so enterprise-membership-sample-* would match nothing.
+        Resource = "arn:aws:sqs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:porth-*"
+      },
+      {
+        # A SAM `Type: SQS` event compiles to an AWS::Lambda::EventSourceMapping,
+        # and those actions are a different family from the lambda:* a function
+        # needs. Resource "*" because a mapping is identified by a UUID that
+        # cannot be known when this policy is written; the reachable blast radius
+        # is bounded by CreateEventSourceMapping additionally requiring
+        # permission on the target function.
+        Sid    = "EventSourceMappings"
+        Effect = "Allow"
+        Action = [
+          "lambda:CreateEventSourceMapping",
+          "lambda:GetEventSourceMapping",
+          "lambda:UpdateEventSourceMapping",
+          "lambda:DeleteEventSourceMapping",
+          "lambda:ListEventSourceMappings",
+        ]
+        Resource = "*"
+      },
+      {
+        # CONFIRMED by run 32807678711: PutParameter denied on
+        # SampleAppCallbackSessionPolicy.
+        #
+        # This is the one that was reasoned rather than observed, and the
+        # reasoning was wrong. The stack already writes FfugSessionPolicy under
+        # this same prefix, so "same prefix, therefore covered" looked safe — the
+        # live grant is evidently scoped to the exact ffug-tenant-scoped NAME, so
+        # a sibling document under the same prefix was a new resource entirely.
+        #
+        # A prefix here, deliberately: the next service that narrows on the
+        # internal plane adds a third document, and rediscovering this one
+        # AccessDenied at a time is the cost being removed.
+        Sid    = "SessionPolicyDocuments"
+        Effect = "Allow"
+        Action = [
+          "ssm:PutParameter",
+          "ssm:DeleteParameter",
+          "ssm:GetParameters",
+          "ssm:AddTagsToResource",
+          "ssm:RemoveTagsFromResource",
+          "ssm:ListTagsForResource",
+        ]
+        Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/porth/${var.porth_branch}/auth-session-policy/*"
+      },
+      {
+        # PORTH-621 gives SampleAppTenantRole a second trust statement so the
+        # internal plane can narrow the same data identity a person's request
+        # narrows. iam:CreateRole covers writing a trust policy ONCE and never
+        # covers amending one.
+        #
+        # Not yet observed failing — the rollbacks cancelled this resource before
+        # it was attempted both times. Included because the alternative is a
+        # third deploy to find out.
+        Sid    = "AmendStackRoleTrust"
+        Effect = "Allow"
+        Action = "iam:UpdateAssumeRolePolicy"
+        Resource = [
+          "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/porth-sample-app-tenant-*",
+          "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/enterprise-membership-sample-*",
+        ]
+      },
+    ]
+  })
+}
