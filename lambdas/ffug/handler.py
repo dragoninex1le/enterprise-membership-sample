@@ -162,11 +162,11 @@ def _active_projection(director: FfugDirector) -> dict[str, Any]:
     return row
 
 
-def _op_echo(event: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
-    item_id = (event.get("item_id") or "").strip()
+def _op_echo(args: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
+    item_id = (args.get("item_id") or "").strip()
     if not item_id:
         raise FfugError("missing_item_id", "item_id is required for echo")
-    payload = event.get("payload")
+    payload = args.get("payload")
     if payload is None:
         raise FfugError("missing_payload", "payload is required for echo")
 
@@ -179,8 +179,8 @@ def _op_echo(event: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
     return {"ok": True, "operation": "echo", "item_id": item_id, "payload": payload}
 
 
-def _op_get(event: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
-    item_id = (event.get("item_id") or "").strip()
+def _op_get(args: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
+    item_id = (args.get("item_id") or "").strip()
     if not item_id:
         raise FfugError("missing_item_id", "item_id is required for get")
 
@@ -194,7 +194,7 @@ def _op_get(event: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
     return {"ok": True, "operation": "get", "item_id": item_id, "payload": item.get("payload")}
 
 
-def _op_hash(event: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
+def _op_hash(args: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
     """Return this tenant's digest of *payload*. Stores nothing.
 
     The same payload under two tenants yields two digests because the salts
@@ -207,7 +207,15 @@ def _op_hash(event: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
     (see salt.py), and handing it back makes the demo reproducible by hand:
     anyone can confirm the digest is what it claims to be.
     """
-    payload = event.get("payload")
+    # `hash` takes ONE argument, so the arguments ARE the document. Unchanged
+    # and deliberately so: this is the shape scripts/ffug_proof.py sends and
+    # the shape the witnessed synchronous round trip uses.
+    #
+    # Empty is absent, not "hash nothing". `ServiceClient._body` writes `{}` when
+    # a caller passes no payload at all, so an empty dict IS how "I sent you
+    # nothing" arrives — and digesting it would return a confident, meaningless
+    # number that recomputes correctly and describes no document.
+    payload = args if args or args == 0 else None
     if payload is None:
         raise FfugError("missing_payload", "payload is required for hash")
 
@@ -280,7 +288,7 @@ def _attempt(description: str, expect: str, call) -> dict[str, Any]:
     return outcome
 
 
-def _op_isolation_probe(event: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
+def _op_isolation_probe(args: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
     """What can ffug's own narrowed session actually reach in ffug's own table?
 
     The question this exists to settle is "if we just scan the table, what do we
@@ -386,7 +394,7 @@ def _op_isolation_probe(event: dict[str, Any], director: FfugDirector) -> dict[s
     # signed envelope, and this string only builds a partition we assert must
     # be refused. Nor does a broken install turn this into a reader: the result
     # carries counts, never rows.
-    probe_tenant = (event.get("probe_tenant") or "").strip()
+    probe_tenant = (args.get("probe_tenant") or "").strip()
     if probe_tenant and probe_tenant != tenant_id:
         named = keys.partition(environment, probe_tenant)
         attempts.append(_attempt(f"query {named} (a real tenant)", "deny", query(named)))
@@ -431,7 +439,7 @@ def _op_isolation_probe(event: dict[str, Any], director: FfugDirector) -> dict[s
     }
 
 
-def _op_hash_async(event: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
+def _op_hash_async(args: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
     """Accept the work, persist who it is for, and answer immediately.
 
     The crossing ends here. What is queued is a `PersistedContext` and a body —
@@ -450,11 +458,14 @@ def _op_hash_async(event: dict[str, Any], director: FfugDirector) -> dict[str, A
     never an address — so ffug never holds somewhere to call back to and cannot
     be pointed at one.
     """
-    payload = event.get("payload")
+    payload = args.get("document")
     if payload is None:
-        raise FfugError("missing_payload", "payload is required for hash_async")
+        raise FfugError(
+            "missing_payload",
+            "hash_async requires a document to hash, under `document`",
+        )
 
-    callback = event.get("callback") or {}
+    callback = args.get("callback") or {}
     service_id = str(callback.get("service_id") or "").strip()
     operation = str(callback.get("operation") or "").strip()
     if not service_id or not operation:
@@ -601,7 +612,22 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
         if fn is None:
             raise FfugError("unknown_op", f"unknown op {op!r}")
 
-        result = fn(event, director)
+        # THE unwrap, and the only one. `ServiceClient` puts what a caller
+        # passes under `payload` and adds `operation` and `porth_context`
+        # alongside it, so an op reading a field off the raw event reads a level
+        # that nothing populates.
+        #
+        # This was three separate defects before it was one rule (PORTH-622):
+        # `hash_async` read `callback` off the top and refused every call, which
+        # was loud; `isolation_probe` read `probe_tenant` off the top and
+        # silently saw "" on every call since PORTH-598 — so the probe has been
+        # aiming its refusal at no partition at all, which is the weak version
+        # its own docstring warns against. `echo` and `get` had it latent,
+        # working only because nothing reaches them through the client yet.
+        #
+        # Unwrapping HERE rather than in each op is what makes that
+        # unrepeatable: there is no longer a per-op choice to get wrong.
+        result = fn(event.get("payload") or {}, director)
         log.info(
             "ffug.served operation=%s environment=%s tenant_id=%s source_service=%s trace_id=%s",
             op,

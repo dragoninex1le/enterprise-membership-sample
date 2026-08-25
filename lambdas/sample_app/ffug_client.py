@@ -135,7 +135,11 @@ def fingerprint_async(director, document: dict[str, Any], *, trace_id: str) -> s
         body = ServiceClient(director).call(
             FFUG_SERVICE_ID,
             "hash_async",
-            {"payload": document, "callback": FINGERPRINT_CALLBACK},
+            # `document`, not `payload`. What is passed here BECOMES the
+            # `payload` field on the wire, so a key called `payload` inside it
+            # reads as payload.payload at the far end — which is how the first
+            # live attempt refused every call with missing_callback.
+            {"document": document, "callback": FINGERPRINT_CALLBACK},
             idempotent=True,
             trace_id=trace_id,
         )
