@@ -17,6 +17,19 @@
 # leaking into the shared module. Same ruling as the shipped services-config
 # documents: nothing is set upstream, it is entirely down to the application.
 
+# Explicitly configured, not inherited from the environment. Terraform's
+# `validate` does not check that a provider CAN be configured, so a module
+# without this passes validation and then fails at plan with
+# `Error: invalid AWS Region:` — an empty value and no indication of where it
+# was supposed to come from.
+provider "aws" {
+  region = var.aws_region
+
+  default_tags {
+    tags = local.common_tags
+  }
+}
+
 data "aws_caller_identity" "current" {}
 
 locals {

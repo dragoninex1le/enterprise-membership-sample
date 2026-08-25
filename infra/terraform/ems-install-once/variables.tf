@@ -1,3 +1,19 @@
+variable "aws_region" {
+  description = <<-EOT
+    Region the keys are created in. Must match the region the EMS stack deploys
+    to — a key in another region is invisible to the functions that need it, and
+    the failure is an AccessDenied on a key ARN that looks perfectly valid.
+
+    Defaulted rather than left to the environment. Porth's own install-once
+    module has no provider block and relies on AWS_REGION being exported, which
+    works right up until it is not: `terraform validate` passes either way, so
+    the first sign is `Error: invalid AWS Region:` — an empty value, at plan
+    time, with no indication of where it was supposed to come from.
+  EOT
+  type        = string
+  default     = "us-east-1"
+}
+
 variable "porth_branch" {
   description = <<-EOT
     The Porth install's DEPLOYMENT axis — its stack's `Environment` parameter,
