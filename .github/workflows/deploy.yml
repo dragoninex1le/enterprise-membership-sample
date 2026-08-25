@@ -218,6 +218,31 @@ jobs:
             echo "✅ Context signing key resolved - ffug's request path will be wired"
           fi
 
+          # PORTH-623 — ffug's RESPONSE signing key. One key, not one per
+          # service: a key set is per DIRECTION, and keys are provisioned as
+          # roles actually need them rather than 2N up front. ffug never
+          # originates a request, so it has a response key and no request key;
+          # the app signs requests with the install key above, because the app
+          # is not a service in this model.
+          #
+          # Absent is a real state, not an error. The template's condition omits
+          # the grant and the callback leg is refused at the boundary rather
+          # than sent unsigned.
+          FFUG_RESPONSE_KEY_ARN=$(aws ssm get-parameter \
+            --name "/porth/${PORTH_BRANCH}/infra/signing-key-arn/ffug/response" \
+            --query Parameter.Value --output text 2>/dev/null || echo "")
+          if [ -z "$FFUG_RESPONSE_KEY_ARN" ] || [ "$FFUG_RESPONSE_KEY_ARN" == "None" ]; then
+            FFUG_RESPONSE_KEY_ARN=""
+            echo "::warning::No response signing key for ffug at"
+            echo "::warning::/porth/${PORTH_BRANCH}/infra/signing-key-arn/ffug/response."
+            echo "::warning::Apply infra/terraform/ems-install-once, then merge"
+            echo "::warning::its binding into /porth/${PORTH_BRANCH}/signing-keys."
+            echo "::warning::Either alone leaves the callback leg unable to sign."
+          else
+            echo "✅ ffug response signing key resolved"
+          fi
+          echo "FFUG_RESPONSE_KEY_ARN=$FFUG_RESPONSE_KEY_ARN" >> $GITHUB_ENV
+
           echo "PORTH_CONTEXT_KEY_ARN=$CONTEXT_KEY_ARN" >> $GITHUB_ENV
           echo "PORTH_BRANCH=$PORTH_BRANCH" >> $GITHUB_ENV
           echo "PORTH_ENV_SLOT=$PORTH_ENV_SLOT" >> $GITHUB_ENV
@@ -473,6 +498,9 @@ jobs:
           if [ -n "${PORTH_CONTEXT_KEY_ARN:-}" ]; then
             OPTIONAL+=("PorthContextSigningKeyArn=${PORTH_CONTEXT_KEY_ARN}")
           fi
+          if [ -n "${FFUG_RESPONSE_KEY_ARN:-}" ]; then
+            OPTIONAL+=("FfugResponseSigningKeyArn=${FFUG_RESPONSE_KEY_ARN}")
+          fi
 
           sam deploy \
             --stack-name ${{ env.SAM_STACK_NAME }} \
@@ -495,6 +523,69 @@ jobs:
               PorthEventBusName=${{ env.PORTH_EVENT_BUS }} \
               ${OPTIONAL[@]+"${OPTIONAL[@]}"} \
             --no-fail-on-empty-changeset
+
+      - name: Register this install's signing keys (PORTH-623/625)
+        run: |
+          set -euo pipefail
+
+          # Registration is porth-install's job, not this workflow's and not
+          # Terraform's. The command resolves the ARN (an alias would be a valid
+          # thing to hand it and an invalid thing to store), refuses a key that
+          # is not SIGN_VERIFY/ECC_NIST_P256, captures the public half with
+          # kms:GetPublicKey, MERGES into whatever is already at
+          # signing-keys/ffug, and validates the result through the same code
+          # the runtime loads it with — so a document this refuses can never
+          # reach a verifier.
+          #
+          # One document PER SERVICE (PORTH-625). The pre-0.0.11 shared registry
+          # at /porth/{branch}/signing-keys is dead; if one exists on an install
+          # that ran a 0.0.10 deploy, delete it — it is a plausible-looking
+          # document at a plausible-looking path, and the next person debugging
+          # a signing problem will edit it and watch nothing happen.
+          #
+          # Idempotent, so it runs every deploy rather than once by hand: a key
+          # that is already registered re-registers to the same value, and an
+          # install that lost the parameter heals on the next deploy.
+          pip install --quiet 'porth-install>=0.3.2'
+
+          # TWO registrations, and the second is the one that is easy to miss.
+          #
+          # Verification resolves (kid, source_service, direction) by fetching
+          # the document of the service the token CLAIMS to be from. The sample
+          # app claims `sample-app` and signs with the INSTALL key — so the
+          # install key must appear in signing-keys/sample-app as a request key,
+          # or every crossing that works today starts failing with
+          # UnknownSigningServiceError.
+          #
+          # The same kid legitimately appears in two documents: Porth registers
+          # it under `porth` for its own use, and it is the app's request key
+          # here. The duplicate-kid guard is per document, deliberately — what
+          # it stops is one key serving both DIRECTIONS, which would undo the
+          # split.
+          if [ -n "${PORTH_CONTEXT_KEY_ARN:-}" ]; then
+            porth-install signing-key register \
+              --service sample-app \
+              --direction request \
+              --key-arn "${PORTH_CONTEXT_KEY_ARN}" \
+              --branch "${PORTH_BRANCH}"
+          else
+            echo "::warning::No context signing key — sample-app's request key"
+            echo "::warning::cannot be registered, so ffug will refuse its calls."
+          fi
+
+          # ffug signs only when it completes async work and calls back, so it
+          # has a response key and no request key at all.
+          if [ -n "${FFUG_RESPONSE_KEY_ARN:-}" ]; then
+            porth-install signing-key register \
+              --service ffug \
+              --direction response \
+              --key-arn "${FFUG_RESPONSE_KEY_ARN}" \
+              --branch "${PORTH_BRANCH}"
+          else
+            echo "::warning::No ffug response key yet — apply"
+            echo "::warning::infra/terraform/ems-install-once. The callback leg"
+            echo "::warning::cannot sign until it exists; nothing else is affected."
+          fi
 
       - name: Diagnose SAM managed-bucket failure
         if: failure()

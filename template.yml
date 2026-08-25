@@ -186,11 +186,34 @@ Parameters:
       the request path has no verifier and refuses every call. Which half is
       wired is reported in the stack outputs rather than left to be discovered.
 
+  FfugResponseSigningKeyArn:
+    Type: String
+    Default: ''
+    Description: >
+      ARN of ffug's RESPONSE-direction signing key (PORTH-623), created by
+      infra/terraform/ems-install-once and published to
+      /porth/{branch}/infra/signing-key-arn/ffug/response.
+
+      Direction is the point. A service's request authority and its response
+      authority are different kinds of authority, so they are different keys,
+      and a role holds Sign for at most one pair — a compromised completion
+      path cannot mint a REQUEST even as ffug. ffug never originates a request,
+      so it has a response key and no request key at all.
+
+      Nothing grants Sign on this yet: the completion role that signs callbacks
+      arrives with PORTH-620. Declared here so the deploy can pass it and the
+      wiring is visible rather than appearing all at once later.
+
 Conditions:
 
   # PORTH-587. Both KMS grants name a key ARN in their Resource, and IAM rejects
   # an empty one. Absent the key, ffug deploys as the bus consumer only.
   HasContextSigningKey: !Not [!Equals [!Ref PorthContextSigningKeyArn, '']]
+
+  # PORTH-623. Same reason as above: IAM rejects an empty Resource, and the
+  # keys arrive independently — an install can have Porth's key seeded and its
+  # own service keys not yet applied.
+  HasFfugResponseSigningKey: !Not [!Equals [!Ref FfugResponseSigningKeyArn, '']]
 
 Resources:
 
@@ -483,6 +506,13 @@ Resources:
           # Empty is a real state, not a misconfiguration: without the key this
           # app deploys with no signer, and every internal call is refused at
           # the boundary rather than sent unsigned.
+          # PORTH-623 — the INSTALL key, deliberately. The app is not a service
+          # in this model: the existing install key IS its request key, so
+          # minting a second one for the same party would create a second
+          # request authority rather than separating anything.
+          #
+          # What per-service keys separate is the callback direction, and that
+          # is ffug's side (FfugResponseSigningKeyArn above).
           PORTH_CONTEXT_SIGNING_KEY_ALIAS: !Ref PorthContextSigningKeyArn
           # No FFUG_FUNCTION_ARN. Where ffug lives is resolved from the endpoint
           # map at /porth/{branch}/service-endpoints, which is the whole point of
@@ -541,6 +571,9 @@ Resources:
                 # Granting Sign alone gets you AccessDenied on DescribeKey one
                 # frame earlier, wearing SigningUnavailableError.
                 - kms:DescribeKey
+              # The install key. The app is not a service in the per-service
+              # key model (PORTH-623) — this key is its request key, and ffug
+              # already verifies it.
               Resource: !Ref PorthContextSigningKeyArn
             - Sid: CallFfug
               Effect: Allow
@@ -566,6 +599,13 @@ Resources:
               Resource:
                 - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services
                 - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/service-endpoints
+                # PORTH-623/625 — one document PER SERVICE at
+                # signing-keys/{service_id}, so this is a prefix rather than an
+                # exact name. Verification fetches the document of the service
+                # the token CLAIMS to be from, by name; there is no registry to
+                # load and nothing here about services this call does not
+                # involve.
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/signing-keys/*
       Events:
         ApiProxy:
           Type: HttpApi
@@ -782,29 +822,40 @@ Resources:
               - Effect: Allow
                 Action: sts:AssumeRole
                 Resource: !GetAtt FfugTenantRole.Arn
-              # kms:Verify and NEVER kms:Sign (Head of Security condition H1).
+              # NO KMS AT ALL on this role, and H1 is stronger for it.
+              #
               # ffug is a receiver: it checks that context was minted by someone
               # entitled to mint it, and cannot mint any itself. This role
-              # attempting Sign and being denied is what UAT-4 witnesses live,
-              # so adding Sign here would not merely widen a permission — it
-              # would delete the demonstration.
+              # holding no kms:Sign is what UAT-4 witnesses live, so adding Sign
+              # here would not merely widen a permission — it would delete the
+              # demonstration.
               #
-              # Conditional only because IAM rejects an empty Resource. Without
-              # the key ffug has no verifier and refuses every call — loudly, at
-              # the boundary — which is the correct posture for a service that
-              # cannot check who is calling it.
-              - !If
-                - HasContextSigningKey
-                - Effect: Allow
-                  Action: kms:Verify
-                  Resource: !Ref PorthContextSigningKeyArn
-                - !Ref AWS::NoValue
+              # NO kms:Verify, and that absence is the design (PORTH-623,
+              # porth-common 0.0.11). The trust document carries each key's
+              # public half and the receiver checks ECDSA-P256 locally, so
+              # there is no KMS call at verify time at all.
+              #
+              # Two things that buys, beyond the deleted N-by-N grant matrix:
+              # a missing grant can no longer surface as `bad_signature` —
+              # indistinguishable from forgery — because there is no grant to
+              # miss; and Verify no longer competes with Sign for the account's
+              # ECC cryptographic-operations quota on the hot receive path.
+              #
+              # KMS is now touched by exactly one runtime operation in the whole
+              # design: a minting role signing with its own key.
               # The D3 service registry (is the calling service registered and
-              # active?) and the session-policy template the narrowing renders.
+              # active?), the session-policy template the narrowing renders, and
+              # the signing-key documents.
+              #
+              # signing-keys/* is read on EVERY inbound internal call — it is
+              # what turns the token's `kid` into "which service may claim to be
+              # this source, and in which direction". Fail-closed: unreadable
+              # means every call refused, so it is not optional for a receiver.
               - Effect: Allow
                 Action: ssm:GetParameter
                 Resource:
                   - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/signing-keys/*
                   - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/auth-session-policy/*
 
   FfugFunction:
@@ -994,9 +1045,10 @@ Resources:
               # key-policy Deny, THIS ROLE must be on the allow-list or the ffug
               # UAT stops working.
               #
-              # ffug's own role holds kms:Verify and never this. The split is
+              # ffug's request-path role holds NO KMS at all — it verifies
+              # locally against the trust document (PORTH-623). The split is
               # the point: a compromised receiver cannot mint context for
-              # another tenant (H1).
+              # another tenant (H1), and now it has nothing to mint with.
               - !If
                 - HasContextSigningKey
                 - Effect: Allow

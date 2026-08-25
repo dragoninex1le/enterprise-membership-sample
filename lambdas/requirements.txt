@@ -1,6 +1,12 @@
 fastapi==0.111.0
 # PORTH-613 — the Director, and with it the authorizer-context parse, credential
 # scoping and permission diagnostics this app used to reimplement.
-porth-common>=0.0.8
+# 0.0.11 is a floor, not a preference. It is where verification went LOCAL —
+# the trust document carries each key's public half and the receiver checks
+# ECDSA-P256 itself — and where signing-keys became one document per service at
+# signing-keys/{service_id} (PORTH-623/625). The template grants no kms:Verify
+# and reads signing-keys/* as a prefix, so an older porth-common would call KMS
+# with no grant and look for a document that is not there.
+porth-common>=0.0.11
 mangum==0.17.0
 boto3>=1.34.0
