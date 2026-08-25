@@ -430,3 +430,49 @@ def test_the_caller_carries_everything_the_internal_plane_reads():
         f"different depth of one ServiceClient call, so the first to fail hides "
         f"the rest — which is why these cost four deploys to find individually."
     )
+
+
+# --- the app can be heard (PORTH-622) ----------------------------------------
+
+
+def test_the_app_sets_a_log_level_so_its_own_lines_survive():
+    """A log line that never emits is a hop nobody can witness.
+
+    Nothing configured a level, so every module logger inherited Lambda's root
+    default of WARNING and every `log.info` in this app was discarded. It hid
+    perfectly: the app worked and the log group was empty, and an empty log
+    group reads as "quiet" rather than "muted".
+
+    It surfaced when PORTH-622 came to assert one trace_id across all four hops
+    of the async round trip and could only show three — not because the
+    initiating hop had not happened, but because it had never been able to say
+    so. `sample_app.fingerprint` had been silent on the SYNCHRONOUS path since
+    PORTH-599 for the same reason.
+    """
+    import logging
+
+    import sample_app.handler  # noqa: F401 — importing is what configures it
+
+    level = logging.getLogger("sample_app").level
+
+    assert level and level <= logging.INFO, (
+        f"the sample_app logger is at {logging.getLevelName(level)}; its own "
+        f"INFO lines will be discarded and every hop it makes will be "
+        f"unwitnessable"
+    )
+
+
+def test_the_level_is_set_on_the_package_not_the_root():
+    """Turning up this app must not turn up every library it imports.
+
+    basicConfig() on the root would make botocore's DEBUG chatter arrive with
+    it, which is how a log group becomes unreadable and then ignored.
+    """
+    import logging
+
+    import sample_app.handler  # noqa: F401
+
+    assert logging.getLogger().level != logging.DEBUG, (
+        "the root logger was configured — this app's verbosity should not be "
+        "the whole runtime's"
+    )

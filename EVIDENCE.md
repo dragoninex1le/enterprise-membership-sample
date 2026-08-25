@@ -83,8 +83,47 @@ can read it and cannot create it.
 ingress and its role, the callback session-policy document, and the amended
 trust on `SampleAppTenantRole` — all `CREATE_COMPLETE`/`UPDATE_COMPLETE`.
 
-*The round trip itself is not yet witnessed. Everything below is the recipe, and
-it becomes evidence when the trace is followed live.*
+**Round trip witnessed:** 2026-08-25, trace `e7e9b9ca576041ffb1e8201bfc5f2481`,
+tenant `ems-test`, digest `21fd145e891e…`.
+
+| time | hop | line |
+|---|---|---|
+| 05:35:44 | ffug ingress | `ffug.served operation=hash_async source_service=sample-app` |
+| 05:35:44 | ffug ingress | `ffug.queued callback=sample-app/fingerprint-complete` |
+| 05:59:58 | worker | `ffug.worker.completed callback=sample-app/fingerprint-complete` |
+| 05:59:58 | callback ingress | `sample_app.callback.served source_service=ffug` |
+| 05:59:58 | callback ingress | `sample_app.fingerprint_completed record_type=invoice` |
+
+One `trace_id`, unchanged, across every line above.
+
+### The delay is the evidence, and it was an accident
+
+Twenty-four minutes separate acceptance from completion, because the worker
+failed four times on a misconfigured signing direction and succeeded on the
+**fifth and last** delivery before the dead-letter queue would have taken it.
+
+That is a far better demonstration than the clean run would have been. A token
+minted at 05:35 was dead by 05:40 — `MAX_TOKEN_LIFETIME_SECONDS` is 300. The
+work completed at 05:59 regardless, because what rides the queue is a
+`PersistedContext` and not an envelope. **The whole argument for that decision
+was demonstrated by a bug.**
+
+It also witnesses the redrive contract end to end: four failures each returned
+the record as a batch item failure rather than deleting it, `maxReceiveCount: 5`
+bounded the retries, and the message was still there to succeed when the fix
+landed.
+
+### What is NOT witnessed here, and why
+
+The initiating hop — `sample_app.fingerprint_queued` — is absent from
+`/aws/lambda/porth-sample-app-dev`. It happened; ffug logged the call arriving
+with `source_service=sample-app`. It could not be *observed*, because the app
+configured no log level and inherited Lambda's `WARNING` default, so every
+`log.info` it makes was discarded. Fixed in PORTH-622; re-witness after the next
+deploy to make this table four-for-four from the app's own side.
+
+The same silence covers `sample_app.fingerprint` on the **synchronous** path
+since PORTH-599 — that round trip was only ever observable from ffug's end.
 
 ### What it took to deploy, recorded because it will happen again
 

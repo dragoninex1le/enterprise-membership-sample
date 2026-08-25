@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 from fastapi import FastAPI
@@ -5,6 +6,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
 from .director import DirectorMiddleware
 from .routers import dashboard, ar, ap, approvals, diagnostics
+
+# PORTH-622 — set once, for the whole package, at the entry point.
+#
+# Nothing did this before, so every module logger inherited Lambda's root
+# default of WARNING and every log.info in this app was discarded. It was
+# invisible precisely because it looks like nothing: the app worked, the logs
+# were empty, and an empty log group reads as "quiet" rather than "muted".
+#
+# What it cost: `sample_app.fingerprint` never appeared on the SYNCHRONOUS path
+# either, so the round trip we witnessed in PORTH-599 was only ever observable
+# from ffug's side. When PORTH-622 came to assert one trace_id across all four
+# hops, three could be shown and the initiating one could not — not because it
+# had not happened, but because it had never been able to say so.
+#
+# On the package logger rather than the root: this app's lines become visible
+# without also turning on every library's DEBUG chatter.
+logging.getLogger("sample_app").setLevel(
+    os.environ.get("SAMPLE_APP_LOG_LEVEL", "INFO")
+)
 
 app = FastAPI(title="Porth Sample App")
 
