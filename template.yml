@@ -1232,7 +1232,20 @@ Resources:
           PORTH_SERVICE_DATA_SCOPE: !Select [4, !Split ["/", !Ref FfugSessionPolicy]]
           # ffug's RESPONSE key — the one difference from FfugFunction, and the
           # reason this is a separate function at all.
-          PORTH_CONTEXT_SIGNING_KEY_ALIAS: !Ref FfugResponseSigningKeyArn
+          #
+          # PORTH_CONTEXT_**RESPONSE**_SIGNING_KEY_ALIAS, and the name is the
+          # contract rather than a label. porth-common keeps one variable per
+          # direction (envelope.py `_ALIAS_ENV_VARS`) precisely so that holding
+          # the capability to sign a completion does not confer the capability
+          # to mint a request — a service configured for one direction and asked
+          # to sign the other has no key to do it with and refuses.
+          #
+          # This was PORTH_CONTEXT_SIGNING_KEY_ALIAS for one deploy, which is
+          # the worst of both readings: the worker could not sign a response at
+          # all, and had anything asked it for a request it would have minted
+          # one with the response key — collapsing the split this design exists
+          # to hold open.
+          PORTH_CONTEXT_RESPONSE_SIGNING_KEY_ALIAS: !Ref FfugResponseSigningKeyArn
           FFUG_TABLE_NAME: !Ref FfugTable
           FFUG_LOG_LEVEL: !Ref FfugLogLevel
       Events:
