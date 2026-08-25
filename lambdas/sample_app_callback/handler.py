@@ -160,6 +160,19 @@ def _op_fingerprint_complete(
     except CallbackError as exc:
         raise CallbackRefused(getattr(exc, "reason_code", "callback_error"), str(exc)) from exc
 
+    # Said out loud, because a match was previously only inferable from the
+    # absence of a refusal (PORTH-622 AC3). Silence-as-success is the shape that
+    # kept this app's entire log stream muted for four stories — an empty log
+    # group reads as "quiet" rather than "nothing was permitted to speak".
+    #
+    # Identifiers only (PORTH-533). The hash is not a secret, but a reader
+    # greps the trace, and the line does not need it.
+    log.info(
+        "sample_app.callback.correlated tenant_id=%s record_type=%s trace_id=%s "
+        "outcome=stored_hash_matched",
+        director.tenant_id, record_type, director.trace_id,
+    )
+
     prime, digest = str(payload.get("prime", "")), str(payload.get("digest", ""))
     if not prime or not digest:
         raise CallbackRefused(

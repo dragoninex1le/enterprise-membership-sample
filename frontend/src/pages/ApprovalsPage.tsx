@@ -2,8 +2,9 @@ import { Fragment, useEffect, useState } from 'react'
 import { sampleApiClient } from '../api/sampleApp'
 import { usePorthContext } from '../context/PorthContext'
 import { PERMISSIONS } from '../constants'
+import Fingerprint, { hasFingerprint, type FingerprintFields } from '../components/Fingerprint'
 
-interface Approval {
+interface Approval extends FingerprintFields {
   record_id: string
   /** 'invoice' | 'bill' — which record this is, and which endpoint decides it.
    *  PORTH-597: an approval IS an invoice or a bill, so the type is needed to
@@ -14,24 +15,6 @@ interface Approval {
   submitted_by: string
   submitted_at: string
   status: string
-  /** PORTH-599 — ffug's answer, present once a decision has been fingerprinted.
-   *  The prime is the tenant's own, minted from the bus and readable by nothing
-   *  else; the digest is SHA256(prime : document). Empty is a real state, not a
-   *  blank: the record predates the fingerprint, or ffug was unreachable. */
-  fingerprint_prime?: string
-  fingerprint_digest?: string
-  /** Returned by the approve call only — what was hashed, so the number on the
-   *  screen can be checked by hand rather than believed. */
-  fingerprint_document?: Record<string, string>
-  fingerprint_error?: string
-  /** PORTH-621 — 'queued' | 'complete' | absent. The three are genuinely
-   *  different and the screen has to say which: `queued` means ffug has the
-   *  work and the answer is coming, absent means no answer is coming at all.
-   *  Rendering the second as the first promises something that never arrives. */
-  fingerprint_status?: string
-  /** The instance identity this record's completion will carry. Shown so the
-   *  same value can be followed across the app, ffug, its worker and back. */
-  fingerprint_trace_id?: string
 }
 
 const STATUS_BADGE: Record<string, string> = {
@@ -240,56 +223,6 @@ function FfugStrip({
   )
 }
 
-// PORTH-599 — what ffug said, and what it said it about.
-//
-// Shown as the document AND the prime AND the result rather than just a hash,
-// because a bare digest proves nothing to the person looking at it. With all
-// three on screen you can recompute it yourself, and the claim being made is
-// checkable: this tenant's prime produced this number from this document, and
-// no other tenant's could, because ffug serving them cannot read this prime.
-function Fingerprint({ appr }: { appr: Approval }) {
-  if (appr.fingerprint_error) {
-    return (
-      <div className="text-xs text-amber-700">
-        approved, but not fingerprinted — {appr.fingerprint_error}
-      </div>
-    )
-  }
-  // PORTH-621 — the state that only exists because the work is asynchronous.
-  // The decision is committed and ffug has accepted the job; what is missing is
-  // the answer. The trace is shown because it is the one value that ties this
-  // row to four log groups.
-  if (appr.fingerprint_status === 'queued' && !appr.fingerprint_digest) {
-    return (
-      <div className="font-mono text-[11px] text-gray-500">
-        <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500 align-middle" />
-        <span className="ml-2 text-gray-400">queued with ffug — trace </span>
-        {appr.fingerprint_trace_id}
-      </div>
-    )
-  }
-  if (!appr.fingerprint_digest) return null
-  return (
-    <div className="space-y-0.5 font-mono text-[11px] text-gray-600">
-      {appr.fingerprint_document && (
-        <div>
-          <span className="text-gray-400">document </span>
-          {JSON.stringify(appr.fingerprint_document)}
-        </div>
-      )}
-      <div>
-        <span className="text-gray-400">primed with </span>
-        {appr.fingerprint_prime}
-        <span className="text-gray-400"> (this tenant\u2019s, from the bus)</span>
-      </div>
-      <div>
-        <span className="text-gray-400">sha256 </span>
-        {appr.fingerprint_digest}
-      </div>
-    </div>
-  )
-}
-
 export default function ApprovalsPage() {
   const { currentUser } = usePorthContext()
   const [approvals, setApprovals] = useState<Approval[]>([])
@@ -394,6 +327,7 @@ export default function ApprovalsPage() {
                   fingerprint_error: r.data.fingerprint_error,
                   fingerprint_status: r.data.fingerprint_status,
                   fingerprint_trace_id: r.data.fingerprint_trace_id,
+                  fingerprint_correlation_hash: r.data.fingerprint_correlation_hash,
                 }
               : a
           )
@@ -472,11 +406,10 @@ export default function ApprovalsPage() {
                     </td>
                   )}
                 </tr>
-                {(appr.fingerprint_digest || appr.fingerprint_error ||
-                  appr.fingerprint_status === 'queued') && (
+                {hasFingerprint(appr) && (
                   <tr className="bg-gray-50/60">
                     <td colSpan={canWrite ? 8 : 7} className="px-4 pb-3 pt-0">
-                      <Fingerprint appr={appr} />
+                      <Fingerprint record={appr} />
                     </td>
                   </tr>
                 )}
