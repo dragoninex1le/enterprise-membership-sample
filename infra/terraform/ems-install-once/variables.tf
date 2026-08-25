@@ -92,3 +92,19 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "deploy_role_name" {
+  description = <<-EOT
+    The GitHub Actions deploy role for this app's stack — the identity
+    CloudFormation acts as, since deploy.yml passes no --role-arn.
+
+    Created by Porth's receiving-account bootstrap template, which is generic:
+    it grants what ANY receiving app needs and cannot know what this one
+    creates. The grants attached here are the difference, and they are EMS's
+    because the resources that need them are.
+
+    Empty to skip, for an install that manages this role by hand.
+  EOT
+  type        = string
+  default     = "sample-app-deploy-role"
+}

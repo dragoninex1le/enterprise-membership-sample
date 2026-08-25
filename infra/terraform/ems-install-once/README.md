@@ -90,6 +90,36 @@ run afterwards, and nothing the application deploy does.
 | `aws_ssm_parameter.signing_keys["ffug"]` | `signing-keys/ffug` — that key, direction `response` |
 | `aws_ssm_parameter.signing_keys["sample-app"]` | `signing-keys/sample-app` — the **install** key, direction `request` |
 | `aws_ssm_parameter.service_signing_key_arn[…]` | the ARN, for the deploy to pass as a stack parameter |
+| `aws_iam_role_policy.deploy_role_async_work` | what the deploy role needs to create THIS app's resources |
+
+### The deploy role's grants are ours, not Porth's
+
+Porth's receiving-account bootstrap creates `sample-app-deploy-role`, and that
+template is generic: it is instantiated for any receiving product, parameterised
+by repo owner and name, and it grants what **every** receiving app needs. It
+cannot know what this one creates.
+
+A work queue is not what every app needs. It exists because ffug — EMS's fixture
+— has asynchronous work, so the grant that creates it is EMS's. Adding SQS
+upstream would widen a shared artifact for one consumer, which is the same shape
+as an empty-by-default `signing_keys` variable over there: this install leaking
+into the shared module.
+
+Attached rather than owned. `aws_iam_role_policy` puts a separately-named inline
+policy beside CloudFormation's, so a bootstrap update does not remove it and this
+module does not claim a role it did not create.
+
+**Read the comments on each statement before trimming any of them.** Three are
+there because a deploy failed without them, with the run id recorded. One —
+`AmendStackRoleTrust` — has never been observed failing, because the rollback
+cancelled that resource before CloudFormation attempted it, twice. It is
+included because the alternative was a third deploy to find out.
+
+The `SessionPolicyDocuments` statement is the cautionary one. The stack already
+wrote `auth-session-policy/ffug-tenant-scoped`, so a second document under the
+same prefix looked covered by whatever already permitted the first. It was not:
+the live grant names the exact parameter. **"Same prefix, therefore covered" is
+reasoning, not evidence**, and it turned one deploy into two.
 
 ### One document per service
 
