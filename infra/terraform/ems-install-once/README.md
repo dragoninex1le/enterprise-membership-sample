@@ -79,27 +79,60 @@ terraform plan
 Both `*.hcl` copies and `*.tfvars` are gitignored. The defaults already name
 EMS's two minting services, so a plan needs no var file.
 
-## After applying — registration, which is not Terraform's job
+## After applying — register the keys, once
 
-Applying creates the key and publishes its ARN to
-`/porth/{branch}/infra/signing-key-arn/ffug/response`. It registers nothing.
+Applying creates the key and publishes its ARN. It registers nothing, and
+**neither does the deploy**. Registration is an install-once step, run
+deliberately alongside this module — not on every application deploy.
 
-Registration is `porth-install signing-key register`, and the deploy runs it on
-every deploy:
+That is the same reason the keys are here rather than in `template.yml`: a key
+and its registration outlive the code, and anything that runs on every release
+is one bad release away from rewriting them. An app deploy has no business
+holding `ssm:PutParameter` on the trust documents or `kms:GetPublicKey` on a
+signing key.
+
+Two registrations, and the second is the one that is easy to miss.
+
+| document | key | direction | why |
+|---|---|---|---|
+| `signing-keys/sample-app` | the **install** key | request | the app claims `sample-app` and signs with the install key |
+| `signing-keys/ffug` | ffug's own key | response | ffug signs only when it calls back |
 
 ```bash
-porth-install signing-key register --service ffug --direction response --key-arn "$ARN" --branch dev
+pip install 'porth-install>=0.3.2'
 ```
 
-It resolves the ARN (an alias is a valid thing to hand it and an invalid thing to
-store), refuses a key that is not `SIGN_VERIFY`/`ECC_NIST_P256`, captures the
-public half with `kms:GetPublicKey`, merges into whatever is already at
-`/porth/{branch}/signing-keys/ffug`, and validates the result through the same
-code the runtime loads it with — so a document it refuses can never reach a
-verifier.
+```bash
+porth-install signing-key register --service sample-app --direction request --branch dev --key-arn "$(aws ssm get-parameter --name /porth/dev/infra/context-signing-key-arn --query Parameter.Value --output text)"
+```
 
-This module deliberately emits **no trust document**. Rebuilding any of that
-here would be a second implementation of a contract that already has one.
+```bash
+porth-install signing-key register --service ffug --direction response --branch dev --key-arn "$(terraform output -raw -json signing_key_arns | python3 -c 'import json,sys; print(json.load(sys.stdin)["ffug/response"])')"
+```
+
+The command resolves the ARN (an alias is a valid thing to hand it and an
+invalid thing to store), refuses a key that is not
+`SIGN_VERIFY`/`ECC_NIST_P256`, captures the public half with
+`kms:GetPublicKey`, merges into whatever is already there, and validates the
+result through the same code the runtime loads it with — so a document it
+refuses can never reach a verifier. It is idempotent: re-running replaces the
+entry in place rather than duplicating it.
+
+Verification resolves `(kid, source_service, direction)` by fetching the
+document of the service the token **claims to be from**. So the install key must
+appear under `sample-app` — without it every crossing that works today fails
+with `UnknownSigningServiceError`.
+
+The same kid legitimately appears in two documents: Porth registers it under
+`porth` for its own use, and it is the app's request key here. The duplicate-kid
+guard is *per document* on purpose — what it stops is one key serving both
+directions, which would undo the split.
+
+### Confirm it took
+
+```bash
+aws ssm get-parameter --name /porth/dev/signing-keys/sample-app --query Parameter.Value --output text
+```
 
 ### One document per service
 
@@ -138,13 +171,16 @@ The same kid legitimately appears in two documents: Porth registers it under
 guard is *per document* on purpose — what it stops is one key serving both
 directions, which would undo the split.
 
-### What the deploy role needs
+### What the operator needs
 
-The registration calls KMS and writes SSM, so the deploy identity needs
-`kms:DescribeKey` and `kms:GetPublicKey` on both keys, and `ssm:GetParameter` +
-`ssm:PutParameter` on `/porth/{branch}/signing-keys/*` — the **prefix**, because
-it writes two documents. Absent those, the step fails loudly, but after the
-stack has already deployed.
+Registration calls KMS and writes SSM, so whoever runs it needs
+`kms:DescribeKey` and `kms:GetPublicKey` on the keys, and `ssm:GetParameter` +
+`ssm:PutParameter` on `/porth/{branch}/signing-keys/*`.
+
+**The deploy role does not need any of it.** If it was granted for an earlier
+version of this that ran registration from the pipeline, revoke it — an app
+deploy with write access to the trust documents is one bad release away from
+rewriting who may speak for whom.
 
 ### No `kms:Verify`, anywhere
 
