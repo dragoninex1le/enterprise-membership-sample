@@ -76,3 +76,94 @@ def test_verification_is_local_so_nothing_calls_kms_to_verify():
         "this porth-common verifies through KMS; the template removed "
         "kms:Verify on the strength of local verification (PORTH-623)"
     )
+
+
+# --- the wire shape, asserted across both sides (PORTH-622) -------------------
+#
+# This file exists for assumptions about porth_common that a mock would hide.
+# The one below is the same species and cost a live deploy: ffug's ops read
+# fields off the invocation event, the sample app sends them through
+# ServiceClient, and NOTHING checked that the two agreed. ffug's tests built the
+# event by hand in the shape ffug reads; the app's tests asserted what
+# ServiceClient was called with. Both passed. Neither crossed the gap.
+
+
+def _wire_event(payload):
+    """Exactly what `ServiceClient._body` produces, plus what the transport adds.
+
+    Built from the library's own function rather than restated, so a change to
+    the envelope's shape fails here rather than being mirrored into a copy that
+    quietly agrees with a version of porth_common nobody runs.
+    """
+    import os
+    from unittest.mock import MagicMock, patch
+
+    from porth_common.internal_plane.client import ServiceClient
+
+    # ServiceClient refuses to exist without a registered identity, which is
+    # correct and is checked in its constructor rather than at call time.
+    with patch.dict(os.environ, {"PORTH_SERVICE_ID": "sample-app"}):
+        body = ServiceClient(MagicMock())._body("hash_async", payload, None)
+    return {**body, "porth_context": "<token>"}
+
+
+def test_the_field_the_app_sends_is_the_field_ffug_reads():
+    """The gap, closed by making both sides meet in one assertion.
+
+    Not "ffug reads `document`" and separately "the app sends `document`" — that
+    is two facts that can drift apart. This builds the caller's arguments, puts
+    them on the wire the way the client does, and asserts the receiver finds
+    them there.
+    """
+    from ffug import handler as h
+    from sample_app.ffug_client import FINGERPRINT_CALLBACK
+
+    document = {"record_type": "invoice", "record_id": "i-1"}
+    # The caller's arguments, spelled exactly as ffug_client.fingerprint_async
+    # spells them. If that call site changes, this line has to change with it —
+    # which is the coupling being made visible rather than removed.
+    event = _wire_event({"document": document, "callback": FINGERPRINT_CALLBACK})
+
+    args = event.get("payload") or {}
+
+    assert args.get("document") == document, (
+        "the document is not where ffug looks for it; ffug reads args['document']"
+    )
+    assert args.get("callback") == FINGERPRINT_CALLBACK
+    assert "callback" not in event, (
+        "a top-level `callback` would mean ffug's original reading was right and "
+        "this test is asserting the wrong shape"
+    )
+
+
+def test_no_op_reads_a_field_the_wire_never_carries():
+    """The general rule, so a fifth op cannot reintroduce the defect.
+
+    `ServiceClient` puts three keys on the wire — operation, payload (or
+    payload_ref), porth_context. An op that reads anything else off the raw event
+    reads a level nothing populates: loudly if the field is required, silently if
+    it has a default, which is how `isolation_probe` ran with an empty
+    probe_tenant from PORTH-598 until PORTH-622.
+    """
+    import inspect
+    import re
+
+    from ffug import handler as h
+
+    source = inspect.getsource(h)
+    # Only inside op bodies: the dispatcher reads `operation` off the event and
+    # must keep doing so.
+    ops = re.findall(r"\ndef (_op_\w+)\(.*?(?=\ndef |\Z)", source, re.S)
+    bodies = re.findall(r"\ndef _op_\w+\(.*?(?=\ndef |\Z)", source, re.S)
+
+    offenders = [
+        (name, field)
+        for name, body in zip(ops, bodies)
+        for field in re.findall(r'event\.get\("(\w+)"\)', body)
+    ]
+
+    assert not offenders, (
+        f"ops reading the raw event: {offenders}. An op receives its ARGUMENTS "
+        f"— the dispatcher unwraps `payload` once, in one place, so there is no "
+        f"per-op choice to get wrong."
+    )

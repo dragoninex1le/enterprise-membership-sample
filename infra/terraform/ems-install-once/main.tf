@@ -285,6 +285,11 @@ resource "aws_iam_role_policy" "deploy_role_async_work" {
         # cannot be known when this policy is written; the reachable blast radius
         # is bounded by CreateEventSourceMapping additionally requiring
         # permission on the target function.
+        #
+        # CONFIRMED LOAD-BEARING by run 32810298045 attempt 2:
+        # FfugWorkerFunctionWorkEventSourceMapping reached CREATE_COMPLETE, which
+        # is this grant being exercised. Reasoned before it was observed; do not
+        # read the reasoning as speculation and trim it.
         Sid    = "EventSourceMappings"
         Effect = "Allow"
         Action = [
@@ -327,9 +332,13 @@ resource "aws_iam_role_policy" "deploy_role_async_work" {
         # narrows. iam:CreateRole covers writing a trust policy ONCE and never
         # covers amending one.
         #
-        # Not yet observed failing — the rollbacks cancelled this resource before
-        # it was attempted both times. Included because the alternative is a
-        # third deploy to find out.
+        # CONFIRMED LOAD-BEARING by run 32810298045 attempt 2: SampleAppTenantRole
+        # reached UPDATE_COMPLETE, which is exactly this action succeeding.
+        #
+        # It was added on reasoning alone — two rollbacks had cancelled the
+        # resource before CloudFormation ever attempted it, so there was no
+        # denial to point at. Recorded because a comment saying "never observed"
+        # invites a reader to trim a grant that turns out to be required.
         Sid    = "AmendStackRoleTrust"
         Effect = "Allow"
         Action = "iam:UpdateAssumeRolePolicy"

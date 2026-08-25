@@ -135,6 +135,22 @@ def porth(monkeypatch, table):
     return controller
 
 
+def call(operation, **args):
+    """Invoke ffug the way anything real does.
+
+    `ServiceClient` puts a caller's arguments under `payload` and adds
+    `operation` and `porth_context` beside them. Tests used to hand-build events
+    with arguments at the TOP level — a shape nothing sends — so `hash_async`
+    refused every live call and `isolation_probe` silently saw an empty
+    probe_tenant from PORTH-598 onward, and the suite was green throughout
+    (PORTH-622).
+
+    Every call below goes through here, so that cannot happen again by writing a
+    dict inline.
+    """
+    return h.handler({"operation": operation, "payload": args})
+
+
 def err(result):
     return result["error"]["code"]
 
@@ -147,8 +163,8 @@ def test_tenant_comes_from_the_verified_claims_not_the_payload(porth, table):
     ``tenant_id`` is simply not a field this handler reads."""
     porth.arrives_as(tenant_id="acme")
 
-    h.handler({"operation": "echo", "item_id": "i-1", "payload": 1, "tenant_id": "globex",
-               "environment": "somewhere-else"})
+    h.handler({"operation": "echo", "tenant_id": "globex", "environment": "somewhere-else",
+               "payload": {"item_id": "i-1", "payload": 1}})
 
     assert table.put_item.call_args[1]["Item"]["pk"] == "ENV#prod#TENANT#acme"
 
@@ -226,8 +242,8 @@ def test_a_suspended_tenant_is_served_nothing(porth, table):
     porth.tenant_is(status="suspended")
 
     assert err(h.handler({"operation": "hash", "payload": 1})) == "tenant_not_active"
-    assert err(h.handler({"operation": "echo", "item_id": "i", "payload": 1})) == "tenant_not_active"
-    assert err(h.handler({"operation": "get", "item_id": "i"})) == "tenant_not_active"
+    assert err(call("echo", item_id="i", payload=1)) == "tenant_not_active"
+    assert err(call("get", item_id="i")) == "tenant_not_active"
     assert not table.put_item.called
 
 
@@ -292,7 +308,7 @@ def test_hash_requires_a_payload(porth):
 
 
 def test_echo_stores_under_the_tenant_partition_and_hands_the_payload_back(porth, table):
-    result = h.handler({"operation": "echo", "item_id": "i-1", "payload": {"hello": "world"}})
+    result = call("echo", item_id="i-1", payload={"hello": "world"})
 
     assert result == {"ok": True, "operation": "echo", "item_id": "i-1", "payload": {"hello": "world"}}
     item = table.put_item.call_args[1]["Item"]
@@ -300,7 +316,7 @@ def test_echo_stores_under_the_tenant_partition_and_hands_the_payload_back(porth
 
 
 def test_echo_is_still_the_default_op(porth, table):
-    h.handler({"item_id": "i-1", "payload": 1})
+    h.handler({"payload": {"item_id": "i-1", "payload": 1}})
 
     assert table.put_item.called
 
@@ -311,7 +327,7 @@ def test_get_reads_back_under_the_same_keys(porth, table):
         {"Item": {"payload": {"hello": "world"}}},
     ]
 
-    result = h.handler({"operation": "get", "item_id": "i-1"})
+    result = call("get", item_id="i-1")
 
     assert result["payload"] == {"hello": "world"}
     assert table.get_item.call_args[1]["Key"] == {
@@ -323,12 +339,12 @@ def test_get_reads_back_under_the_same_keys(porth, table):
 def test_get_missing_item_is_a_typed_rejection(porth, table):
     table.get_item.side_effect = [{"Item": {"status": "active", "prime": ACME_PRIME}}, {}]
 
-    assert err(h.handler({"operation": "get", "item_id": "nope"})) == "not_found"
+    assert err(call("get", item_id="nope")) == "not_found"
 
 
 def test_echo_requires_item_id_and_payload(porth, table):
-    assert err(h.handler({"operation": "echo", "payload": 1})) == "missing_item_id"
-    assert err(h.handler({"operation": "echo", "item_id": "i-1"})) == "missing_payload"
+    assert err(call("echo", payload=1)) == "missing_item_id"
+    assert err(call("echo", item_id="i-1")) == "missing_payload"
     assert not table.put_item.called
 
 
@@ -562,7 +578,7 @@ def test_a_named_real_tenant_is_probed_and_refused(porth, table):
     """
     narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
 
-    result = h.handler({"operation": "isolation_probe", "probe_tenant": "globex"})
+    result = call("isolation_probe", probe_tenant="globex")
     named = attempt(result, "a real tenant")
 
     assert result["probe_tenant"] == "globex"
@@ -576,7 +592,7 @@ def test_naming_your_own_tenant_adds_no_probe(porth, table):
     and fail the whole strip on a typo."""
     narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
 
-    result = h.handler({"operation": "isolation_probe", "probe_tenant": "acme"})
+    result = call("isolation_probe", probe_tenant="acme")
 
     assert not [a for a in result["attempts"] if "a real tenant" in a["attempt"]]
     assert result["isolated"] is True
@@ -596,7 +612,7 @@ def test_the_probe_never_returns_rows_only_counts(porth, table):
         "Count": 1,
     }
 
-    result = h.handler({"operation": "isolation_probe", "probe_tenant": "globex"})
+    result = call("isolation_probe", probe_tenant="globex")
 
     assert "7" not in json.dumps(result)
     assert "prime" not in json.dumps(result)

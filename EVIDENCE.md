@@ -77,8 +77,38 @@ can read it and cannot create it.
 
 ## Claim 2 — the asynchronous round trip (PORTH-620, PORTH-621, PORTH-622)
 
-*Not yet witnessed. This section is the recipe, and it becomes evidence when the
-run links are filled in.*
+**Infrastructure deployed:** 2026-08-25, `25f92ca`, run
+[`32810298045`](https://github.com/dragoninex1le/enterprise-membership-sample/actions/runs/32810298045)
+(attempt 2). Queue, dead-letter queue, worker, event source mapping, callback
+ingress and its role, the callback session-policy document, and the amended
+trust on `SampleAppTenantRole` — all `CREATE_COMPLETE`/`UPDATE_COMPLETE`.
+
+*The round trip itself is not yet witnessed. Everything below is the recipe, and
+it becomes evidence when the trace is followed live.*
+
+### What it took to deploy, recorded because it will happen again
+
+Three attempts, and the first two are worth keeping rather than tidying away.
+Each failure was a permission the receiving deploy role did not hold, because
+this stack introduced resource types it had never created:
+
+| run | denied | note |
+|---|---|---|
+| `32806570360` | `sqs:CreateQueue` | SQS was a wholly new resource type — nothing covered it even partially |
+| `32807678711` | `ssm:PutParameter` | on the callback's session-policy document |
+| `32810298045` #1 | `ssm:PutParameter` again | the grant had been applied, but *after* this run passed that resource |
+
+The second one is the lesson. It was predicted as *covered* on the reasoning
+that the stack already writes `auth-session-policy/ffug-tenant-scoped` under the
+same prefix — but the live grant names the exact parameter, so a sibling
+document was a new resource entirely. **"Same prefix, therefore covered" is
+reasoning, not evidence.**
+
+The grants now live in `infra/terraform/ems-install-once` rather than in Porth's
+receiving-account template, and the distinction is the same one that governs the
+signing keys: that template is generic, instantiated for any receiving product,
+and grants what every receiving app needs. A work queue exists because ffug has
+asynchronous work, so the grant that creates it is EMS's.
 
 Approve a record. Expected sequence:
 

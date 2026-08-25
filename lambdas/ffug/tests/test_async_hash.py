@@ -20,6 +20,7 @@ from ffug import worker as w
 # be tested against a friendlier double than `hash` is.
 from ffug.tests.test_handler import (  # noqa: F401
     ACME_PRIME,
+    call,
     porth,
     table,
     verified_context,
@@ -51,7 +52,7 @@ def test_the_queued_message_carries_no_token_and_no_envelope(porth, table, queue
     verifying the wrong thing, and holding one open long enough to still verify
     would mean moving H2's 300-second ceiling for no gain.
     """
-    h.handler({"operation": "hash_async", "payload": {"amount": 1}, "callback": CALLBACK})
+    call("hash_async", document={"amount": 1}, callback=CALLBACK)
 
     body = json.dumps(_sent(queue))
     for forbidden in ("porth_context", "token", "signature", "envelope"):
@@ -61,7 +62,7 @@ def test_the_queued_message_carries_no_token_and_no_envelope(porth, table, queue
 def test_what_is_queued_is_a_context_the_worker_can_restore(porth, table, queue):
     from porth_common.context import PersistedContext
 
-    h.handler({"operation": "hash_async", "payload": {"amount": 1}, "callback": CALLBACK})
+    call("hash_async", document={"amount": 1}, callback=CALLBACK)
 
     restored = PersistedContext.restore(_sent(queue)["context"])
 
@@ -73,7 +74,7 @@ def test_what_is_queued_is_a_context_the_worker_can_restore(porth, table, queue)
 def test_accepting_work_writes_nothing_to_the_table(porth, table, queue):
     """`echo` stays the only writer, so the residue sweep stays a one-prefix
     question and `tenant.deleted` remains provably clean."""
-    h.handler({"operation": "hash_async", "payload": 1, "callback": CALLBACK})
+    call("hash_async", document=1, callback=CALLBACK)
 
     assert not table.put_item.called
     assert not table.update_item.called
@@ -84,7 +85,7 @@ def test_an_unprovisioned_tenant_is_refused_at_the_door(porth, table, queue):
     the caller is still on the line to be told."""
     porth.tenant_is_unknown()
 
-    result = h.handler({"operation": "hash_async", "payload": 1, "callback": CALLBACK})
+    result = call("hash_async", document=1, callback=CALLBACK)
 
     assert result["error"]["code"] == "tenant_not_provisioned"
     assert not queue.send_message.called
@@ -93,7 +94,7 @@ def test_an_unprovisioned_tenant_is_refused_at_the_door(porth, table, queue):
 def test_work_with_nowhere_to_report_is_refused(porth, table, queue):
     """ffug never holds an address to call back to, so the caller declares one.
     Asynchronous work whose result nobody learns is not worth accepting."""
-    result = h.handler({"operation": "hash_async", "payload": 1})
+    result = call("hash_async", document=1)
 
     assert result["error"]["code"] == "missing_callback"
     assert not queue.send_message.called
@@ -101,7 +102,7 @@ def test_work_with_nowhere_to_report_is_refused(porth, table, queue):
 
 def test_the_synchronous_hash_is_untouched(porth, table, queue):
     """The async op is an addition. `hash` still answers in line."""
-    result = h.handler({"operation": "hash", "payload": {"amount": 1}})
+    result = call("hash", **{"amount": 1})
 
     assert result["prime"] == ACME_PRIME
     assert not queue.send_message.called
