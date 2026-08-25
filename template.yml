@@ -851,6 +851,12 @@ Resources:
               # what turns the token's `kid` into "which service may claim to be
               # this source, and in which direction". Fail-closed: unreadable
               # means every call refused, so it is not optional for a receiver.
+              # PORTH-620 — its own work queue, send only. It never receives:
+              # draining is the worker's job under a different role, which is
+              # what keeps Sign off the request path.
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt FfugWorkQueue.Arn
               - Effect: Allow
                 Action: ssm:GetParameter
                 Resource:
@@ -892,6 +898,7 @@ Resources:
           PORTH_SERVICE_DATA_SCOPE: !Select [4, !Split ["/", !Ref FfugSessionPolicy]]
           FFUG_TABLE_NAME: !Ref FfugTable
           FFUG_LOG_LEVEL: !Ref FfugLogLevel
+          FFUG_WORK_QUEUE_URL: !Ref FfugWorkQueue
       # No Events — ffug is invoked directly (IAM/SigV4), never through a
       # public HTTP route. The internal plane is the whole point.
 
@@ -977,6 +984,138 @@ Resources:
                 - tenant.suspended
                 - tenant.reactivated
                 - tenant.deleted
+
+  # ── ffug's async half (PORTH-620) ────────────────────────────────────────
+  #
+  # The queue is INSIDE ffug. It is not an integration point and must never
+  # become one: a service never exposes "write to my queue" as its API, and
+  # nothing but FfugFunction may send to this. Crossings are invoke or https
+  # with an envelope, in both directions.
+  #
+  # Standard, never FIFO. Delivery is at-least-once and unordered, the consumer
+  # is built for exactly that, and FIFO would buy ordering nothing here promises
+  # while hiding the disorder the consumer is tested against.
+  FfugWorkQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub porth-ffug-work-${PorthEnvironment}
+      # Comfortably above the worker's 60s timeout. Shorter and a slow record is
+      # redelivered while the first attempt is still running, which looks like
+      # duplicate work and is really a misconfigured timeout.
+      VisibilityTimeout: 360
+      MessageRetentionPeriod: 345600 # 4 days
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt FfugWorkDeadLetterQueue.Arn
+        # Bounded, so a poisoned record stops rather than being retried until
+        # retention expires and it disappears without anyone seeing it.
+        maxReceiveCount: 5
+
+  FfugWorkDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub porth-ffug-work-dlq-${PorthEnvironment}
+      # Longer than the source queue: the whole point is that something survives
+      # long enough for a person to look at it.
+      MessageRetentionPeriod: 1209600 # 14 days
+
+  # The completion identity, and the ONLY thing in this stack that signs with
+  # ffug's key. Separate from FfugFunctionRole on purpose: that role serves
+  # requests and holds no KMS at all, which is what UAT-4 witnesses. A single
+  # role doing both would hold Sign on the request path.
+  FfugWorkerFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: "ffug async worker - drains its own queue, narrows per record, and signs completions with ffug's response key (PORTH-620)."
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ffug-worker
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Per-record narrowing. Same tenant role the request path assumes,
+              # assumed once per RECORD rather than once per invocation — a
+              # batch carries several tenants and each gets its own session.
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !GetAtt FfugTenantRole.Arn
+              # Sign, on ffug's RESPONSE key and nothing else. A completing
+              # service holds response authority only, so this role cannot be
+              # turned into a way to originate work — the capability is absent
+              # rather than merely unused (PORTH-623).
+              - !If
+                - HasFfugResponseSigningKey
+                - Effect: Allow
+                  Action:
+                    - kms:Sign
+                    - kms:DescribeKey
+                  Resource: !Ref FfugResponseSigningKeyArn
+                - !Ref AWS::NoValue
+              # The callee. Resolved from the endpoint map at send time; the
+              # grant names an ARN because a permission must, the CALLER does
+              # not.
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt SampleAppFunction.Arn
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt FfugWorkQueue.Arn
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/service-endpoints
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/signing-keys/*
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/auth-session-policy/*
+              # No DynamoDB, exactly as on the request path. Nothing to fall
+              # back to means a narrowing failure is an AccessDenied rather
+              # than a quiet read of every tenant.
+
+  FfugWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub porth-ffug-worker-${PorthEnvironment}
+      CodeUri: lambdas/
+      Handler: ffug.worker.handler
+      Runtime: python3.12
+      Timeout: 60
+      MemorySize: 256
+      Role: !GetAtt FfugWorkerFunctionRole.Arn
+      Environment:
+        Variables:
+          PORTH_BRANCH: !Ref PorthBranch
+          PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
+          PORTH_ENVIRONMENT: !Ref PorthEnvironment
+          PORTH_SERVICE_ID: ffug
+          PORTH_SERVICE_DATA_IDENTITY: !GetAtt FfugTenantRole.Arn
+          PORTH_SERVICE_DATA_SCOPE: !Select [4, !Split ["/", !Ref FfugSessionPolicy]]
+          # ffug's RESPONSE key — the one difference from FfugFunction, and the
+          # reason this is a separate function at all.
+          PORTH_CONTEXT_SIGNING_KEY_ALIAS: !Ref FfugResponseSigningKeyArn
+          FFUG_TABLE_NAME: !Ref FfugTable
+          FFUG_LOG_LEVEL: !Ref FfugLogLevel
+      Events:
+        Work:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt FfugWorkQueue.Arn
+            BatchSize: 10
+            # MANDATORY, not tuning. Without it, returning normally deletes the
+            # WHOLE batch — including the records the per-record iterator
+            # refused, which is precisely the isolation failure this design is
+            # meant to make visible.
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
 
   # Role the Components-repo UAT suite assumes to reach ffug in this account
   # (Q13 ruling, 2026-08-05). Unnamed deliberately: the deploy runs with

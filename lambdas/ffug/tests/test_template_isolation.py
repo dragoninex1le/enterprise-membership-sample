@@ -392,29 +392,47 @@ def _grants(template, action):
     return found
 
 
-def test_only_these_two_may_mint_and_ffug_is_not_one_of_them(template):
+def test_every_signer_signs_with_the_key_its_direction_entitles_it_to(template):
     """The allow-list that stops the shared-key blast radius coming back.
 
     A new Sign grant is how it returns: one function at a time, each
-    individually reasonable.
+    individually reasonable. So this pins WHICH KEY each signer holds, not just
+    which roles appear — the name list alone would pass if the worker were
+    quietly given the install key, which is the failure worth catching.
 
-    Both signers hold the install key today, and that is correct rather than a
-    leftover — the app is not a service in the per-service key model
-    (PORTH-623), so the install key IS its request key. The UAT runner mints as
-    `porth` on the same key to drive the journeys.
+    Three signers, two keys:
 
-    ffug appears nowhere. It holds a RESPONSE key only, and nothing signs with
-    it until the completion role arrives with PORTH-620.
+    * the app and the UAT runner sign REQUESTS, on the install key. The app is
+      not a service in the per-direction model, so the install key is its
+      request key; the runner mints as `porth` on the same key.
+    * the worker signs RESPONSES, on ffug's own key. A completing service holds
+      response authority and nothing else, so it cannot originate work even as
+      itself — the capability is absent rather than unused.
+
+    ffug's REQUEST path appears nowhere, and that is what UAT-4 witnesses.
     """
+    expected = {
+        "SampleAppFunction": {"Ref": "PorthContextSigningKeyArn"},
+        "PorthUatRunnerRole": {"Ref": "PorthContextSigningKeyArn"},
+        "FfugWorkerFunctionRole": {"Ref": "FfugResponseSigningKeyArn"},
+    }
     signers = _grants(template, "kms:Sign")
 
-    assert set(signers) == {"SampleAppFunction", "PorthUatRunnerRole"}, (
-        f"kms:Sign grants changed: {sorted(signers)}. Sign on the install key "
-        f"mints context for any tenant, as any service, to any audience — a new "
-        f"holder is a new forgery capability, not a widened permission."
+    assert set(signers) == set(expected), (
+        f"kms:Sign holders changed: {sorted(signers)}. A new holder is a new "
+        f"forgery capability for whatever that key may speak as, not a widened "
+        f"permission."
     )
-    for role, resources in signers.items():
-        assert resources == [{"Ref": "PorthContextSigningKeyArn"}], (role, resources)
+    for role, key in expected.items():
+        assert signers[role] == [key], (
+            f"{role} signs with {signers[role]}, expected {key}. Signing with "
+            f"another party's key is the shared-key problem PORTH-623 removed."
+        )
+
+    assert "FfugFunctionRole" not in signers, (
+        "the request path gained kms:Sign. That role holding nothing to sign "
+        "with is the demonstration, not an incidental permission."
+    )
 
 
 def test_nothing_verifies_with_kms_because_verification_is_local(template):
@@ -462,3 +480,76 @@ def test_the_app_has_no_signing_key_of_its_own(template):
             f"with no signer and refuses at the boundary rather than sending "
             f"something unsigned"
         )
+
+
+# --- the asynchronous half (PORTH-620) ---------------------------------------
+
+
+def test_the_worker_reports_batch_item_failures(resources):
+    """Without this the whole batch is deleted on a normal return, refused
+    records included.
+
+    That is the isolation failure the per-record iterator exists to prevent,
+    reappearing one layer down: a record the iterator correctly refused to
+    build a Director for would vanish, and the refusal it logged would be the
+    only trace. The property is a single line of YAML with no runtime symptom,
+    which is exactly the kind that gets dropped in a refactor.
+    """
+    events = resources["FfugWorkerFunction"]["Properties"]["Events"]
+    source = next(e for e in events.values() if e["Type"] == "SQS")
+
+    assert source["Properties"]["FunctionResponseTypes"] == ["ReportBatchItemFailures"]
+
+
+def test_the_work_queue_is_not_fifo(resources):
+    """The drainer is built for at-least-once and unordered delivery, and every
+    property it holds is per record. FIFO would buy ordering nothing needs and
+    charge a per-tenant group key for it."""
+    queue = resources["FfugWorkQueue"]["Properties"]
+
+    assert not queue.get("FifoQueue")
+    assert not queue["QueueName"]["Sub"].endswith(".fifo")
+
+
+def test_a_record_that_cannot_be_drained_ends_somewhere_visible(resources):
+    """Bounded redelivery. A refused record goes back on the queue by design,
+    so without a maxReceiveCount 'goes back' means forever."""
+    redrive = resources["FfugWorkQueue"]["Properties"]["RedrivePolicy"]
+
+    assert redrive["maxReceiveCount"] <= 5
+    assert redrive["deadLetterTargetArn"] == {
+        "GetAtt": "FfugWorkDeadLetterQueue.Arn"
+    }
+
+
+def test_the_queue_outlasts_one_invocations_worth_of_work(resources):
+    """Visibility timeout above the function's timeout, or a slow record is
+    redelivered while the first copy is still hashing it — two callbacks for one
+    request, and the initiator's correlation hash matches both."""
+    visibility = resources["FfugWorkQueue"]["Properties"]["VisibilityTimeout"]
+    timeout = resources["FfugWorkerFunction"]["Properties"]["Timeout"]
+
+    assert visibility >= timeout * 6
+
+
+def test_the_worker_holds_no_standing_table_access(resources):
+    """The same property as the request path, which is why it is asserted the
+    same way rather than assumed to follow. The worker reaches data only after
+    narrowing per record."""
+    found = actions(resources["FfugWorkerFunctionRole"])
+
+    assert not [a for a in found if a.startswith("dynamodb:")], found
+
+
+def test_the_request_path_can_queue_work_but_not_drain_it(resources):
+    """Send only.
+
+    A role that could both enqueue and dequeue would let the ingress complete
+    work under the caller's own credential, which is the crossing this design
+    replaced. It stays a producer.
+    """
+    found = actions(resources["FfugFunctionRole"])
+
+    assert "sqs:SendMessage" in found
+    assert "sqs:ReceiveMessage" not in found
+    assert "sqs:DeleteMessage" not in found

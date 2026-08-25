@@ -37,11 +37,13 @@ identifiers only — never a salt, never a payload body, never a token.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 from typing import Any
 
+from porth_common.context import PersistedContext
 from porth_common.context.envelope import EnvelopeError
 from porth_common.director import Director
 from porth_common.internal_plane.config import (
@@ -57,6 +59,23 @@ log = logging.getLogger(__name__)
 log.setLevel(os.environ.get("FFUG_LOG_LEVEL", "INFO"))
 
 TABLE_NAME = os.environ.get("FFUG_TABLE_NAME", "")
+
+#: ffug's own work queue. Not a Porth capability and not reached through the
+#: Director: a queue between two services is not a supported integration shape,
+#: and this one is not between anybody — it is inside ffug, no different from a
+#: row in its own table. Porth owns the crossings; services own their insides.
+WORK_QUEUE_URL = os.environ.get("FFUG_WORK_QUEUE_URL", "")
+
+_sqs = None
+
+
+def _queue():
+    global _sqs
+    if _sqs is None:
+        import boto3
+
+        _sqs = boto3.client("sqs")
+    return _sqs
 
 
 class FfugError(Exception):
@@ -412,10 +431,77 @@ def _op_isolation_probe(event: dict[str, Any], director: FfugDirector) -> dict[s
     }
 
 
+def _op_hash_async(event: dict[str, Any], director: FfugDirector) -> dict[str, Any]:
+    """Accept the work, persist who it is for, and answer immediately.
+
+    The crossing ends here. What is queued is a `PersistedContext` and a body —
+    **never the envelope**. A queued message is persisted state inside this
+    service, not something in transport, and re-verifying a token minted for a
+    crossing that already finished would be verifying the wrong thing. Holding
+    one open long enough to still verify would mean moving H2's 300-second
+    ceiling for no gain.
+
+    The projection is read here as well as in the worker, deliberately. It costs
+    one GetItem and it turns "this tenant has no salt" into a refusal at the
+    door, with the caller still on the line, instead of a message that queues
+    successfully and dies out of sight.
+
+    The callback target is the CALLER's to declare — a service and an operation,
+    never an address — so ffug never holds somewhere to call back to and cannot
+    be pointed at one.
+    """
+    payload = event.get("payload")
+    if payload is None:
+        raise FfugError("missing_payload", "payload is required for hash_async")
+
+    callback = event.get("callback") or {}
+    service_id = str(callback.get("service_id") or "").strip()
+    operation = str(callback.get("operation") or "").strip()
+    if not service_id or not operation:
+        raise FfugError(
+            "missing_callback",
+            "hash_async requires callback.service_id and callback.operation — "
+            "asynchronous work with nowhere to report is work nobody learns the "
+            "result of",
+        )
+
+    if not WORK_QUEUE_URL:
+        raise FfugError(
+            "queue_unavailable",
+            "FFUG_WORK_QUEUE_URL is not set — refusing to accept work that "
+            "cannot be queued rather than acknowledging and dropping it",
+        )
+
+    _active_projection(director)
+
+    record = PersistedContext.from_director(director)
+    body = json.dumps(
+        {
+            "context": record.to_json(),
+            "payload": payload,
+            "callback": {"service_id": service_id, "operation": operation},
+        },
+        separators=(",", ":"),
+    )
+    _queue().send_message(QueueUrl=WORK_QUEUE_URL, MessageBody=body)
+
+    log.info(
+        "ffug.queued operation=hash_async tenant_id=%s callback=%s/%s trace_id=%s",
+        director.tenant_id, service_id, operation, director.async_trace_id,
+    )
+    return {
+        "ok": True,
+        "operation": "hash_async",
+        "status": "queued",
+        "trace_id": director.async_trace_id,
+    }
+
+
 _OPS = {
     "echo": _op_echo,
     "get": _op_get,
     "hash": _op_hash,
+    "hash_async": _op_hash_async,
     "isolation_probe": _op_isolation_probe,
 }
 
