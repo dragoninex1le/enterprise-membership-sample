@@ -76,39 +76,29 @@ terraform init -backend-config=backend.ems.hcl
 terraform plan
 ```
 
-Both `*.hcl` copies and `*.tfvars` are gitignored. The defaults already name
-EMS's two minting services, so a plan needs no var file.
+Both `*.hcl` copies and `*.tfvars` are gitignored. The defaults already name the
+one key this install needs, so a plan takes no var file.
 
-## After applying — registration, which is not Terraform's job
+## What one apply produces
 
-Applying creates the key and publishes its ARN to
-`/porth/{branch}/infra/signing-key-arn/ffug/response`. It registers nothing.
+Both keys and both trust documents. There is no registration step, nothing to
+run afterwards, and nothing the application deploy does.
 
-Registration is `porth-install signing-key register`, and the deploy runs it on
-every deploy:
-
-```bash
-porth-install signing-key register --service ffug --direction response --key-arn "$ARN" --branch dev
-```
-
-It resolves the ARN (an alias is a valid thing to hand it and an invalid thing to
-store), refuses a key that is not `SIGN_VERIFY`/`ECC_NIST_P256`, captures the
-public half with `kms:GetPublicKey`, merges into whatever is already at
-`/porth/{branch}/signing-keys/ffug`, and validates the result through the same
-code the runtime loads it with — so a document it refuses can never reach a
-verifier.
-
-This module deliberately emits **no trust document**. Rebuilding any of that
-here would be a second implementation of a contract that already has one.
+| resource | what |
+|---|---|
+| `aws_kms_key.service_signing["ffug/response"]` | ffug's own signing key |
+| `aws_ssm_parameter.signing_keys["ffug"]` | `signing-keys/ffug` — that key, direction `response` |
+| `aws_ssm_parameter.signing_keys["sample-app"]` | `signing-keys/sample-app` — the **install** key, direction `request` |
+| `aws_ssm_parameter.service_signing_key_arn[…]` | the ARN, for the deploy to pass as a stack parameter |
 
 ### One document per service
 
 `/porth/{branch}/signing-keys/{service_id}` — not one registry listing everybody
 (PORTH-625). A shared document needs every participant merging into it, and one
-pipeline that *writes* rather than merges silently removes everyone else's keys.
+writer that replaces rather than merges silently removes everyone else's keys.
 
-The pre-0.0.11 single document at `/porth/{branch}/signing-keys` is **dead**. If
-an install ran a 0.0.10 deploy it will have one; delete it. It is a
+The pre-0.0.11 single document at `/porth/{branch}/signing-keys` is **dead**. An
+install that ran a 0.0.10 deploy will have one; delete it. It is a
 plausible-looking document at a plausible-looking path, so the next person
 debugging a signing problem will find it, edit it, and watch nothing happen.
 
@@ -116,35 +106,51 @@ debugging a signing problem will find it, edit it, and watch nothing happen.
 aws ssm delete-parameter --name /porth/dev/signing-keys --region us-east-1
 ```
 
-EMS never adopted 0.0.10, so EMS should not have one.
+### The `sample-app` document is the one that is easy to leave out
 
-### Two registrations, not one
+The app signs with the **install** key, so nothing in `signing_keys` generates
+its document — it is added separately. Verification fetches the document of the
+service a token *claims to be from*, so without it every crossing fails with
+`UnknownSigningServiceError`: a missing document wearing a signing error.
 
-The deploy registers **two** keys, and the second is the one that is easy to
-miss.
-
-| document | key | direction | why |
-|---|---|---|---|
-| `signing-keys/sample-app` | the **install** key | request | the app claims `sample-app` and signs with the install key |
-| `signing-keys/ffug` | ffug's own key | response | ffug signs only when it calls back |
-
-Verification resolves `(kid, source_service, direction)` by fetching the document
-of the service the token **claims to be from**. So the install key must appear
-under `sample-app` — without it every crossing that works today starts failing
-with `UnknownSigningServiceError`, because nothing else creates that document.
-
-The same kid legitimately appears in two documents: Porth registers it under
+The same kid legitimately appears in two documents — Porth registers it under
 `porth` for its own use, and it is the app's request key here. The duplicate-kid
-guard is *per document* on purpose — what it stops is one key serving both
+guard is *per document* on purpose; what it stops is one key serving both
 directions, which would undo the split.
 
-### What the deploy role needs
+### Why this module writes them, rather than `porth-install signing-key register`
 
-The registration calls KMS and writes SSM, so the deploy identity needs
-`kms:DescribeKey` and `kms:GetPublicKey` on both keys, and `ssm:GetParameter` +
-`ssm:PutParameter` on `/porth/{branch}/signing-keys/*` — the **prefix**, because
-it writes two documents. Absent those, the step fails loudly, but after the
-stack has already deployed.
+Each document has exactly one owner under PORTH-625, so the merge that command
+provides has nothing to merge with here. Its key-spec check — refusing anything
+that is not `SIGN_VERIFY`/`ECC_NIST_P256` — is for a CLI handed an arbitrary
+ARN, and cannot fail for a key this module created with that spec.
+
+What it does that HCL cannot is validate the result through the runtime's own
+loader. That moved to `lambdas/ffug/tests/test_signing_key_document_shape.py`,
+which runs in CI — earlier than the command would have, and failing on the pull
+request rather than at the first internal call of the day.
+
+The alternative was a step in the application deploy. That was wrong for a
+reason worth keeping: it required the deploy role to hold `ssm:PutParameter` on
+the trust documents and `kms:GetPublicKey` on a signing key. An app deploy with
+write access to *who may speak for whom* is a capability nothing about deploying
+an app requires — and if the deploy role still has those grants, revoke them.
+
+Doing it here is also better on the thing that matters most: **the documents
+cannot drift from the keys**, because one apply produces both.
+
+### Confirm it took
+
+```bash
+aws ssm get-parameter --name /porth/dev/signing-keys/sample-app --query Parameter.Value --output text
+```
+
+### What the operator needs
+
+Whoever runs `terraform apply` needs `kms:GetPublicKey` on both keys — the
+public half is captured once, here, which is the whole reason verification can
+be local — plus SSM read/write on `/porth/{branch}/signing-keys/*` and read on
+`/porth/{branch}/infra/*`.
 
 ### No `kms:Verify`, anywhere
 

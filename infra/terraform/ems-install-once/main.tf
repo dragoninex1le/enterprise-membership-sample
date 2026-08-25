@@ -109,6 +109,97 @@ resource "aws_kms_alias" "service_signing" {
   target_key_id = aws_kms_key.service_signing[each.key].key_id
 }
 
+# ── The trust documents (PORTH-625) ───────────────────────────────────────
+#
+# One document per service, and each has exactly ONE owner — which is what
+# makes writing them from here correct rather than a shortcut. The merge
+# behaviour `porth-install signing-key register` provides exists for a shared
+# document with several writers; under the per-service shape there is no other
+# writer for these two to merge with.
+#
+# Nothing is validated away by doing it here either. That command refuses a key
+# that is not SIGN_VERIFY/ECC_NIST_P256 — a check for a CLI handed an arbitrary
+# ARN, and one this module cannot fail, because it CREATES the key with that
+# spec. What it does that Terraform cannot is validate the result through the
+# runtime's own loader; test_signing_key_document_shape.py covers that instead,
+# in CI, which is earlier than the CLI would have.
+#
+# The alternative was a manual step run beside `terraform apply`, and this is
+# better on the thing that matters: the document cannot drift from the keys,
+# because the same apply produces both.
+
+# The app is not a service in the per-direction model — the install key IS its
+# request key — so its ARN comes from Porth's module rather than from here.
+data "aws_ssm_parameter" "install_signing_key_arn" {
+  name = "/porth/${var.porth_branch}/infra/context-signing-key-arn"
+}
+
+# `public_key` is base64-encoded DER SubjectPublicKeyInfo, which is exactly what
+# SigningKeyEntry.public_key wants — nothing re-encodes it in between. Called
+# once here, at provisioning, which is the whole reason verification can be
+# local and no kms:Verify grant exists anywhere.
+data "aws_kms_public_key" "install_signing_key" {
+  key_id = data.aws_ssm_parameter.install_signing_key_arn.value
+}
+
+data "aws_kms_public_key" "service_signing" {
+  for_each = local.signing_keys
+
+  key_id = aws_kms_key.service_signing[each.key].arn
+}
+
+locals {
+  # service_id -> the whole of signing-keys/{service_id}.
+  #
+  # Built from the pairs rather than hardcoded, so adding a (service, direction)
+  # to the variable produces its binding without editing this.
+  trust_documents = merge(
+    {
+      for service in distinct([for k in var.signing_keys : k.service_id]) :
+      service => {
+        contract_version = 1
+        service_id       = service
+        keys = [
+          for key, pair in local.signing_keys : {
+            kid         = aws_kms_key.service_signing[key].arn
+            direction   = pair.direction
+            public_key  = data.aws_kms_public_key.service_signing[key].public_key
+            description = "EMS ${pair.service_id} ${pair.direction}"
+          } if pair.service_id == service
+        ]
+      }
+    },
+    {
+      # The app's request key is the install key. Its binding still has to exist
+      # under `sample-app`, because verification fetches the document of the
+      # service the token CLAIMS to be from — without it every crossing fails
+      # with UnknownSigningServiceError, which reads as a signing problem and is
+      # a missing document.
+      "sample-app" = {
+        contract_version = 1
+        service_id       = "sample-app"
+        keys = [{
+          kid         = data.aws_ssm_parameter.install_signing_key_arn.value
+          direction   = "request"
+          public_key  = data.aws_kms_public_key.install_signing_key.public_key
+          description = "EMS sample-app request (the install key)"
+        }]
+      }
+    },
+  )
+}
+
+resource "aws_ssm_parameter" "signing_keys" {
+  for_each = local.trust_documents
+
+  name        = "/porth/${var.porth_branch}/signing-keys/${each.key}"
+  description = "Signing keys ${each.key} may speak with, by direction (PORTH-623/625)."
+  type        = "String"
+  value       = jsonencode(each.value)
+  overwrite   = true
+  tags        = merge(local.common_tags, { Service = each.key })
+}
+
 # A KMS key has no deterministic identifier — only its alias is predictable, and
 # an alias ARN cannot be the Resource of an IAM policy for key operations. So
 # the ARN is published where the deploy can read it.
