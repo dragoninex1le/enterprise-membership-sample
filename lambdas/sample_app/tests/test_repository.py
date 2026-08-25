@@ -188,7 +188,10 @@ def test_the_listed_shape_is_the_one_the_screen_reads():
                           # PORTH-621 — the screen has to distinguish "queued"
                           # from "ffug never saw this", and needs the trace to
                           # show alongside the digest it will produce.
-                          "fingerprint_status", "fingerprint_trace_id"}
+                          "fingerprint_status", "fingerprint_trace_id",
+                          # PORTH-622 — H, so the screen can show what was
+                          # committed BEFORE ffug was asked, beside the answer.
+                          "fingerprint_correlation_hash"}
 
 
 # --- transitions are guarded by DynamoDB, not by a prior read ----------------
@@ -420,3 +423,34 @@ def test_an_empty_trace_matches_nothing_rather_than_the_first_blank_record():
 
     assert repo.find_by_fingerprint_trace("") is None
     assert not table.query.called
+
+
+def test_the_fingerprint_survives_the_invoice_list():
+    """AR and AP render the fingerprint off the RAW row, not off _as_approval.
+
+    `_list` returns items as DynamoDB gave them and `attach_fingerprint` writes
+    to that same row, so every `fingerprint_*` attribute is already on the wire
+    for /sample/ar/invoices. The screens depend on that, and it is currently a
+    happy accident of two functions agreeing rather than anything stated.
+
+    Asserted so it becomes a contract: a projection added to `_list` — the
+    obvious optimisation on a widening table — would blank both screens while
+    every other test stayed green.
+    """
+    repo, table = make_repo()
+    table.query.return_value = {
+        "Items": [{
+            **_invoice("approved"),
+            "fingerprint_correlation_hash": "H",
+            "fingerprint_prime": "11",
+            "fingerprint_digest": "abc",
+            "fingerprint_status": "complete",
+            "fingerprint_trace_id": "t-9",
+        }]
+    }
+
+    listed = repo.list_invoices()[0]
+
+    for field in ("fingerprint_correlation_hash", "fingerprint_prime",
+                  "fingerprint_digest", "fingerprint_status", "fingerprint_trace_id"):
+        assert field in listed, f"{field} did not survive list_invoices"

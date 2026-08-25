@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { sampleApiClient } from '../api/sampleApp'
 import { usePorthContext } from '../context/PorthContext'
 import { PERMISSIONS } from '../constants'
+import Fingerprint, { hasFingerprint, type FingerprintFields } from '../components/Fingerprint'
 
-interface Invoice {
+interface Invoice extends FingerprintFields {
   invoice_id: string
   customer_name: string
   amount: string
@@ -134,7 +135,8 @@ export default function ARPage() {
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {invoices.map(inv => (
-                <tr key={inv.invoice_id} className="hover:bg-gray-50">
+                <Fragment key={inv.invoice_id}>
+                <tr className="hover:bg-gray-50">
                   <td className="px-4 py-3 text-sm font-mono text-gray-500">{inv.invoice_id.slice(0, 8)}</td>
                   <td className="px-4 py-3 text-sm text-gray-900">{inv.customer_name}</td>
                   <td className="px-4 py-3 text-sm text-gray-900">£{parseFloat(inv.amount).toFixed(2)}</td>
@@ -158,6 +160,14 @@ export default function ARPage() {
                     </td>
                   )}
                 </tr>
+                {hasFingerprint(inv) && (
+                  <tr className="bg-gray-50/60">
+                    <td colSpan={canWrite ? 6 : 5} className="px-4 pb-3 pt-0">
+                      <Fingerprint record={inv} />
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               ))}
             </tbody>
           </table>

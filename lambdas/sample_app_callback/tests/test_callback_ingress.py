@@ -255,3 +255,35 @@ def test_an_unknown_operation_is_refused_rather_than_defaulted(porth):
     verified evidence is a route that does something unintended."""
     assert err(h.handler(event(operation="anything-else"))) == "unknown_op"
     assert err(h.handler({})) == "unknown_op"
+
+
+def test_a_match_is_stated_not_inferred_from_silence(porth, caplog):
+    """PORTH-622 AC3: the correlation match has to be VISIBLE.
+
+    Before this, a mismatch logged a refusal and a match logged nothing, so
+    "the check passed" was something a reader inferred from the absence of a
+    line. That is the same shape that kept this app's whole log stream muted for
+    four stories — an empty log group reads as quiet, not as silenced.
+    """
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        result = h.handler(event())
+
+    assert result["ok"] is True
+    correlated = [r for r in caplog.records if "callback.correlated" in r.getMessage()]
+    assert correlated, "a matching callback said nothing about the match"
+    assert TRACE in correlated[0].getMessage(), "the line omits the trace a reader greps"
+
+
+def test_a_refused_callback_makes_no_claim_about_correlation(porth, caplog):
+    """The other half. The line must not be emitted on a path that did not match,
+    or it stops being evidence and becomes decoration."""
+    import logging
+
+    porth.holds(record(correlation=expected_hash(tenant_id="globex")))
+
+    with caplog.at_level(logging.INFO):
+        assert err(h.handler(event())) == "correlation_mismatch"
+
+    assert not [r for r in caplog.records if "callback.correlated" in r.getMessage()]

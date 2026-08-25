@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { sampleApiClient } from '../api/sampleApp'
 import { usePorthContext } from '../context/PorthContext'
 import { PERMISSIONS } from '../constants'
+import Fingerprint, { hasFingerprint, type FingerprintFields } from '../components/Fingerprint'
 
-interface Bill {
+interface Bill extends FingerprintFields {
   bill_id: string
   vendor_name: string
   amount: string
@@ -133,7 +134,8 @@ export default function APPage() {
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {bills.map(bill => (
-                <tr key={bill.bill_id} className="hover:bg-gray-50">
+                <Fragment key={bill.bill_id}>
+                <tr className="hover:bg-gray-50">
                   <td className="px-4 py-3 text-sm font-mono text-gray-500">{bill.bill_id.slice(0, 8)}</td>
                   <td className="px-4 py-3 text-sm text-gray-900">{bill.vendor_name}</td>
                   <td className="px-4 py-3 text-sm text-gray-900">£{parseFloat(bill.amount).toFixed(2)}</td>
@@ -157,6 +159,14 @@ export default function APPage() {
                     </td>
                   )}
                 </tr>
+                {hasFingerprint(bill) && (
+                  <tr className="bg-gray-50/60">
+                    <td colSpan={canWrite ? 6 : 5} className="px-4 pb-3 pt-0">
+                      <Fingerprint record={bill} />
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               ))}
             </tbody>
           </table>

@@ -141,6 +141,12 @@ def _as_approval(record_type: str, spec: _RecordSpec, item: dict) -> dict:
         # The instance identity the callback will carry. Shown so the same value
         # can be grepped across four log groups when the round trip is witnessed.
         "fingerprint_trace_id": item.get("fingerprint_trace_id", ""),
+        # H, committed at approval BEFORE ffug was asked for anything. Projected
+        # so the screen can show the commitment beside the answer — the ordering
+        # is the mechanism, and a hash produced after the fact would match
+        # itself. Never compared here: Porth recomputes and compares from the
+        # callback's verified claims, the application only ever stores.
+        "fingerprint_correlation_hash": item.get("fingerprint_correlation_hash", ""),
     }
 
 #: The table NAME's environment — the deployment axis. Not the data axis; see
