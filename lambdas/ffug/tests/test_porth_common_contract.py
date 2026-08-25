@@ -167,3 +167,90 @@ def test_no_op_reads_a_field_the_wire_never_carries():
         f"— the dispatcher unwraps `payload` once, in one place, so there is no "
         f"per-op choice to get wrong."
     )
+
+
+def test_every_director_declares_who_it_is():
+    """Identity is declared, not inherited from the process (PORTH-623).
+
+    An environment variable is one value for a whole process, so it cannot
+    express an app that speaks as more than one service — and while it was the
+    only source, a deployable could not present differently per ingress. That
+    pressure is what makes a consumer invent extra service ids for what is
+    really one service.
+
+    Declaring it here also removes a drift: the value the code uses and the
+    value the template sets were two statements of one fact, and
+    `verify_callback` recomputes the correlation hash from this service's own
+    registered identity — so a disagreement makes every authentic completion
+    look like a mismatch.
+    """
+    from ffug.handler import FfugDirector
+    from sample_app.director import SampleAppDirector
+    from sample_app_callback.handler import CallbackDirector
+
+    declared = {
+        FfugDirector: "ffug",
+        SampleAppDirector: "sample-app",
+        CallbackDirector: "sample-app",
+    }
+    for cls, expected in declared.items():
+        assert cls.SERVICE_ID == expected, (
+            f"{cls.__name__} declares {cls.SERVICE_ID!r}, expected {expected!r}"
+        )
+
+
+def test_the_stubs_do_not_pin_the_libraries_signature():
+    """A guard about the tests themselves, earned twice over.
+
+    `get_context` gained `direction` in 0.0.11 and `service_id` in 0.0.12. Both
+    times, stubs written as `lambda event, direction=None` broke everywhere at
+    once — 40 CI failures the first time — for a reason that had nothing to do
+    with what any of those tests were about.
+
+    A stub standing in for verification should accept whatever verification is
+    handed. Pinning its arity makes every upstream addition a bulk edit.
+    """
+    import ast
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+
+    # Parsed, not pattern-matched. Two regex attempts got this wrong in
+    # different directions — one anchored to the start of the FILE and could
+    # never fire, the other spanned the whole file and flagged an unrelated
+    # lambda. The syntax tree says exactly which lambda is being handed to
+    # get_context.
+    offenders = []
+    for f in root.rglob("test_*.py"):
+        text = f.read_text()
+        if "get_context" not in text:
+            continue
+
+        def pinned(args) -> bool:
+            return not (args.vararg or args.kwarg)
+
+        for node in ast.walk(ast.parse(text)):
+            if not (isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "setattr"):
+                continue
+            if not any(
+                isinstance(a, ast.Constant) and "get_context" in str(a.value)
+                for a in node.args
+            ):
+                continue
+            for a in node.args:
+                if isinstance(a, ast.Lambda) and pinned(a.args):
+                    offenders.append(f"{f.name}: the get_context lambda")
+                elif isinstance(a, ast.Name):
+                    # A named function passed by reference — find its def.
+                    for d in ast.walk(ast.parse(text)):
+                        if (
+                            isinstance(d, ast.FunctionDef)
+                            and d.name == a.id
+                            and pinned(d.args)
+                        ):
+                            offenders.append(f"{f.name}: def {d.name}(...)")
+
+    assert not offenders, (
+        "get_context stubs with a fixed signature: " + "; ".join(offenders)
+    )

@@ -89,7 +89,7 @@ def porth(monkeypatch, table):
             # direction it accepts so a response-direction kid presented at a
             # request door is refused inside the library. Defaulted so the stub
             # works whichever way the Director calls it.
-            def boom(_event, _direction=None):
+            def boom(_event, *_args, **_kwargs):
                 raise exc
 
             monkeypatch.setattr("porth_common.director.get_context", boom)
@@ -114,7 +114,7 @@ def porth(monkeypatch, table):
     # for a request ingress; a callback ingress must pass Direction.RESPONSE.
     monkeypatch.setattr(
         "porth_common.director.get_context",
-        lambda _e, _direction=None: controller.context,
+        lambda _e, *_a, **_k: controller.context,
     )
     store = MagicMock(Table=lambda _n: table)
     controller.store = store

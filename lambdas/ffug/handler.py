@@ -99,6 +99,12 @@ class FfugDirector(Director):
     whatever exception the first DynamoDB call happened to produce.
     """
 
+    #: Declared, not read from the environment (PORTH-623). ffug is one
+    #: service whichever of its Lambdas is running — the request ingress, the
+    #: worker and the lifecycle consumer all share this identity because they
+    #: are components of it, not separate services.
+    SERVICE_ID = "ffug"
+
     RESOURCES = ((DOCUMENT_STORE, "resource"),)
 
     @property

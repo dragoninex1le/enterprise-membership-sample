@@ -51,6 +51,9 @@ class SampleAppDirector(PorthDirector):
     to the request's narrowed connection.
     """
 
+    #: Declared, not read from the environment (PORTH-623).
+    SERVICE_ID = "sample-app"
+
     @property
     def repository(self) -> SampleAppRepository:
         """This app's table, reached with the credentials this request arrived on.

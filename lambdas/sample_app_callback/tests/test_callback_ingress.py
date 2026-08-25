@@ -98,7 +98,7 @@ def porth(monkeypatch):
             self.context = service_context(**kwargs)
 
         def raises(self, exc):
-            def boom(_event, _direction=None):
+            def boom(_event, *_args, **_kwargs):
                 raise exc
 
             monkeypatch.setattr("porth_common.director.get_context", boom)
@@ -110,7 +110,7 @@ def porth(monkeypatch):
     controller = Controller()
     controller.table = table
 
-    def fake_get_context(_event, direction=None):
+    def fake_get_context(_event, direction=None, *_args, **_kwargs):
         controller.asked_for = direction
         return controller.context
 
