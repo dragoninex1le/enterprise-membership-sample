@@ -386,7 +386,11 @@ jobs:
           # will. porth-common is in it, which is why the CodeArtifact login now
           # comes first (PORTH-614).
           python -m pip install --quiet -r requirements.txt pytest pyyaml
-          python -m pytest ffug/tests sample_app/tests -q
+          # PORTH-621 — sample_app_callback/tests as well. That ingress is the
+          # only place the correlation check runs, and it is a package no other
+          # path collects: a test directory nothing invokes is a test directory
+          # that passes.
+          python -m pytest ffug/tests sample_app/tests sample_app_callback/tests -q
 
       # ── SAM build + deploy ───────────────────────────────────────────────────────────────
 

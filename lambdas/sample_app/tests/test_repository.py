@@ -184,7 +184,11 @@ def test_the_listed_shape_is_the_one_the_screen_reads():
 
     assert set(entry) == {"record_id", "record_type", "counterparty", "amount",
                           "status", "submitted_by", "submitted_at",
-                          "fingerprint_prime", "fingerprint_digest"}
+                          "fingerprint_prime", "fingerprint_digest",
+                          # PORTH-621 — the screen has to distinguish "queued"
+                          # from "ffug never saw this", and needs the trace to
+                          # show alongside the digest it will produce.
+                          "fingerprint_status", "fingerprint_trace_id"}
 
 
 # --- transitions are guarded by DynamoDB, not by a prior read ----------------
@@ -308,7 +312,9 @@ def test_attaching_a_fingerprint_cannot_conjure_a_record():
     kw = table.update_item.call_args[1]
     assert kw["ConditionExpression"] == "attribute_exists(pk)"
     assert kw["Key"] == {"pk": PARTITION, "sk": "INVOICE#i-1"}
-    assert kw["ExpressionAttributeValues"] == {":p": "11", ":d": "abc"}
+    assert kw["ExpressionAttributeValues"] == {
+        ":p": "11", ":d": "abc", ":s": "complete"
+    }
 
 
 def test_a_listed_approval_carries_its_fingerprint_when_it_has_one():
@@ -333,3 +339,84 @@ def test_a_record_with_no_fingerprint_reports_empty_not_missing():
 
     assert entry["fingerprint_prime"] == ""
     assert entry["fingerprint_digest"] == ""
+
+
+# --- the fingerprint lifecycle (PORTH-621) -----------------------------------
+
+
+def test_the_expectation_is_committed_before_the_work_is_requested():
+    """The correlation hash is stored, never derived on arrival.
+
+    Porth computes and compares; the application stores. A hash derived when the
+    callback lands would be derived FROM the callback and would match itself,
+    which is the whole check gone while every test still passes.
+    """
+    repo, table = make_repo()
+    table.update_item.return_value = {"Attributes": _invoice("approved")}
+
+    repo.begin_fingerprint("invoice", "i-1", trace_id="t-9", correlation_hash="H")
+
+    kw = table.update_item.call_args[1]
+    assert kw["ConditionExpression"] == "attribute_exists(pk)"
+    assert kw["Key"] == {"pk": PARTITION, "sk": "INVOICE#i-1"}
+    assert kw["ExpressionAttributeValues"] == {":s": "queued", ":t": "t-9", ":h": "H"}
+
+
+def test_queueing_removes_the_previous_answer():
+    """A stale digest beside a `queued` status reads as "here it is, still
+    working" — which is the one thing it is not. It also verifies against the
+    OLD document, so leaving it standing is worse than showing nothing."""
+    repo, table = make_repo()
+    table.update_item.return_value = {"Attributes": _invoice("approved")}
+
+    repo.begin_fingerprint("invoice", "i-1", trace_id="t-9", correlation_hash="H")
+
+    expression = table.update_item.call_args[1]["UpdateExpression"]
+    assert "REMOVE fingerprint_prime, fingerprint_digest" in expression
+
+
+def test_work_ffug_never_took_leaves_no_expectation_behind():
+    """REMOVE, not a status of its own. A record left `queued` after a refused
+    call waits forever, and polls forever, for a completion nobody will send."""
+    repo, table = make_repo()
+    table.update_item.return_value = {"Attributes": _invoice("approved")}
+
+    repo.abandon_fingerprint("invoice", "i-1")
+
+    kw = table.update_item.call_args[1]
+    assert kw["UpdateExpression"].startswith("REMOVE fingerprint_status")
+    assert "fingerprint_correlation_hash" in kw["UpdateExpression"]
+    assert kw["ConditionExpression"] == "attribute_exists(pk)"
+
+
+def test_a_callback_finds_its_record_by_the_trace_the_app_minted():
+    """Across both record types, and within this tenant's partition only.
+
+    The callback does not say which record it completes. If it did, a completing
+    service could aim an authentic completion at a different row.
+    """
+    repo, table = make_repo()
+    waiting = {**_bill("approved", "b-7"), "fingerprint_trace_id": "t-9"}
+    table.query.side_effect = [
+        {"Items": [{**_invoice("approved"), "fingerprint_trace_id": "t-other"}]},
+        {"Items": [waiting]},
+    ]
+
+    assert repo.find_by_fingerprint_trace("t-9") == ("bill", waiting)
+
+
+def test_a_trace_nobody_is_waiting_on_finds_nothing():
+    repo, table = make_repo()
+    table.query.side_effect = [{"Items": [_invoice("approved")]}, {"Items": []}]
+
+    assert repo.find_by_fingerprint_trace("t-9") is None
+
+
+def test_an_empty_trace_matches_nothing_rather_than_the_first_blank_record():
+    """Every record approved before ffug existed has no trace at all. Falling
+    through to one of them would attach a stranger's digest to it."""
+    repo, table = make_repo()
+    table.query.side_effect = [{"Items": [_invoice("approved")]}, {"Items": []}]
+
+    assert repo.find_by_fingerprint_trace("") is None
+    assert not table.query.called
