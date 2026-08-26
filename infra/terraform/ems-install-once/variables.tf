@@ -58,6 +58,20 @@ variable "signing_keys" {
     direction  = string
   }))
   default = [
+    # BOTH directions, because ffug is on both legs of the conversation
+    # (Richard, 2026-08-25).
+    #
+    # The response key was here first and the request key was left out on the
+    # reasoning that ffug never originates — it answers, and answers are the
+    # response direction. That reasoning is sound only while the calling app is
+    # a SEPARATE service signing with its own key, which is the shape being
+    # corrected: ffug is the service, the sample app is part of it, so the
+    # request going in is ffug's too.
+    #
+    # One direction really is right for a service that only ever answers a
+    # caller who is genuinely someone else — fire-and-forget, or a pure callee.
+    # That is not this.
+    { service_id = "ffug", direction = "request" },
     { service_id = "ffug", direction = "response" },
   ]
 
