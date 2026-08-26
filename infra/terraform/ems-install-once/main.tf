@@ -149,7 +149,17 @@ data "aws_kms_public_key" "service_signing" {
 }
 
 locals {
-  # service_id -> the whole of signing-keys/{service_id}.
+  # Where each service is reached, per direction. Named here rather than inline
+  # so the two places a target appears — the document and the IAM grant that
+  # lets the caller invoke it — cannot disagree about a function name.
+  endpoints = {
+    ffug = {
+      request  = "porth-ffug-${var.porth_environment}"
+      response = "porth-sample-app-callback-${var.porth_environment}"
+    }
+  }
+
+  # service_id -> the whole of services/{service_id}.
   #
   # Built from the pairs rather than hardcoded, so adding a (service, direction)
   # to the variable produces its binding without editing this.
@@ -159,6 +169,18 @@ locals {
       service => {
         contract_version = 1
         service_id       = service
+        # One document per service now carries everything the internal plane
+        # asks about a callee (PORTH-623): may I call it, where is it, whose
+        # signature should I expect. It replaced three documents — the services
+        # registry, the endpoint map and the per-service key list — two of which
+        # were monoliths every participant had to merge into.
+        status = "active"
+        endpoints = {
+          default = { mode = "invoke", target = local.endpoints[service].request }
+          directions = {
+            response = { mode = "invoke", target = local.endpoints[service].response }
+          }
+        }
         keys = [
           for key, pair in local.signing_keys : {
             # The ALIAS, not the key ARN (PORTH-623, Richard 2026-08-25). This
@@ -186,6 +208,15 @@ locals {
       "sample-app" = {
         contract_version = 1
         service_id       = "sample-app"
+        status           = "active"
+        endpoints = {
+          # The app receives completions and originates requests; nothing calls
+          # into its request side on the internal plane, so only the response
+          # direction has an address.
+          directions = {
+            response = { mode = "invoke", target = "porth-sample-app-callback-${var.porth_environment}" }
+          }
+        }
         keys = [{
           # Constructed, and that is a weakness worth stating rather than
           # hiding. Porth publishes its key's ARN at
@@ -210,8 +241,8 @@ locals {
 resource "aws_ssm_parameter" "signing_keys" {
   for_each = local.trust_documents
 
-  name        = "/porth/${var.porth_branch}/signing-keys/${each.key}"
-  description = "Signing keys ${each.key} may speak with, by direction (PORTH-623/625)."
+  name        = "/porth/${var.porth_branch}/services/${each.key}"
+  description = "Everything the internal plane knows about ${each.key}: status, endpoints, signing keys (PORTH-623)."
   type        = "String"
   value       = jsonencode(each.value)
   overwrite   = true

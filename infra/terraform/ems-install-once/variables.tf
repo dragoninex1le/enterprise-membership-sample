@@ -122,3 +122,16 @@ variable "deploy_role_name" {
   type        = string
   default     = "sample-app-deploy-role"
 }
+
+variable "porth_environment" {
+  description = <<-EOT
+    The deployment axis — what suffixes function and table names.
+
+    A DIFFERENT value from porth_branch, which selects configuration, and from
+    the ADR-Z8 slot in partition keys. Three axes that all read "dev" on this
+    install and are not interchangeable; composing a name from the wrong one
+    produces something that deploys and is never found.
+  EOT
+  type        = string
+  default     = "dev"
+}
