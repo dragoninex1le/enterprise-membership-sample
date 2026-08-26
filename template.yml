@@ -540,27 +540,13 @@ Resources:
           PORTH_SERVICE_ID: sample-app
           PORTH_BRANCH: !Ref PorthBranch
           PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
-          # PORTH-604 — the key mint_token signs with. Only the SIGNER needs
-          # this: a verifier follows the `kid` in the token header, which is why
-          # ffug has never carried it and this was not missing there to notice.
+          # No signing-key variable (PORTH-623, 2026-08-25). What this function
+          # signs requests with comes from its own trust document at
+          # /porth/{branch}/signing-keys/{PORTH_SERVICE_ID}, by direction.
           #
-          # The ARN Porth publishes at /porth/{branch}/infra/context-signing-key-arn,
-          # not a reconstructed "alias/porth-context-{branch}". KMS accepts
-          # either as a KeyId, and a name assembled here would be a literal that
-          # has to keep agreeing with Porth's — the defect shape the upgrade
-          # log's standing note is about.
-          #
-          # Empty is a real state, not a misconfiguration: without the key this
-          # app deploys with no signer, and every internal call is refused at
-          # the boundary rather than sent unsigned.
-          # PORTH-623 — the INSTALL key, deliberately. The app is not a service
-          # in this model: the existing install key IS its request key, so
-          # minting a second one for the same party would create a second
-          # request authority rather than separating anything.
-          #
-          # What per-service keys separate is the callback direction, and that
-          # is ffug's side (FfugResponseSigningKeyArn above).
-          PORTH_CONTEXT_SIGNING_KEY_ALIAS: !Ref PorthContextSigningKeyArn
+          # The key itself is unchanged — the install key, since the app is not
+          # a service in this model — but it is no longer NAMED here as well as
+          # there. One fact, one place.
           # No FFUG_FUNCTION_ARN. Where ffug lives is resolved from the endpoint
           # map at /porth/{branch}/service-endpoints, which is the whole point of
           # D7.4 — an address at the call site is an address that cannot follow
@@ -1235,22 +1221,16 @@ Resources:
           PORTH_SERVICE_ID: ffug
           PORTH_SERVICE_DATA_IDENTITY: !GetAtt FfugTenantRole.Arn
           PORTH_SERVICE_DATA_SCOPE: !Select [4, !Split ["/", !Ref FfugSessionPolicy]]
-          # ffug's RESPONSE key — the one difference from FfugFunction, and the
-          # reason this is a separate function at all.
+          # No signing-key variable (PORTH-623, 2026-08-25). This function signs
+          # completions, and WHAT it signs them with now comes from ffug's own
+          # trust document, resolved by (branch, service_id, direction).
           #
-          # PORTH_CONTEXT_**RESPONSE**_SIGNING_KEY_ALIAS, and the name is the
-          # contract rather than a label. porth-common keeps one variable per
-          # direction (envelope.py `_ALIAS_ENV_VARS`) precisely so that holding
-          # the capability to sign a completion does not confer the capability
-          # to mint a request — a service configured for one direction and asked
-          # to sign the other has no key to do it with and refuses.
-          #
-          # This was PORTH_CONTEXT_SIGNING_KEY_ALIAS for one deploy, which is
-          # the worst of both readings: the worker could not sign a response at
-          # all, and had anything asked it for a request it would have minted
-          # one with the response key — collapsing the split this design exists
-          # to hold open.
-          PORTH_CONTEXT_RESPONSE_SIGNING_KEY_ALIAS: !Ref FfugResponseSigningKeyArn
+          # It used to be PORTH_CONTEXT_RESPONSE_SIGNING_KEY_ALIAS, and before
+          # that — for one deploy — the REQUEST variable pointing at the
+          # response key. IAM was correct throughout; the wiring was not, and
+          # nothing could check one against the other because they were
+          # different systems asserting the same fact. There is now one source,
+          # so there is nothing to point wrongly.
           FFUG_TABLE_NAME: !Ref FfugTable
           FFUG_LOG_LEVEL: !Ref FfugLogLevel
       Events:

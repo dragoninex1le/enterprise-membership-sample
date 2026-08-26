@@ -86,6 +86,14 @@ class CallbackDirector(Director):
     has a choice, and this is the one worth making.
     """
 
+    #: Declared, not read from the environment (PORTH-623).
+    #:
+    #: `verify_callback` recomputes the correlation hash from this service's own
+    #: registered identity, so a second spelling of it makes every authentic
+    #: completion look like a mismatch. Naming it here means the value the code
+    #: uses and the value the template sets cannot drift.
+    SERVICE_ID = "sample-app"
+
     RESOURCES = ((DOCUMENT_STORE, "resource"),)
 
     @property
