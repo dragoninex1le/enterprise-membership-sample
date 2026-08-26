@@ -56,6 +56,18 @@ Parameters:
       function and cannot appear in a trust policy. Resolved from the Porth
       stack by deploy.yml.
 
+  PorthCommonLogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+    Description: >
+      Level for porth_common's own logger — key resolution, trust-document cache
+      ages, and which registered key verified a signature.
+
+      Separate from the application levels on purpose. DEBUG here answers "which
+      key was used, and did it verify against the one I expect", which is what
+      you want while diagnosing a signature and noise the rest of the time.
+
   FfugLogLevel:
     Type: String
     Default: INFO
@@ -539,6 +551,10 @@ Resources:
           # file does nothing to an install that already has one.
           PORTH_SERVICE_ID: sample-app
           PORTH_BRANCH: !Ref PorthBranch
+          # PORTH-623 — the library's own level. Which key signed and which
+          # key verified are porth_common's lines, and a per-package logger
+          # means this app's level does not reach them.
+          PORTH_COMMON_LOG_LEVEL: !Ref PorthCommonLogLevel
           PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
           # No signing-key variable (PORTH-623, 2026-08-25). What this function
           # signs requests with comes from its own trust document at
@@ -725,6 +741,10 @@ Resources:
           # make every authentic completion look like a mismatch.
           PORTH_SERVICE_ID: sample-app
           PORTH_BRANCH: !Ref PorthBranch
+          # PORTH-623 — the library's own level. Which key signed and which
+          # key verified are porth_common's lines, and a per-package logger
+          # means this app's level does not reach them.
+          PORTH_COMMON_LOG_LEVEL: !Ref PorthCommonLogLevel
           PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
           PORTH_ENVIRONMENT: !Ref PorthEnvironment
           PORTH_SERVICE_DATA_IDENTITY: !GetAtt SampleAppTenantRole.Arn
@@ -1000,6 +1020,10 @@ Resources:
           # configuration; PORTH_FIXED_ENVIRONMENT addresses data. They hold
           # different values on this install.
           PORTH_BRANCH: !Ref PorthBranch
+          # PORTH-623 — the library's own level. Which key signed and which
+          # key verified are porth_common's lines, and a per-package logger
+          # means this app's level does not reach them.
+          PORTH_COMMON_LOG_LEVEL: !Ref PorthCommonLogLevel
           PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
           PORTH_ENVIRONMENT: !Ref PorthEnvironment
           # This service's registered identity — the audience it will accept in
@@ -1075,6 +1099,10 @@ Resources:
       Environment:
         Variables:
           PORTH_BRANCH: !Ref PorthBranch
+          # PORTH-623 — the library's own level. Which key signed and which
+          # key verified are porth_common's lines, and a per-package logger
+          # means this app's level does not reach them.
+          PORTH_COMMON_LOG_LEVEL: !Ref PorthCommonLogLevel
           PORTH_ENVIRONMENT: !Ref PorthEnvironment
           FFUG_TABLE_NAME: !Ref FfugTable
           # The consumer reads the same variable, so one parameter turns up both
@@ -1216,6 +1244,10 @@ Resources:
       Environment:
         Variables:
           PORTH_BRANCH: !Ref PorthBranch
+          # PORTH-623 — the library's own level. Which key signed and which
+          # key verified are porth_common's lines, and a per-package logger
+          # means this app's level does not reach them.
+          PORTH_COMMON_LOG_LEVEL: !Ref PorthCommonLogLevel
           PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
           PORTH_ENVIRONMENT: !Ref PorthEnvironment
           PORTH_SERVICE_ID: ffug

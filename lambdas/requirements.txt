@@ -7,6 +7,6 @@ fastapi==0.111.0
 # signing-keys/{service_id} (PORTH-623/625). The template grants no kms:Verify
 # and reads signing-keys/* as a prefix, so an older porth-common would call KMS
 # with no grant and look for a document that is not there.
-porth-common>=0.0.12
+porth-common>=0.0.13
 mangum==0.17.0
 boto3>=1.34.0
