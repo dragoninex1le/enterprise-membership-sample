@@ -105,3 +105,30 @@ def test_the_app_gets_a_document_even_though_it_has_no_key_of_its_own():
         "tidying and refuses every call the app makes."
     )
     assert re.search(r'direction\s+=\s+"request"', source)
+
+
+def test_ffug_holds_both_directions_because_it_is_on_both_legs():
+    """The service is on both ends of its own conversation (Richard, 2026-08-25).
+
+    A request goes in and a completion comes back, and both are ffug's — so its
+    document carries a request key AND a response key.
+
+    The response key alone was defensible only while the calling app was a
+    SEPARATE service signing with its own key, which made ffug a pure callee
+    that never originates. That is the shape being corrected. One direction is
+    genuinely right for a pure callee or a fire-and-forget target; it is not
+    right here.
+
+    Asserted against the Terraform variable rather than the rendered document,
+    because that is where a key is dropped: the document is generated from it,
+    so a missing pair produces a document that validates perfectly and is
+    missing a key.
+    """
+    import pathlib
+
+    main = (pathlib.Path(__file__).resolve().parents[3]
+            / "infra/terraform/ems-install-once/variables.tf").read_text()
+
+    for direction in ("request", "response"):
+        pair = '{ service_id = "ffug", direction = "%s" }' % direction
+        assert pair in main, f"ffug has no {direction} key declared"
