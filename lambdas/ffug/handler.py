@@ -58,6 +58,25 @@ from . import keys, salt
 log = logging.getLogger(__name__)
 log.setLevel(os.environ.get("FFUG_LOG_LEVEL", "INFO"))
 
+# PORTH-623 — the LIBRARY's logger, separately.
+#
+# Setting this module's own level does nothing for porth_common: loggers are
+# per-package, so the lines that say which key signed and which key verified
+# stay silent at Lambda's WARNING default no matter how loud this service is.
+#
+# That is the same trap that muted this whole app for four stories — an empty
+# log group reading as quiet rather than silenced — one package over, and it
+# would have been found the same way: by needing a line and not having it.
+#
+# Own variable, because library detail and application detail are different
+# questions. Turning up porth_common brings key resolution, trust-document cache
+# ages and per-candidate verification; you want that while diagnosing a
+# signature, and not otherwise.
+logging.getLogger("porth_common").setLevel(
+    os.environ.get("PORTH_COMMON_LOG_LEVEL", "INFO")
+)
+
+
 TABLE_NAME = os.environ.get("FFUG_TABLE_NAME", "")
 
 #: ffug's own work queue. Not a Porth capability and not reached through the

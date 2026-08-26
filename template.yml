@@ -56,6 +56,18 @@ Parameters:
       function and cannot appear in a trust policy. Resolved from the Porth
       stack by deploy.yml.
 
+  PorthCommonLogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+    Description: >
+      Level for porth_common's own logger — key resolution, trust-document cache
+      ages, and which registered key verified a signature.
+
+      Separate from the application levels on purpose. DEBUG here answers "which
+      key was used, and did it verify against the one I expect", which is what
+      you want while diagnosing a signature and noise the rest of the time.
+
   FfugLogLevel:
     Type: String
     Default: INFO
@@ -539,10 +551,14 @@ Resources:
           # file does nothing to an install that already has one.
           PORTH_SERVICE_ID: sample-app
           PORTH_BRANCH: !Ref PorthBranch
+          # PORTH-623 — the library's own level. Which key signed and which
+          # key verified are porth_common's lines, and a per-package logger
+          # means this app's level does not reach them.
+          PORTH_COMMON_LOG_LEVEL: !Ref PorthCommonLogLevel
           PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
           # No signing-key variable (PORTH-623, 2026-08-25). What this function
           # signs requests with comes from its own trust document at
-          # /porth/{branch}/signing-keys/{PORTH_SERVICE_ID}, by direction.
+          # /porth/{branch}/services/{PORTH_SERVICE_ID}, by direction.
           #
           # The key itself is unchanged — the install key, since the app is not
           # a service in this model — but it is no longer NAMED here as well as
@@ -630,15 +646,13 @@ Resources:
               Effect: Allow
               Action: ssm:GetParameter
               Resource:
-                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services
-                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/service-endpoints
                 # PORTH-623/625 — one document PER SERVICE at
-                # signing-keys/{service_id}, so this is a prefix rather than an
+                # services/{service_id}, so this is a prefix rather than an
                 # exact name. Verification fetches the document of the service
                 # the token CLAIMS to be from, by name; there is no registry to
                 # load and nothing here about services this call does not
                 # involve.
-                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/signing-keys/*
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services/*
       Events:
         ApiProxy:
           Type: HttpApi
@@ -687,12 +701,10 @@ Resources:
               - Effect: Allow
                 Action: ssm:GetParameter
                 Resource:
-                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services
-                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/service-endpoints
                   # ffug's document, by name, when a token claiming to be from
                   # ffug arrives. A prefix rather than an exact parameter, since
                   # PORTH-625 split the trust list one document per service.
-                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/signing-keys/*
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services/*
                   - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/auth-session-policy/*
               # NO KMS. Not an omission and not a narrowing of one — as of
               # porth-common 0.0.11 the trust document carries the public key
@@ -725,6 +737,10 @@ Resources:
           # make every authentic completion look like a mismatch.
           PORTH_SERVICE_ID: sample-app
           PORTH_BRANCH: !Ref PorthBranch
+          # PORTH-623 — the library's own level. Which key signed and which
+          # key verified are porth_common's lines, and a per-package logger
+          # means this app's level does not reach them.
+          PORTH_COMMON_LOG_LEVEL: !Ref PorthCommonLogLevel
           PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
           PORTH_ENVIRONMENT: !Ref PorthEnvironment
           PORTH_SERVICE_DATA_IDENTITY: !GetAtt SampleAppTenantRole.Arn
@@ -965,7 +981,7 @@ Resources:
               # active?), the session-policy template the narrowing renders, and
               # the signing-key documents.
               #
-              # signing-keys/* is read on EVERY inbound internal call — it is
+              # services/* is read on EVERY inbound internal call — it is
               # what turns the token's `kid` into "which service may claim to be
               # this source, and in which direction". Fail-closed: unreadable
               # means every call refused, so it is not optional for a receiver.
@@ -978,8 +994,7 @@ Resources:
               - Effect: Allow
                 Action: ssm:GetParameter
                 Resource:
-                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services
-                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/signing-keys/*
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services/*
                   - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/auth-session-policy/*
 
   FfugFunction:
@@ -1000,6 +1015,10 @@ Resources:
           # configuration; PORTH_FIXED_ENVIRONMENT addresses data. They hold
           # different values on this install.
           PORTH_BRANCH: !Ref PorthBranch
+          # PORTH-623 — the library's own level. Which key signed and which
+          # key verified are porth_common's lines, and a per-package logger
+          # means this app's level does not reach them.
+          PORTH_COMMON_LOG_LEVEL: !Ref PorthCommonLogLevel
           PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
           PORTH_ENVIRONMENT: !Ref PorthEnvironment
           # This service's registered identity — the audience it will accept in
@@ -1075,6 +1094,10 @@ Resources:
       Environment:
         Variables:
           PORTH_BRANCH: !Ref PorthBranch
+          # PORTH-623 — the library's own level. Which key signed and which
+          # key verified are porth_common's lines, and a per-package logger
+          # means this app's level does not reach them.
+          PORTH_COMMON_LOG_LEVEL: !Ref PorthCommonLogLevel
           PORTH_ENVIRONMENT: !Ref PorthEnvironment
           FFUG_TABLE_NAME: !Ref FfugTable
           # The consumer reads the same variable, so one parameter turns up both
@@ -1195,9 +1218,7 @@ Resources:
               - Effect: Allow
                 Action: ssm:GetParameter
                 Resource:
-                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services
-                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/service-endpoints
-                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/signing-keys/*
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services/*
                   - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/auth-session-policy/*
               # No DynamoDB, exactly as on the request path. Nothing to fall
               # back to means a narrowing failure is an AccessDenied rather
@@ -1216,6 +1237,10 @@ Resources:
       Environment:
         Variables:
           PORTH_BRANCH: !Ref PorthBranch
+          # PORTH-623 — the library's own level. Which key signed and which
+          # key verified are porth_common's lines, and a per-package logger
+          # means this app's level does not reach them.
+          PORTH_COMMON_LOG_LEVEL: !Ref PorthCommonLogLevel
           PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
           PORTH_ENVIRONMENT: !Ref PorthEnvironment
           PORTH_SERVICE_ID: ffug
