@@ -27,10 +27,14 @@ from ffug.tests.test_handler import (  # noqa: F401
 )
 
 
-# Operation only (PORTH-623). There is no service id in a callback declaration
-# any more: the answer is addressed to the verified `source_service` of the
-# request being completed, so the message body cannot state a destination.
-CALLBACK = {"operation": "fingerprint-complete"}
+# An operation and the CALLER'S OWN address (PORTH-624). Porth's registry holds
+# no callback addresses, so the requester states where it listens; ffug relays
+# it untouched. Note it is deliberately not `alpha`'s registered anything —
+# there is nothing to register it against.
+CALLBACK = {
+    "operation": "fingerprint-complete",
+    "endpoint": {"mode": "invoke", "target": "alpha-callback"},
+}
 
 
 @pytest.fixture
@@ -232,7 +236,7 @@ def test_one_failing_record_does_not_take_its_neighbours(monkeypatch, table):
 
 
 def test_the_completion_is_addressed_to_whoever_asked(monkeypatch, table):
-    """The message says WHAT to call. It cannot say where.
+    """The message says what to call AND where; ffug decides neither.
 
     This test used to assert the opposite — that the target came from the
     message — and the premise inverted (PORTH-623, Richard 2026-08-27). Naming
@@ -261,7 +265,7 @@ def test_the_completion_is_addressed_to_whoever_asked(monkeypatch, table):
     monkeypatch.setattr(
         w, "send_callback",
         lambda d, decl, payload: seen.update(
-            fields=set(vars(decl)), operation=decl.operation,
+            operation=decl.operation, endpoint=decl.endpoint,
             answering=d.source_service, payload=payload,
         ),
     )
@@ -269,11 +273,11 @@ def test_the_completion_is_addressed_to_whoever_asked(monkeypatch, table):
     w.handler({"Records": [item]})
 
     assert seen["operation"] == "fingerprint-complete"
-    assert seen["fields"] == {"operation"}, (
-        f"the declaration carries {sorted(seen['fields'])}. Anything beyond the "
-        f"operation is a destination the request body can state."
-    )
-    # The Director resumed from the persisted record, not anything in the body.
+    # The ADDRESS is relayed from the request body, untouched.
+    assert seen["endpoint"] == {"mode": "invoke", "target": "alpha-callback"}
+    # The AUDIENCE comes from the Director resumed from the persisted record,
+    # never from the body. Keeping these two apart is what makes an unchecked
+    # address safe.
     assert seen["answering"] == "alpha"
     assert seen["payload"]["prime"] == ACME_PRIME
     assert len(seen["payload"]["digest"]) == 64

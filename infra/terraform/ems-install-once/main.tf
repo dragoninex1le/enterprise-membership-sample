@@ -118,9 +118,12 @@ resource "aws_kms_alias" "service_signing" {
 # writer for this one to merge with.
 #
 # ONE document, and that is the whole shape now (Richard, 2026-08-27). ffug is
-# the service. The sample app is not a second one — it is ffug's front half,
-# and the callback ingress is ffug's other address. Both are named below in
-# `endpoints`, by direction, which is exactly what `directions` is for.
+# the service; the sample app is not a second one, it is ffug's front half.
+#
+# The callback ingress is NOT described here, and that is the later correction
+# (PORTH-624). This document says where ffug is called, what it signs with, and
+# whether it is active. Where a requester receives its answers is supplied by
+# that requester at request time — see `local.endpoints`.
 #
 # There used to be a hand-written `sample-app` document merged in beside this,
 # holding Porth's install key as "the app's request key". It existed because a
@@ -158,26 +161,25 @@ locals {
   # so the two places a target appears — the document and the IAM grant that
   # lets the caller invoke it — cannot disagree about a function name.
   #
-  # `request` is where this service is CALLED. `response` is where it RECEIVES
-  # ANSWERS to work it asked somebody else for (PORTH-623, Richard 2026-08-27).
-  # The second one describes the service as a requester, not as a callee, and
-  # that distinction is the whole of the fix: a completion is addressed to the
-  # verified `source_service` of the request being completed, so it resolves
-  # the REQUESTER's document.
+  # Where each service is CALLED. That is all the registry holds about
+  # addresses now (PORTH-624, Richard 2026-08-27).
   #
-  # It read the other way round before — the callee's document held the
-  # address — which could name exactly one requester. Fine with one, a silent
-  # collision on the second, whose answers would have gone to the first's
-  # ingress.
+  # There was a `response` entry here naming this app's callback ingress. It is
+  # gone, and not because it moved: a requester supplies its own callback
+  # address when it asks for work, being the one participant that certainly
+  # knows where it listens. Porth does not need a copy.
   #
-  # The values below do not change, and that is a coincidence worth stating
-  # rather than relying on: this app declares `source_service = ffug`, so the
-  # requester and the callee happen to be the same document here. A second
-  # requester would add its own entry, not edit this one.
+  # A copy could only ever name ONE requester. Keying it by callee collided on
+  # the second caller; keying it by requester merely moved the collision into a
+  # document somebody other than its subject has to keep current. Not holding
+  # it removes the problem rather than relocating it.
+  #
+  # What a callback still takes from here is the KEY — ffug signs a completion
+  # with its response key, below — and the requester's status. The address is
+  # the only part that left.
   endpoints = {
     ffug = {
-      request  = "porth-ffug-${var.porth_environment}"
-      response = "porth-sample-app-callback-${var.porth_environment}"
+      request = "porth-ffug-${var.porth_environment}"
     }
   }
 
@@ -198,11 +200,10 @@ locals {
       # registry, the endpoint map and the per-service key list — two of which
       # were monoliths every participant had to merge into.
       status = "active"
+      # No `directions` map. A callback address is supplied by the party that
+      # receives it, so there is nothing here to point at one.
       endpoints = {
         default = { mode = "invoke", target = local.endpoints[service].request }
-        directions = {
-          response = { mode = "invoke", target = local.endpoints[service].response }
-        }
       }
       keys = [
         for key, pair in local.signing_keys : {

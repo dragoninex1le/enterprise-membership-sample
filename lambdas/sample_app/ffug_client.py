@@ -33,6 +33,7 @@ do.*
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from porth_common.internal_plane.client import ServiceClient
@@ -108,23 +109,43 @@ def fingerprint(director, document: dict[str, Any]) -> dict[str, str]:
 #: address. The endpoint is resolved from the D7.4 map at send time, on ffug's
 #: side, so this app cannot hand a worker somewhere to post to and a compromised
 #: worker cannot be told to post somewhere else.
-#
-# WHAT to call, not where (PORTH-623, Richard 2026-08-27). There is no service
-# id here any more, and that is the point: ffug answers whoever asked it, taken
-# from the `source_service` of the request it is completing.
-#
-# Naming the destination was the defect. It resolved the address from THAT
-# service's document, so a callee could serve exactly one requester — fine while
-# ffug had one, a silent collision on the second, whose answers would have gone
-# to this app's ingress.
-#
-# Where this app receives answers is now part of describing itself: the response
-# direction in its own document, which is `services/ffug` because this app IS
-# ffug's front half.
-#
-#     endpoints.default              -> porth-ffug-{env}            (a request)
-#     endpoints.directions.response  -> porth-sample-app-callback-{env}
-FINGERPRINT_CALLBACK = {"operation": "fingerprint-complete"}
+#: What ffug should call when the fingerprint is ready.
+FINGERPRINT_OPERATION = "fingerprint-complete"
+
+#: Where THIS app receives that answer. Read from configuration rather than
+#: resolved from Porth's registry (PORTH-624, Richard 2026-08-27).
+#:
+#: The registry says who a service is and what it signs with. It does not hold
+#: callback addresses, and a copy there could only ever name one requester — the
+#: second caller's answers would have arrived at this app's ingress. The party
+#: that receives an answer is the one participant that certainly knows where it
+#: listens, so it says so when it asks.
+#:
+#: This being un-validated at the far end is fine, and it is worth knowing why:
+#: the address is not the authority. ffug mints the completion for the VERIFIED
+#: `source_service` of the request, so an answer delivered anywhere else carries
+#: the wrong `aud` and is refused before its payload is read.
+CALLBACK_TARGET_ENV = "SAMPLE_APP_CALLBACK_TARGET"
+
+
+def _callback_declaration() -> dict[str, Any]:
+    """The callback this app asks for: an operation and its own address.
+
+    Built per call rather than at import so a redeploy that changes the
+    function name takes effect without the module having been reloaded, and so
+    a test can vary it without reaching into module state.
+    """
+    target = os.environ.get(CALLBACK_TARGET_ENV, "").strip()
+    if not target:
+        raise FingerprintUnavailable(
+            f"{CALLBACK_TARGET_ENV} is not set — this app cannot ask for "
+            f"asynchronous work without saying where the answer goes, and "
+            f"there is no registry entry to fall back on by design"
+        )
+    return {
+        "operation": FINGERPRINT_OPERATION,
+        "endpoint": {"mode": "invoke", "target": target},
+    }
 
 
 def fingerprint_async(director, document: dict[str, Any], *, trace_id: str) -> str:
@@ -155,7 +176,7 @@ def fingerprint_async(director, document: dict[str, Any], *, trace_id: str) -> s
             # `payload` field on the wire, so a key called `payload` inside it
             # reads as payload.payload at the far end — which is how the first
             # live attempt refused every call with missing_callback.
-            {"document": document, "callback": FINGERPRINT_CALLBACK},
+            {"document": document, "callback": _callback_declaration()},
             idempotent=True,
             trace_id=trace_id,
         )

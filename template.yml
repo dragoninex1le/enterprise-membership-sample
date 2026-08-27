@@ -595,6 +595,17 @@ Resources:
           # Director declares (SERVICE_ID = "ffug" on both) and falls back here.
           # They are kept in step so a reader is not told two things.
           PORTH_SERVICE_ID: ffug
+          # PORTH-624 — where THIS app receives answers to work it asks for.
+          #
+          # App configuration, not Porth's. The registry holds identities and
+          # keys; a callback address is a fact about the requester that the
+          # requester already knows, and a copy in a shared document could name
+          # only one of them. So the app states it when it asks, and ffug
+          # relays it untouched.
+          #
+          # !Ref on the function resource rather than a rebuilt !Sub string:
+          # the address and the thing at that address cannot then disagree.
+          SAMPLE_APP_CALLBACK_TARGET: !Ref SampleAppCallbackFunction
           PORTH_BRANCH: !Ref PorthBranch
           # PORTH-623 — the library's own level. Which key signed and which
           # key verified are porth_common's lines, and a per-package logger

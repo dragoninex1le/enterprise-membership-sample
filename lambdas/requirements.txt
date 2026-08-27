@@ -19,12 +19,15 @@ fastapi==0.111.0
 #           completion would be delivered to ffug's own request ingress.
 #   0.0.15  a completion is addressed to the verified `source_service` of the
 #           request being completed, and CallbackDeclaration no longer carries
-#           a service_id. This app passes an operation only; on 0.0.14 that is
-#           a TypeError at the worker, not a subtle wrong answer.
+#           a service_id.
+#   0.0.16  the REQUESTER supplies its callback address; the registry holds
+#           none. CallbackDeclaration takes (operation, endpoint) and
+#           ServiceClient.call accepts a supplied endpoint. This app passes
+#           both; on 0.0.15 the endpoint is an unexpected argument.
 #
 # An older porth-common against this install would call KMS with no grant, look
 # under signing-keys/* for documents that no longer exist, deliver its callbacks
-# to the wrong function, and refuse a declaration that names no destination.
-porth-common>=0.0.15
+# to the wrong function, and refuse the declaration this app now makes.
+porth-common>=0.0.16
 mangum==0.17.0
 boto3>=1.34.0

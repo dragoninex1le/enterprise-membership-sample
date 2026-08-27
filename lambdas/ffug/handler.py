@@ -480,15 +480,17 @@ def _op_hash_async(args: dict[str, Any], director: FfugDirector) -> dict[str, An
     door, with the caller still on the line, instead of a message that queues
     successfully and dies out of sight.
 
-    The callback declares an OPERATION and nothing else (PORTH-623, 2026-08-27).
-    Where the answer goes is not in the request at all: `send_callback` addresses
-    it to the `source_service` of this crossing, which is verified before this
-    function runs and cannot be stated by the body.
+    The callback carries an OPERATION and the caller's OWN ADDRESS (PORTH-624,
+    2026-08-27). ffug holds no callback addresses and Porth's registry holds
+    none either: the party receiving an answer is the one that knows where it
+    listens, so it says so when it asks.
 
-    So ffug never holds somewhere to call back to, cannot be pointed at one, and
-    — the part that changed — can serve any number of requesters, each answered
-    at its own ingress. It previously took a `service_id` and resolved THAT
-    service's address, which could name only one requester.
+    ffug still cannot be turned into a way to reach an arbitrary target. What
+    it is pointed at only receives a token minted for the VERIFIED
+    `source_service` of this crossing, so an answer delivered anywhere other
+    than that service's ingress is refused on `aud` before its payload is read.
+    Misdirection fails at the receiver, which is what lets this path stay free
+    of a per-call validation.
     """
     payload = args.get("document")
     if payload is None:
@@ -499,13 +501,14 @@ def _op_hash_async(args: dict[str, Any], director: FfugDirector) -> dict[str, An
 
     callback = args.get("callback") or {}
     operation = str(callback.get("operation") or "").strip()
-    if not operation:
+    endpoint = callback.get("endpoint") or None
+    if not operation or not endpoint:
         raise FfugError(
             "missing_callback",
-            "hash_async requires callback.operation — asynchronous work with "
-            "nothing to report to is work nobody learns the result of. Note "
-            "there is no callback.service_id: the answer goes to whoever asked, "
-            "from the verified claims, not from this body",
+            "hash_async requires callback.operation and callback.endpoint — "
+            "asynchronous work with nothing to report to is work nobody learns "
+            "the result of. The endpoint is the CALLER's own address: ffug does "
+            "not hold one and there is no registry entry to fall back on",
         )
 
     if not WORK_QUEUE_URL:
@@ -522,10 +525,12 @@ def _op_hash_async(args: dict[str, Any], director: FfugDirector) -> dict[str, An
         {
             "context": record.to_json(),
             "payload": payload,
-            # Operation only. The destination is not carried on the queue
-            # because it is not carried anywhere: the worker resumes the
-            # PersistedContext and answers its verified source_service.
-            "callback": {"operation": operation},
+            # Operation and the caller's own address. Stored as given —
+            # ffug does not resolve it, does not check it against a registered
+            # one, and gains nothing by doing either: the completion is minted
+            # for the VERIFIED source_service, so an answer sent anywhere else
+            # is refused on `aud` at whatever ingress receives it (PORTH-624).
+            "callback": {"operation": operation, "endpoint": endpoint},
         },
         separators=(",", ":"),
     )

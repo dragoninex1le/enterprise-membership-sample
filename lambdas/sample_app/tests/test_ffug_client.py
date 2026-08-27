@@ -98,6 +98,18 @@ class _Recording:
         return self._response
 
 
+#: Where this app tells ffug to deliver answers. Configuration in the live app
+#: (SAMPLE_APP_CALLBACK_TARGET, set from the function resource); set here so the
+#: async path can run at all — there is no registry entry to fall back on, and
+#: that is the design rather than an omission (PORTH-624).
+CALLBACK_TARGET = "porth-sample-app-callback-test"
+
+
+@pytest.fixture(autouse=True)
+def callback_target(monkeypatch):
+    monkeypatch.setenv(ffug_client.CALLBACK_TARGET_ENV, CALLBACK_TARGET)
+
+
 def _client(monkeypatch, response):
     recorder = _Recording(response)
     monkeypatch.setattr(ffug_client, "ServiceClient", lambda _d: recorder)
@@ -125,24 +137,27 @@ def test_the_trace_sent_is_the_trace_the_caller_hashed(monkeypatch):
     assert recorder.seen["operation"] == "hash_async"
 
 
-def test_the_callback_declares_an_operation_and_no_destination(monkeypatch):
-    """Never an address, and now not a service either.
+def test_the_callback_declares_the_operation_and_this_apps_own_address(monkeypatch):
+    """The app says where it listens, because it is the one that knows.
 
-    ffug addresses the answer to the verified `source_service` of this request,
-    so the body cannot say where it goes. This app cannot hand a worker
-    somewhere to post to, a worker cannot be told to post somewhere else, and —
-    the part that changed — ffug can answer any number of requesters, each at
-    its own ingress (PORTH-623, Richard 2026-08-27).
+    Porth's registry holds no callback addresses (PORTH-624). A copy there
+    could name only one requester, and it would be a copy of a fact its owner
+    already has.
+
+    That the far end does not check this value is deliberate, and safe for a
+    reason that is not about this line: ffug mints the completion for the
+    VERIFIED `source_service` of the request, so an answer delivered anywhere
+    else carries the wrong `aud` and is refused before its payload is read.
     """
     recorder = _client(monkeypatch, _accepted())
 
     ffug_client.fingerprint_async(_Director(), {"amount": "1"}, trace_id="trace-1")
 
     callback = recorder.seen["payload"]["callback"]
-    assert callback == {"operation": "fingerprint-complete"}, (
-        "the request body names a destination. Where the answer goes comes from "
-        "the verified claims, not from anything the caller writes here."
-    )
+    assert callback == {
+        "operation": "fingerprint-complete",
+        "endpoint": {"mode": "invoke", "target": CALLBACK_TARGET},
+    }
     assert not any(k in str(callback).lower() for k in ("http", "arn:", "://"))
 
 
