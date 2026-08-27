@@ -31,6 +31,7 @@ from typing import Any
 
 from porth_common.director.per_record import PerRecordDirectors
 from porth_common.internal_plane.callback import CallbackDeclaration, send_callback
+from porth_common.internal_plane import log_plane_identity
 
 from . import keys, salt
 from .handler import FfugDirector
@@ -114,6 +115,10 @@ def _complete(scoped: Any) -> None:
 
 
 def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
+    # PORTH-623 — who this deployable is and where it will read, once per
+    # process, at INFO. The post-deploy check: a wrong PORTH_BRANCH shows up
+    # here as a wrong path rather than three layers down as a refusal.
+    log_plane_identity(FfugDirector.SERVICE_ID)
     records = (event or {}).get("Records") or []
     batch = PerRecordDirectors(
         records, context_of=_context_of, director_cls=FfugDirector, runtime_context=context

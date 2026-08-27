@@ -362,3 +362,54 @@ def test_one_service_is_spelled_one_way_everywhere():
         f"disagreement here refuses every authentic completion — and does it at "
         f"the callback, three hops from the edit."
     )
+
+
+def test_every_internal_plane_entry_point_says_where_it_will_read():
+    """A log line has no caller, so nothing breaks when one is deleted.
+
+    These four are the deployables that cross the internal plane, and each one
+    is a place PORTH_BRANCH, PORTH_SERVICE_ID or a trust document can be wrong
+    independently of the others. The line is what makes a wrong one visible on
+    the first invocation instead of on the first refusal — and the refusal is
+    three layers away from the cause, which is how this install lost a day.
+
+    Checked by reading the source rather than by invoking the handlers: what is
+    being asserted is that the CALL is present at the entry point, and a
+    behavioural test would need each handler's full event, credentials and
+    table fakes to reach the same one line.
+
+    `sample_app.handler` wraps Mangum rather than being a plain function, so the
+    call sits in the wrapper — which is why this looks for it anywhere in the
+    module's handler definition rather than in a function of a fixed shape.
+    """
+    import ast
+    import pathlib
+
+    lambdas = pathlib.Path(__file__).resolve().parents[2]
+    entry_points = [
+        "sample_app/handler.py",
+        "sample_app_callback/handler.py",
+        "ffug/handler.py",
+        "ffug/worker.py",
+    ]
+
+    missing = []
+    for relative in entry_points:
+        source = (lambdas / relative).read_text()
+        tree = ast.parse(source)
+        called = any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "log_plane_identity"
+            for node in ast.walk(tree)
+        )
+        imported = "log_plane_identity" in source.split("def ")[0]
+        if not (called and imported):
+            missing.append(relative)
+
+    assert not missing, (
+        f"{missing} no longer announce their plane identity. Each is a "
+        f"deployable whose branch, service id and trust document can be wrong "
+        f"on its own; without the line a wrong one is invisible until a "
+        f"crossing fails somewhere else."
+    )

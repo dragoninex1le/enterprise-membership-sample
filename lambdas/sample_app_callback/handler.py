@@ -50,6 +50,7 @@ from porth_common.internal_plane.config import (
 )
 from porth_common.protocols.cloud_clients import DOCUMENT_STORE
 from porth_common.protocols.signing import Direction
+from porth_common.internal_plane import log_plane_identity
 
 from sample_app.repository import APPROVABLE, SampleAppRepository
 
@@ -230,6 +231,10 @@ _OPS = {"fingerprint-complete": _op_fingerprint_complete}
 
 
 def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
+    # PORTH-623 — who this deployable is and where it will read, once per
+    # process, at INFO. The post-deploy check: a wrong PORTH_BRANCH shows up
+    # here as a wrong path rather than three layers down as a refusal.
+    log_plane_identity(CallbackDirector.SERVICE_ID)
     event = event or {}
     try:
         # Before verification, so nothing here is claimed — only the shape of

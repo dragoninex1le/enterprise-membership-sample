@@ -4,7 +4,8 @@ import re
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
-from .director import DirectorMiddleware
+from porth_common.internal_plane import log_plane_identity
+from .director import DirectorMiddleware, SampleAppDirector
 from .routers import dashboard, ar, ap, approvals, diagnostics
 
 # PORTH-622 — set once, for the whole package, at the entry point.
@@ -98,4 +99,21 @@ app.include_router(approvals.router)
 # than of a probe taking a different path to get here.
 app.include_router(diagnostics.router)
 
-handler = Mangum(app, lifespan="off")
+# PORTH-623 — say who this deployable is and where it will read, once, on the
+# first invocation. INFO on purpose: this is the post-deploy check, and putting
+# it behind DEBUG would mean only someone who already suspects a problem can
+# see the answer.
+#
+# It resolves nothing and reads nothing, so it costs one line and cannot fail
+# in a way that matters. A wrong PORTH_BRANCH shows up here as a wrong path
+# rather than three layers down as a refusal.
+#
+# Wrapped rather than called at import: the log level is configured in this
+# module, and a line emitted during import races that. `log_plane_identity` is
+# once-per-process itself, so the wrapper stays a no-op after the first call.
+_asgi = Mangum(app, lifespan="off")
+
+
+def handler(event, context=None):
+    log_plane_identity(SampleAppDirector.SERVICE_ID)
+    return _asgi(event, context)

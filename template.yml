@@ -68,6 +68,22 @@ Parameters:
       key was used, and did it verify against the one I expect", which is what
       you want while diagnosing a signature and noise the rest of the time.
 
+      INFO is enough to check a deploy, and deliberately so (PORTH-623). Two
+      lines sit at INFO because they answer the question asked after every
+      apply rather than during an investigation:
+
+        porth.plane.identity   once per process, before anything is called —
+                               the declared service id, the branch, and the
+                               parameter path this function WILL read. A wrong
+                               PORTH_BRANCH appears here as a wrong path.
+        porth.plane.resolved   once per service per container, on first load —
+                               the resolved path, whether a document was there,
+                               both endpoint targets and both signing aliases.
+
+      Turn DEBUG on for the per-crossing detail underneath: porth.config.read
+      names the resolved path of EVERY parameter read, and the token lifecycle
+      (minting/verify/accepted) names the alias and kid each crossing used.
+
   FfugLogLevel:
     Type: String
     Default: INFO
