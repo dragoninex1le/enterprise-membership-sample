@@ -7,8 +7,19 @@ on:
 
 # Serialise deploy runs per branch so concurrent runs don't race on the
 # shared sample-app stack.
+# Renamed from deploy.yml, and the GROUP renamed with it (2026-08-26).
+#
+# A run dispatched against the old file sat `queued` for a day with zero jobs
+# ever created, and GitHub refused to cancel it — "cannot cancel a workflow run
+# that has not been queued yet", while reporting its status AS queued. Its own
+# state was inconsistent, so the run could neither progress nor be cleared.
+#
+# The rename gives this workflow a new id, escaping anything stuck against the
+# old one. The group had to change too: `deploy-${{ github.ref }}` is the same
+# string whatever the file is called, so a rename alone would have left new runs
+# queued behind the wedged one.
 concurrency:
-  group: deploy-${{ github.ref }}
+  group: deploy-sample-app-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
