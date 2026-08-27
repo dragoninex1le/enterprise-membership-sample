@@ -253,20 +253,17 @@ def test_the_request_serving_function_holds_no_standing_table_grant():
         f"request needs comes from the credentials the authorizer minted for "
         f"it, and a grant underneath those makes the narrowing advisory."
     )
-    # PORTH-623 — ONE prefix, where there were three reads.
+    # PORTH-603/623/625 — bounded to exactly what the internal plane needs: the
+    # D3 registry, the D7.4 endpoint map, and the signing-key documents.
     #
-    # A service's status, its address and its signing keys are one document now
-    # (`services/{service_id}`), so the D3 registry read, the D7.4 endpoint-map
-    # read and the per-service key read collapse into a single prefix. That is
-    # the contract's shape rather than laziness: a verifier fetches the document
-    # of whichever service the token claims to be from, and the set of services
-    # is not something the template can enumerate.
-    #
-    # Still a prefix under `services/` and not `/porth/{branch}/*`, which would
-    # be a standing read over every parameter the install has — session-policy
-    # templates included.
+    # signing-keys/* is a prefix and the others are exact, which is the shape of
+    # the contract rather than laziness: as of porth-common 0.0.11 there is one
+    # document PER SERVICE at signing-keys/{service_id}, and a verifier fetches
+    # the document of whichever service the token claims to be from. A wildcard
+    # over /porth/{branch}/* would be something else entirely — a standing read
+    # over every parameter the install has, session-policy templates included.
     reads = re.findall(r"parameter/porth/\$\{PorthBranch\}/([^\s]+)", yaml_only)
-    assert sorted(reads) == ["services/*"], reads
+    assert sorted(reads) == ["service-endpoints", "services", "signing-keys/*"], reads
 
     assert "kms:Verify" not in yaml_only, (
         "SampleAppFunction holds kms:Verify. It is the CALLER on the internal "
@@ -390,12 +387,6 @@ def test_the_caller_carries_everything_the_internal_plane_reads():
         ssm:GetParameter  /porth/{b}/service-endpoints  D7.4 map     (PORTH-603)
         PORTH_CONTEXT_SIGNING_KEY_ALIAS               mint_token     (PORTH-604)
         kms:DescribeKey                               _resolve_kid   (PORTH-604)
-
-    Two of those four no longer exist as separate things, which is the point of
-    recording them: the first two collapsed into one `services/*` read
-    (PORTH-623), and the alias variable is gone because a signer resolves its
-    key from its own document. The cost of finding them serially is the reason
-    the shape changed, not a footnote to it.
 
     An allow-list guards the ceiling and says nothing about absence. This is
     the other half, and it is deliberately a flat list rather than anything
