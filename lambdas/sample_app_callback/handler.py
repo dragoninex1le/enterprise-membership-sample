@@ -111,7 +111,14 @@ class CallbackDirector(Director):
     #: registered identity, so a second spelling of it makes every authentic
     #: completion look like a mismatch. Naming it here means the value the code
     #: uses and the value the template sets cannot drift.
-    SERVICE_ID = "sample-app"
+    #:
+    #: `ffug`, matching the Director that initiated the work. That is not a
+    #: convenience: `verify_callback` recomputes the correlation hash from THIS
+    #: value, and the app committed the hash using its own. Two spellings of
+    #: one party make every authentic completion a mismatch, which is the
+    #: failure this comment already warned about — it just named the wrong
+    #: string to keep.
+    SERVICE_ID = "ffug"
 
     RESOURCES = ((DOCUMENT_STORE, "resource"),)
 

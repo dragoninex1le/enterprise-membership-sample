@@ -86,9 +86,9 @@ run afterwards, and nothing the application deploy does.
 
 | resource | what |
 |---|---|
-| `aws_kms_key.service_signing["ffug/response"]` | ffug's own signing key |
-| `aws_ssm_parameter.signing_keys["ffug"]` | `signing-keys/ffug` — that key, direction `response` |
-| `aws_ssm_parameter.signing_keys["sample-app"]` | `signing-keys/sample-app` — the **install** key, direction `request` |
+| `aws_kms_key.service_signing["ffug/request"]` | ffug's request key — what the app signs with |
+| `aws_kms_key.service_signing["ffug/response"]` | ffug's response key — what the worker signs callbacks with |
+| `aws_ssm_parameter.signing_keys["ffug"]` | `services/ffug` — **the** document: status, both addresses, both keys |
 | `aws_ssm_parameter.service_signing_key_arn[…]` | the ARN, for the deploy to pass as a stack parameter |
 | `aws_iam_role_policy.deploy_role_async_work` | what the deploy role needs to create THIS app's resources |
 
@@ -123,7 +123,7 @@ reasoning, not evidence**, and it turned one deploy into two.
 
 ### One document per service
 
-`/porth/{branch}/signing-keys/{service_id}` — not one registry listing everybody
+`/porth/{branch}/services/{service_id}` — not one registry listing everybody
 (PORTH-625). A shared document needs every participant merging into it, and one
 writer that replaces rather than merges silently removes everyone else's keys.
 
@@ -136,12 +136,33 @@ debugging a signing problem will find it, edit it, and watch nothing happen.
 aws ssm delete-parameter --name /porth/dev/signing-keys --region us-east-1
 ```
 
-### The `sample-app` document is the one that is easy to leave out
+### There is one service, and the app is not a second one
 
-The app signs with the **install** key, so nothing in `signing_keys` generates
-its document — it is added separately. Verification fetches the document of the
-service a token *claims to be from*, so without it every crossing fails with
-`UnknownSigningServiceError`: a missing document wearing a signing error.
+`ffug` is the service. `porth-sample-app-{env}` is its front half and
+`porth-sample-app-callback-{env}` is its other ingress — both named in
+`services/ffug` under `endpoints`, by direction:
+
+```
+endpoints.default              -> porth-ffug-{env}                 (a request)
+endpoints.directions.response  -> porth-sample-app-callback-{env}   (an answer)
+```
+
+There used to be a second, hand-written `sample-app` document holding Porth's
+install key as "the app's request key". It was needed because a token's signer
+is looked up by the service the token *claims to be from*, and the app claimed
+to be someone else. It cost a second document, a second identity, and an alias
+that had to be **constructed by hand** — Porth publishes its key's ARN but no
+alias, so the literal `alias/porth-context-{branch}` had to keep agreeing with
+Porth's own naming, and would have failed at the first crossing if it ever
+stopped.
+
+All of that went with the second identity. `terraform apply` destroys
+`/porth/{branch}/services/sample-app`.
+
+**This needs porth-common ≥ 0.0.14.** `ServiceClient` did not pass the call's
+direction to the endpoint resolver, so every call resolved `endpoints.default`.
+On 0.0.13 the `response` override above is written and never read, and every
+completion is delivered to ffug's own request ingress.
 
 The same kid legitimately appears in two documents — Porth registers it under
 `porth` for its own use, and it is the app's request key here. The duplicate-kid
@@ -172,14 +193,14 @@ cannot drift from the keys**, because one apply produces both.
 ### Confirm it took
 
 ```bash
-aws ssm get-parameter --name /porth/dev/signing-keys/sample-app --query Parameter.Value --output text
+aws ssm get-parameter --name /porth/dev/services/ffug --query Parameter.Value --output text
 ```
 
 ### What the operator needs
 
 Whoever runs `terraform apply` needs `kms:GetPublicKey` on both keys — the
 public half is captured once, here, which is the whole reason verification can
-be local — plus SSM read/write on `/porth/{branch}/signing-keys/*` and read on
+be local — plus SSM read/write on `/porth/{branch}/services/*` and read on
 `/porth/{branch}/infra/*`.
 
 ### No `kms:Verify`, anywhere

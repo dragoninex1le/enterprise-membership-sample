@@ -29,7 +29,7 @@ MAIN_TF = (
 def trust_document_block():
     """The `trust_documents` local, as text."""
     source = MAIN_TF.read_text()
-    start = source.index("trust_documents = merge(")
+    start = source.index("trust_documents = {")
     end = source.index('resource "aws_ssm_parameter" "signing_keys"')
     return source[start:end]
 
@@ -89,22 +89,54 @@ def test_a_document_of_that_shape_actually_loads():
     assert parsed.public_keys_for(direction), "no key to verify a signature against"
 
 
-def test_the_app_gets_a_document_even_though_it_has_no_key_of_its_own():
-    """The binding that is easy to leave out.
+def test_the_app_is_not_a_service_of_its_own():
+    """The inverse of the guard that used to live here (Richard, 2026-08-27).
 
-    The app signs with the INSTALL key, so nothing in the key list produces its
-    document — it is added separately. Verification fetches the document of the
-    service a token claims to be from, so without this every crossing fails with
-    UnknownSigningServiceError: a missing document wearing a signing error.
+    There was a hand-written `sample-app` document merged in beside the
+    generated one, holding Porth's install key as "the app's request key". It
+    existed because a token's signer is looked up by the service the token
+    CLAIMS to be from, and the app claimed to be someone else.
+
+    It no longer does. There is one service — ffug — and the app is its front
+    half; `services/ffug` names both ingresses by direction and carries a key
+    for each. So the document has no reader, and this asserts it stays gone:
+    re-adding it would restore the second identity without restoring the reason
+    for it, and a stale document that still validates is exactly the kind of
+    thing that survives review.
+
+    The old guard was right about its own world. Its failure message —
+    "removing it looks like tidying" — is why this replaces it rather than
+    being deleted: the next reader deserves to find the answer, not the gap.
     """
     source = MAIN_TF.read_text()
 
-    assert '"sample-app" = {' in source, (
-        "the sample-app trust document is gone. Its key is the install key, so "
-        "no (service, direction) pair generates it — removing it looks like "
-        "tidying and refuses every call the app makes."
+    assert '"sample-app" = {' not in source, (
+        "a hand-written sample-app trust document is back. The app is not a "
+        "service on the internal plane — it signs as ffug, with ffug's request "
+        "key, and services/ffug describes the whole conversation."
     )
-    assert re.search(r'direction\s+=\s+"request"', source)
+    assert "install_signing_key" not in source, (
+        "Porth's install key is being read again. It was fetched only to give "
+        "the app a document of its own; the app now signs with ffug's request "
+        "key, which this module creates."
+    )
+
+
+def test_every_document_is_generated_from_the_key_pairs():
+    """One rule produces every document — no `merge()` bolting on a second.
+
+    The merge existed for exactly one argument: the hand-written sample-app
+    document. With it gone, a document that is not derivable from a
+    (service, direction) pair cannot be written at all, which is the property
+    that keeps the keys and the documents from drifting.
+    """
+    source = MAIN_TF.read_text()
+
+    assert "trust_documents = {" in source
+    assert "trust_documents = merge(" not in source, (
+        "a second source of trust documents is back. Anything merged in beside "
+        "the generated map is a document with no key pair behind it."
+    )
 
 
 def test_ffug_holds_both_directions_because_it_is_on_both_legs():

@@ -115,7 +115,18 @@ resource "aws_kms_alias" "service_signing" {
 # makes writing them from here correct rather than a shortcut. The merge
 # behaviour `porth-install signing-key register` provides exists for a shared
 # document with several writers; under the per-service shape there is no other
-# writer for these two to merge with.
+# writer for this one to merge with.
+#
+# ONE document, and that is the whole shape now (Richard, 2026-08-27). ffug is
+# the service. The sample app is not a second one — it is ffug's front half,
+# and the callback ingress is ffug's other address. Both are named below in
+# `endpoints`, by direction, which is exactly what `directions` is for.
+#
+# There used to be a hand-written `sample-app` document merged in beside this,
+# holding Porth's install key as "the app's request key". It existed because a
+# token's signer is looked up by the service it claims to be from, and the app
+# claimed to be someone else. It no longer does, so the document has no reader
+# and is removed — `terraform apply` destroys the parameter.
 #
 # Nothing is validated away by doing it here either. That command refuses a key
 # that is not SIGN_VERIFY/ECC_NIST_P256 — a check for a CLI handed an arbitrary
@@ -128,20 +139,14 @@ resource "aws_kms_alias" "service_signing" {
 # better on the thing that matters: the document cannot drift from the keys,
 # because the same apply produces both.
 
-# The app is not a service in the per-direction model — the install key IS its
-# request key — so its ARN comes from Porth's module rather than from here.
-data "aws_ssm_parameter" "install_signing_key_arn" {
-  name = "/porth/${var.porth_branch}/infra/context-signing-key-arn"
-}
-
 # `public_key` is base64-encoded DER SubjectPublicKeyInfo, which is exactly what
 # SigningKeyEntry.public_key wants — nothing re-encodes it in between. Called
 # once here, at provisioning, which is the whole reason verification can be
 # local and no kms:Verify grant exists anywhere.
-data "aws_kms_public_key" "install_signing_key" {
-  key_id = data.aws_ssm_parameter.install_signing_key_arn.value
-}
-
+#
+# Porth's install key is no longer read here. It was fetched to describe the app
+# as a service of its own, and the app is not one — see the `trust_documents`
+# comment below.
 data "aws_kms_public_key" "service_signing" {
   for_each = local.signing_keys
 
@@ -162,80 +167,44 @@ locals {
   # service_id -> the whole of services/{service_id}.
   #
   # Built from the pairs rather than hardcoded, so adding a (service, direction)
-  # to the variable produces its binding without editing this.
-  trust_documents = merge(
-    {
-      for service in distinct([for k in var.signing_keys : k.service_id]) :
-      service => {
-        contract_version = 1
-        service_id       = service
-        # One document per service now carries everything the internal plane
-        # asks about a callee (PORTH-623): may I call it, where is it, whose
-        # signature should I expect. It replaced three documents — the services
-        # registry, the endpoint map and the per-service key list — two of which
-        # were monoliths every participant had to merge into.
-        status = "active"
-        endpoints = {
-          default = { mode = "invoke", target = local.endpoints[service].request }
-          directions = {
-            response = { mode = "invoke", target = local.endpoints[service].response }
-          }
+  # to the variable produces its binding without editing this. No `merge()`
+  # around it any more: the second argument was the hand-written `sample-app`
+  # document, and generating every document from one rule is the point.
+  trust_documents = {
+    for service in distinct([for k in var.signing_keys : k.service_id]) :
+    service => {
+      contract_version = 1
+      service_id       = service
+      # One document per service now carries everything the internal plane
+      # asks about a callee (PORTH-623): may I call it, where is it, whose
+      # signature should I expect. It replaced three documents — the services
+      # registry, the endpoint map and the per-service key list — two of which
+      # were monoliths every participant had to merge into.
+      status = "active"
+      endpoints = {
+        default = { mode = "invoke", target = local.endpoints[service].request }
+        directions = {
+          response = { mode = "invoke", target = local.endpoints[service].response }
         }
-        keys = [
-          for key, pair in local.signing_keys : {
-            # The ALIAS, not the key ARN (PORTH-623, Richard 2026-08-25). This
-            # field answers "what does this service sign with", and an alias is
-            # the right answer precisely because it moves: rotation repoints it
-            # and the signer follows with no document edit.
-            #
-            # NOT the kid. The kid identifies which key produced a signature and
-            # already travels in the envelope header — storing a copy here would
-            # duplicate what the token carries.
-            alias       = aws_kms_alias.service_signing[key].name
-            direction   = pair.direction
-            public_key  = data.aws_kms_public_key.service_signing[key].public_key
-            description = "EMS ${pair.service_id} ${pair.direction}"
-          } if pair.service_id == service
-        ]
       }
-    },
-    {
-      # The app's request key is the install key. Its binding still has to exist
-      # under `sample-app`, because verification fetches the document of the
-      # service the token CLAIMS to be from — without it every crossing fails
-      # with UnknownSigningServiceError, which reads as a signing problem and is
-      # a missing document.
-      "sample-app" = {
-        contract_version = 1
-        service_id       = "sample-app"
-        status           = "active"
-        endpoints = {
-          # The app receives completions and originates requests; nothing calls
-          # into its request side on the internal plane, so only the response
-          # direction has an address.
-          directions = {
-            response = { mode = "invoke", target = "porth-sample-app-callback-${var.porth_environment}" }
-          }
-        }
-        keys = [{
-          # Constructed, and that is a weakness worth stating rather than
-          # hiding. Porth publishes its key's ARN at
-          # /porth/{branch}/infra/context-signing-key-arn but publishes no
-          # alias, so this literal has to keep agreeing with Porth's own
-          # `alias/porth-context-${Environment}`. If Porth renames it, this
-          # silently registers an alias nothing can sign with — and the failure
-          # appears at the first crossing, not here.
+      keys = [
+        for key, pair in local.signing_keys : {
+          # The ALIAS, not the key ARN (PORTH-623, Richard 2026-08-25). This
+          # field answers "what does this service sign with", and an alias is
+          # the right answer precisely because it moves: rotation repoints it
+          # and the signer follows with no document edit.
           #
-          # The fix is upstream: Porth should publish its alias beside its ARN.
-          # Raised with the identity findings on PORTH-623.
-          alias       = "alias/porth-context-${var.porth_branch}"
-          direction   = "request"
-          public_key  = data.aws_kms_public_key.install_signing_key.public_key
-          description = "EMS sample-app request (the install key)"
-        }]
-      }
-    },
-  )
+          # NOT the kid. The kid identifies which key produced a signature and
+          # already travels in the envelope header — storing a copy here would
+          # duplicate what the token carries.
+          alias       = aws_kms_alias.service_signing[key].name
+          direction   = pair.direction
+          public_key  = data.aws_kms_public_key.service_signing[key].public_key
+          description = "EMS ${pair.service_id} ${pair.direction}"
+        } if pair.service_id == service
+      ]
+    }
+  }
 }
 
 resource "aws_ssm_parameter" "signing_keys" {

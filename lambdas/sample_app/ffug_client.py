@@ -108,7 +108,18 @@ def fingerprint(director, document: dict[str, Any]) -> dict[str, str]:
 #: address. The endpoint is resolved from the D7.4 map at send time, on ffug's
 #: side, so this app cannot hand a worker somewhere to post to and a compromised
 #: worker cannot be told to post somewhere else.
-FINGERPRINT_CALLBACK = {"service_id": "sample-app", "operation": "fingerprint-complete"}
+#
+# `ffug`, not a second service id for the callback ingress. One service can hold
+# two ingresses and say so by DIRECTION in its own document, which is what
+# `services/ffug` already does:
+#
+#     endpoints.default              -> porth-ffug-{env}            (request)
+#     endpoints.directions.response  -> porth-sample-app-callback-{env}
+#
+# So a completion addressed to `ffug` in the response direction resolves to the
+# callback function. Addressing it to a separate `sample-app` service was the
+# workaround for an address lookup that understood one target per name.
+FINGERPRINT_CALLBACK = {"service_id": "ffug", "operation": "fingerprint-complete"}
 
 
 def fingerprint_async(director, document: dict[str, Any], *, trace_id: str) -> str:

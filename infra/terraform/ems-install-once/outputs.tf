@@ -9,13 +9,17 @@ output "signing_key_arns" {
     misread when looking at Parameter Store. Two families live under
     /porth/{branch}, and only the first is Porth's contract:
 
-      signing-keys/{service_id}            ONE document per service. Its `keys`
-                                           list carries every key that service
-                                           may sign with, tagged by direction.
-                                           This is what verification reads.
+      services/{service_id}                ONE document per service, and the
+                                           whole of what the internal plane
+                                           knows about it: status, its
+                                           addresses by direction, and every
+                                           key it may sign with, tagged by
+                                           direction. This is what both
+                                           verification and endpoint
+                                           resolution read.
 
       infra/signing-key-arn/{svc}/{dir}    A bare ARN, one per pair. EMS
-                                           plumbing, read only by deploy.yml so
+                                           plumbing, read only by the deploy so
                                            the template can name a Resource in
                                            an IAM policy. A KMS key has no
                                            deterministic id, and an alias ARN

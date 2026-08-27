@@ -52,7 +52,19 @@ class SampleAppDirector(PorthDirector):
     """
 
     #: Declared, not read from the environment (PORTH-623).
-    SERVICE_ID = "sample-app"
+    #:
+    #: `ffug`, and the app is not misdescribing itself. The sample app is not a
+    #: service on the internal plane — it is the front half of ffug. There is
+    #: one service here, and `services/ffug` is its whole description: status,
+    #: both ingress addresses, and a key per direction.
+    #:
+    #: This is the identity that MINTS, and porth-common resolves the signing
+    #: key from it: "a service mints AS itself, so source_service IS the
+    #: identity whose key should sign". So declaring `ffug` is what makes this
+    #: function sign with ffug's REQUEST key — the key that exists for requests
+    #: going into ffug — instead of a second request authority invented for the
+    #: same party.
+    SERVICE_ID = "ffug"
 
     @property
     def repository(self) -> SampleAppRepository:
