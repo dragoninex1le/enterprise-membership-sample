@@ -17,10 +17,14 @@ fastapi==0.111.0
 #           depends on the other one: ffug's document points the response
 #           direction at porth-sample-app-callback, so on 0.0.13 every
 #           completion would be delivered to ffug's own request ingress.
+#   0.0.15  a completion is addressed to the verified `source_service` of the
+#           request being completed, and CallbackDeclaration no longer carries
+#           a service_id. This app passes an operation only; on 0.0.14 that is
+#           a TypeError at the worker, not a subtle wrong answer.
 #
 # An older porth-common against this install would call KMS with no grant, look
-# under signing-keys/* for documents that no longer exist, and deliver its
-# callbacks to the wrong function.
-porth-common>=0.0.14
+# under signing-keys/* for documents that no longer exist, deliver its callbacks
+# to the wrong function, and refuse a declaration that names no destination.
+porth-common>=0.0.15
 mangum==0.17.0
 boto3>=1.34.0

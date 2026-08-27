@@ -27,7 +27,10 @@ from ffug.tests.test_handler import (  # noqa: F401
 )
 
 
-CALLBACK = {"service_id": "sample-app", "operation": "fingerprint-complete"}
+# Operation only (PORTH-623). There is no service id in a callback declaration
+# any more: the answer is addressed to the verified `source_service` of the
+# request being completed, so the message body cannot state a destination.
+CALLBACK = {"operation": "fingerprint-complete"}
 
 
 @pytest.fixture
@@ -137,7 +140,10 @@ class _Scoped:
         self.item = item
         self.index = 0
         self.director = MagicMock(
-            environment="prod", tenant_id=tenant, async_trace_id=f"trace-{tenant}"
+            environment="prod", tenant_id=tenant, async_trace_id=f"trace-{tenant}",
+            # Who asked. Resumed from the PersistedContext in the real worker,
+            # and the value the completion is addressed to (PORTH-623).
+            source_service="alpha",
         )
         self.director.table = table
 
@@ -214,19 +220,31 @@ def test_one_failing_record_does_not_take_its_neighbours(monkeypatch, table):
     def send(director, declaration, payload):
         if director.tenant_id == "globex":
             raise RuntimeError("callee unreachable")
-        calls.append((declaration.service_id, declaration.operation, payload))
+        calls.append((director.source_service, declaration.operation, payload))
 
     monkeypatch.setattr(w, "send_callback", send)
 
     result = w.handler({"Records": [good, bad]})
 
     assert result["batchItemFailures"] == [{"itemIdentifier": "bad"}]
-    assert calls and calls[0][0] == "sample-app"
+    # Answered its own requester, taken from the Director rather than the body.
+    assert calls and calls[0][:2] == ("alpha", "fingerprint-complete")
 
 
-def test_the_callback_target_comes_from_the_message_not_from_ffug(monkeypatch, table):
-    """ffug holds no address and cannot be pointed at one. The initiator
-    declares a service and an operation; the endpoint map resolves it."""
+def test_the_completion_is_addressed_to_whoever_asked(monkeypatch, table):
+    """The message says WHAT to call. It cannot say where.
+
+    This test used to assert the opposite — that the target came from the
+    message — and the premise inverted (PORTH-623, Richard 2026-08-27). Naming
+    the destination meant resolving THAT service's address, so ffug could serve
+    exactly one requester; the second's answers would have gone to the first's
+    ingress.
+
+    Now the worker passes only the operation, and `send_callback` addresses the
+    answer to the `source_service` it resumed with. ffug still holds no address
+    and still cannot be pointed at one — and it can now answer any number of
+    requesters, each at its own ingress.
+    """
     table.get_item.return_value = {"Item": {"status": "active", "prime": ACME_PRIME}}
     item = _record("m1")
 
@@ -243,14 +261,20 @@ def test_the_callback_target_comes_from_the_message_not_from_ffug(monkeypatch, t
     monkeypatch.setattr(
         w, "send_callback",
         lambda d, decl, payload: seen.update(
-            service=decl.service_id, operation=decl.operation, payload=payload
+            fields=set(vars(decl)), operation=decl.operation,
+            answering=d.source_service, payload=payload,
         ),
     )
 
     w.handler({"Records": [item]})
 
-    assert seen["service"] == "sample-app"
     assert seen["operation"] == "fingerprint-complete"
+    assert seen["fields"] == {"operation"}, (
+        f"the declaration carries {sorted(seen['fields'])}. Anything beyond the "
+        f"operation is a destination the request body can state."
+    )
+    # The Director resumed from the persisted record, not anything in the body.
+    assert seen["answering"] == "alpha"
     assert seen["payload"]["prime"] == ACME_PRIME
     assert len(seen["payload"]["digest"]) == 64
 

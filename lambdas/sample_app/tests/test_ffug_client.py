@@ -125,21 +125,24 @@ def test_the_trace_sent_is_the_trace_the_caller_hashed(monkeypatch):
     assert recorder.seen["operation"] == "hash_async"
 
 
-def test_the_callback_is_declared_as_a_service_and_an_operation(monkeypatch):
-    """Never an address. ffug resolves the endpoint from the D7.4 map at send
-    time, so this app cannot hand a worker somewhere to post to — and a worker
-    cannot be told to post somewhere else."""
+def test_the_callback_declares_an_operation_and_no_destination(monkeypatch):
+    """Never an address, and now not a service either.
+
+    ffug addresses the answer to the verified `source_service` of this request,
+    so the body cannot say where it goes. This app cannot hand a worker
+    somewhere to post to, a worker cannot be told to post somewhere else, and —
+    the part that changed — ffug can answer any number of requesters, each at
+    its own ingress (PORTH-623, Richard 2026-08-27).
+    """
     recorder = _client(monkeypatch, _accepted())
 
     ffug_client.fingerprint_async(_Director(), {"amount": "1"}, trace_id="trace-1")
 
     callback = recorder.seen["payload"]["callback"]
-    # `ffug`, not a second service id for the callback ingress. ffug's own
-    # document points the RESPONSE direction at porth-sample-app-callback, so
-    # addressing the completion to ffug in that direction resolves to the
-    # callback function. One service, two addresses, said once — which is what
-    # `endpoints.directions` is for (PORTH-623).
-    assert callback == {"service_id": "ffug", "operation": "fingerprint-complete"}
+    assert callback == {"operation": "fingerprint-complete"}, (
+        "the request body names a destination. Where the answer goes comes from "
+        "the verified claims, not from anything the caller writes here."
+    )
     assert not any(k in str(callback).lower() for k in ("http", "arn:", "://"))
 
 

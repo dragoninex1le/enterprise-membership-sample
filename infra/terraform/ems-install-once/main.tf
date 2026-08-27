@@ -157,6 +157,23 @@ locals {
   # Where each service is reached, per direction. Named here rather than inline
   # so the two places a target appears — the document and the IAM grant that
   # lets the caller invoke it — cannot disagree about a function name.
+  #
+  # `request` is where this service is CALLED. `response` is where it RECEIVES
+  # ANSWERS to work it asked somebody else for (PORTH-623, Richard 2026-08-27).
+  # The second one describes the service as a requester, not as a callee, and
+  # that distinction is the whole of the fix: a completion is addressed to the
+  # verified `source_service` of the request being completed, so it resolves
+  # the REQUESTER's document.
+  #
+  # It read the other way round before — the callee's document held the
+  # address — which could name exactly one requester. Fine with one, a silent
+  # collision on the second, whose answers would have gone to the first's
+  # ingress.
+  #
+  # The values below do not change, and that is a coincidence worth stating
+  # rather than relying on: this app declares `source_service = ffug`, so the
+  # requester and the callee happen to be the same document here. A second
+  # requester would add its own entry, not edit this one.
   endpoints = {
     ffug = {
       request  = "porth-ffug-${var.porth_environment}"
