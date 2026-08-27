@@ -24,22 +24,44 @@ closed with a message pointing somewhere else.
 
 | # | Step | Where it lives |
 |---|---|---|
-| 1 | Per-direction signing keys created, aliased, public keys read once | `infra/terraform/ems-install-once` (applied by hand) |
-| 2 | Trust documents written, **one per service**, at `/porth/dev/signing-keys/{service_id}` | same Terraform |
-| 3 | `sample-app` and `ffug` active in `/porth/dev/services` | seeded CREATE-ONLY by `porth-install` |
-| 4 | `ffug` **and `sample-app`** in `/porth/dev/service-endpoints` | operator |
-| 5 | porth-common `>= 0.0.11` in `lambdas/requirements.txt` | repo |
+| 1 | ffug's **two** signing keys — request and response — created, aliased, public halves read once | `infra/terraform/ems-install-once` (applied by hand) |
+| 2 | **One** document at `/porth/dev/services/ffug`: status, one endpoint, both keys | same Terraform |
+| 3 | `SAMPLE_APP_CALLBACK_TARGET` on the app function | `template.yml`, `!Ref SampleAppCallbackFunction` |
+| 4 | porth-common `>= 0.0.16` in `lambdas/requirements.txt` | repo |
 
-**Step 4 is the one that is new.** Until PORTH-621 nothing had ever called
-*into* this app, so it never needed an endpoint entry. Without one, ffug's
-worker resolves the callback target, finds nothing, and every completion fails
-in the drainer rather than at the app — the message names a parameter and not
-the round trip that wanted it.
+The whole document, as deployed:
 
-The `sample-app` entry must point at `porth-sample-app-callback-dev`, mode
-`invoke`. **Not** `porth-sample-app-dev`: that function is a Mangum handler
-which cannot read an invoke event and holds no table grant, so completions
-delivered there would 500 with nothing written.
+```json
+{
+  "contract_version": 1,
+  "endpoints": { "default": { "mode": "invoke", "target": "porth-ffug-dev" } },
+  "keys": [
+    { "alias": "alias/porth-context-ffug-request-dev",  "direction": "request",  "public_key": "…" },
+    { "alias": "alias/porth-context-ffug-response-dev", "direction": "response", "public_key": "…" }
+  ],
+  "service_id": "ffug",
+  "status": "active"
+}
+```
+
+**Three things that used to be here are deliberately absent**, and a reader
+comparing against an older install will notice all three:
+
+- **No `services` or `service-endpoints` monoliths.** One document per service
+  replaced them (PORTH-623). Anything still reading the old paths finds nothing
+  and fails closed.
+- **No `sample-app` document.** The app is not a service on the internal plane —
+  it is ffug's front half, and declares `source_service = ffug`.
+- **No `directions.response`.** The registry holds no callback addresses at all
+  (PORTH-624). The requester supplies its own, which is step 3.
+
+**Step 3 is the one that is easy to miss.** Without it the app refuses to
+originate async work rather than guessing, because there is no registry entry to
+fall back on — by design. It must name `porth-sample-app-callback-dev`, **not**
+`porth-sample-app-dev`: that function is a Mangum handler which cannot read an
+invoke event and holds no table grant, so completions delivered there would 500
+with nothing written. Using `!Ref` on the function resource rather than a rebuilt
+string is what stops the address and the thing at that address disagreeing.
 
 ---
 
@@ -83,22 +105,96 @@ can read it and cannot create it.
 ingress and its role, the callback session-policy document, and the amended
 trust on `SampleAppTenantRole` — all `CREATE_COMPLETE`/`UPDATE_COMPLETE`.
 
-**Round trip witnessed:** 2026-08-25, trace `e7e9b9ca576041ffb1e8201bfc5f2481`,
-tenant `ems-test`, digest `21fd145e891e…`.
+**Round trip witnessed:** 2026-08-27 23:16 UTC, `8ccb121`, trace
+`2d7c7e454bd546a0b261090a953f5884`, tenant `ems-test`, digest `fea1a4a2670f…`.
+Fourteen seconds end to end.
 
-| time | hop | line |
-|---|---|---|
-| 05:35:44 | ffug ingress | `ffug.served operation=hash_async source_service=sample-app` |
-| 05:35:44 | ffug ingress | `ffug.queued callback=sample-app/fingerprint-complete` |
-| 05:59:58 | worker | `ffug.worker.completed callback=sample-app/fingerprint-complete` |
-| 05:59:58 | callback ingress | `sample_app.callback.served source_service=ffug` |
-| 05:59:58 | callback ingress | `sample_app.fingerprint_completed record_type=invoice` |
+| time | hop | log group | line |
+|---|---|---|---|
+| 23:16:03.922 | 1 — the app | `porth-sample-app-dev` | `sample_app.fingerprint_queued tenant_id=ems-test` |
+| 23:16:03.916 | 2 — ffug ingress | `porth-ffug-dev` | `ffug.served operation=hash_async source_service=ffug` |
+| 23:16:03.916 | 2 — ffug ingress | `porth-ffug-dev` | `ffug.queued answering=ffug callback_op=fingerprint-complete` |
+| 23:16:18.182 | 3 — the worker | `porth-ffug-worker-dev` | `ffug.worker.completed answering=ffug digest=fea1a4a2670f` |
+| 23:16:18.133 | 4 — callback ingress | `porth-sample-app-callback-dev` | `sample_app.callback.correlated outcome=stored_hash_matched` |
+| 23:16:18.178 | 4 — callback ingress | `porth-sample-app-callback-dev` | `sample_app.callback.served source_service=ffug` |
+| 23:16:18.178 | 4 — callback ingress | `porth-sample-app-callback-dev` | `sample_app.fingerprint_completed record_type=invoice digest=fea1a4a2670f` |
 
-One `trace_id`, unchanged, across every line above.
+**Four log groups. One `trace_id`, unchanged, in every line.** That is the AC,
+and it is the assertion — not "each service logged something".
 
-### The delay is the evidence, and it was an accident
+`ffug.worker.batch received=1 failed=0 refused=0`.
 
-Twenty-four minutes separate acceptance from completion, because the worker
+### The match is stated, not inferred (AC3)
+
+`sample_app.callback.correlated … outcome=stored_hash_matched`.
+
+It matters because of what it replaced: a mismatch logged a refusal and a match
+logged nothing, so success was read from the *absence* of a refusal. That is the
+same silence-as-success shape that hid the muted logger for four stories.
+
+What matched is the correlation hash H the app committed **before** the work was
+requested, against Porth's recomputation of H from the callback's own verified
+`aud`. H never travels. It is computed twice, in two processes, and the two
+agree or the completion is refused.
+
+### The registry did not know where the answer went
+
+This is the load-bearing line of the whole run:
+
+```
+porth.plane.resolved service_id=ffug path=/porth/dev/services/ffug found=yes
+                     status=active endpoints=[default=porth-ffug-dev]
+                     signing_aliases=[request=alias/porth-context-ffug-request-dev,
+                                      response=alias/porth-context-ffug-response-dev]
+```
+
+**One address.** No `directions.response`, because
+`/porth/{branch}/services/{id}` no longer holds callback addresses at all
+(PORTH-624). And the completion still arrived at
+`porth-sample-app-callback-dev` — because the app supplied that address when it
+asked, from `SAMPLE_APP_CALLBACK_TARGET`.
+
+Porth holds identity and keys. Where a requester receives answers is the
+requester's own business, and it is the one participant that certainly knows
+it. Both signing aliases are still in the document and still did their job: ffug
+signed the completion with its response key and the callback ingress verified
+against it.
+
+That the supplied address is never validated is deliberate. Checking it against
+a registered one would make the value redundant and put a lookup on the hot
+path. What makes it safe is that the address is not the authority — the envelope
+is minted for the VERIFIED `source_service`, so an answer delivered to the wrong
+ingress carries the wrong `aud` and is refused before its payload is read.
+Asserted in Components `test_a_misdirected_answer_is_refused_by_the_RECEIVER`,
+not here: EMS has one requester, so it cannot demonstrate misdirection.
+
+### One service, spelled one way
+
+Every line reads `source_service=ffug` — at ffug's ingress and at the callback
+ingress. There is no `sample-app` identity on the internal plane: the app is
+ffug's front half, `/porth/dev/services/sample-app` is deleted, and one document
+describes the whole conversation.
+
+### The install says where it read, at INFO
+
+All four functions emitted `porth.plane.identity service_id=ffug branch=dev
+environment=dev document=/porth/dev/services/ffug` on first invocation, and
+`porth.plane.resolved` on first load. `PorthCommonLogLevel` is `INFO` — these are
+deliberately not behind DEBUG, because a post-deploy check that needs a redeploy
+to switch on is only available to someone who already suspects a problem.
+
+`environment=prod` appears on `ffug.served` beside `branch=dev`, and both are
+correct: different axes. `PORTH_BRANCH` selects the configuration path,
+`PorthEnvSlot` fixes this install's data environment.
+
+### An earlier run, kept because its accident proved something
+
+The run above is clean — fourteen seconds, no redelivery. **This section
+describes a different one**, on 2026-08-25 (trace
+`e7e9b9ca576041ffb1e8201bfc5f2481`), and it is kept rather than replaced because
+a clean run cannot show what that one showed.
+
+Twenty-four minutes separated acceptance from completion, because the worker
 failed four times on a misconfigured signing direction and succeeded on the
 **fifth and last** delivery before the dead-letter queue would have taken it.
 
@@ -113,17 +209,58 @@ the record as a batch item failure rather than deleting it, `maxReceiveCount: 5`
 bounded the retries, and the message was still there to succeed when the fix
 landed.
 
+### The ordering that broke the attempt before this one
+
+An approval at 22:25:43 the same evening failed, and the cause is worth keeping
+because it will recur on any install that carries configuration beside code.
+
+`terraform apply` had already removed `directions.response`. The deploy carrying
+the code that stops needing it was **still in flight**. For about three minutes
+the install held new configuration and old code, and old code resolves the
+callback address from the registry:
+
+```
+ffug.worker.failed … invoke of 'ffug' failed: AccessDeniedException …
+  not authorized to perform: lambda:InvokeFunction on … function:porth-ffug-dev
+```
+
+With no override to find, it fell back to `endpoints.default` and tried to
+deliver the answer to ffug's own request ingress. **IAM refused it** — the
+worker holds `InvokeFunction` on the callback function and nothing else — so a
+misrouted completion failed closed instead of looping. That grant was written
+for a different reason and caught this one.
+
+Two lessons, both recorded rather than fixed:
+
+- **Configuration and code are a two-phase change.** Remove a value only after
+  the code that stops reading it is live; add one before. Neither ordering is
+  safe in both directions.
+- **The queue is a version boundary.** The message queued at 22:25 was written
+  by the previous ffug and carried no `callback.endpoint`, so it could never
+  succeed under the new worker. It now produces a named refusal
+  (`ffug.worker.unprocessable … reason=message_predates_callback_endpoint`)
+  rather than a `KeyError` in a traceback, four times over.
+
 ### What is NOT witnessed here, and why
 
-The initiating hop — `sample_app.fingerprint_queued` — is absent from
-`/aws/lambda/porth-sample-app-dev`. It happened; ffug logged the call arriving
-with `source_service=sample-app`. It could not be *observed*, because the app
-configured no log level and inherited Lambda's `WARNING` default, so every
-`log.info` it makes was discarded. Fixed in PORTH-622; re-witness after the next
-deploy to make this table four-for-four from the app's own side.
+**The digest has not been recomputed by hand.** Delivery, correlation and
+addressing are all proven above; the *arithmetic* is still taken on the app's
+word — `fea1a4a2670f…` is what the app says ffug returned, not something checked
+independently.
 
-The same silence covers `sample_app.fingerprint` on the **synchronous** path
-since PORTH-599 — that round trip was only ever observable from ffug's end.
+Logs carry a twelve-character prefix only (PORTH-533), so closing this needs the
+prime, the document and the full digest from the approvals screen, run through
+the same one-liner Claim 1 uses. The async path hashes identically; there is no
+second recipe. **PORTH-622 is not complete until that is done.**
+
+**Misdirection is not demonstrated on EMS**, and cannot be. It needs a second
+requester supplying a third party's address, and this install has one requester.
+The property is asserted in Components
+(`test_a_misdirected_answer_is_refused_by_the_RECEIVER`) instead.
+
+**A chain is not demonstrated on EMS either.** `alpha → ffug → gamma` unwinding
+back through ffug to alpha is covered by the Components tests; EMS has no middle
+hop to witness it with.
 
 ### What it took to deploy, recorded because it will happen again
 
