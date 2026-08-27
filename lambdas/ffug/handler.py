@@ -480,9 +480,15 @@ def _op_hash_async(args: dict[str, Any], director: FfugDirector) -> dict[str, An
     door, with the caller still on the line, instead of a message that queues
     successfully and dies out of sight.
 
-    The callback target is the CALLER's to declare — a service and an operation,
-    never an address — so ffug never holds somewhere to call back to and cannot
-    be pointed at one.
+    The callback declares an OPERATION and nothing else (PORTH-623, 2026-08-27).
+    Where the answer goes is not in the request at all: `send_callback` addresses
+    it to the `source_service` of this crossing, which is verified before this
+    function runs and cannot be stated by the body.
+
+    So ffug never holds somewhere to call back to, cannot be pointed at one, and
+    — the part that changed — can serve any number of requesters, each answered
+    at its own ingress. It previously took a `service_id` and resolved THAT
+    service's address, which could name only one requester.
     """
     payload = args.get("document")
     if payload is None:
@@ -492,14 +498,14 @@ def _op_hash_async(args: dict[str, Any], director: FfugDirector) -> dict[str, An
         )
 
     callback = args.get("callback") or {}
-    service_id = str(callback.get("service_id") or "").strip()
     operation = str(callback.get("operation") or "").strip()
-    if not service_id or not operation:
+    if not operation:
         raise FfugError(
             "missing_callback",
-            "hash_async requires callback.service_id and callback.operation — "
-            "asynchronous work with nowhere to report is work nobody learns the "
-            "result of",
+            "hash_async requires callback.operation — asynchronous work with "
+            "nothing to report to is work nobody learns the result of. Note "
+            "there is no callback.service_id: the answer goes to whoever asked, "
+            "from the verified claims, not from this body",
         )
 
     if not WORK_QUEUE_URL:
@@ -516,15 +522,20 @@ def _op_hash_async(args: dict[str, Any], director: FfugDirector) -> dict[str, An
         {
             "context": record.to_json(),
             "payload": payload,
-            "callback": {"service_id": service_id, "operation": operation},
+            # Operation only. The destination is not carried on the queue
+            # because it is not carried anywhere: the worker resumes the
+            # PersistedContext and answers its verified source_service.
+            "callback": {"operation": operation},
         },
         separators=(",", ":"),
     )
     _queue().send_message(QueueUrl=WORK_QUEUE_URL, MessageBody=body)
 
     log.info(
-        "ffug.queued operation=hash_async tenant_id=%s callback=%s/%s trace_id=%s",
-        director.tenant_id, service_id, operation, director.async_trace_id,
+        "ffug.queued operation=hash_async tenant_id=%s answering=%s callback_op=%s "
+        "trace_id=%s",
+        director.tenant_id, director.source_service or "-", operation,
+        director.async_trace_id,
     )
     return {
         "ok": True,

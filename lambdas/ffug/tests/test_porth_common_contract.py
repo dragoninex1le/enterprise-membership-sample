@@ -328,8 +328,13 @@ def test_one_service_is_spelled_one_way_everywhere():
 
     * `SampleAppDirector.SERVICE_ID`  — mints the request
     * `approvals.SOURCE_SERVICE`      — commits the hash before asking
-    * `FINGERPRINT_CALLBACK["service_id"]` — where ffug addresses the answer
     * `CallbackDirector.SERVICE_ID`  — recomputes the hash on arrival
+
+    There were four. `FINGERPRINT_CALLBACK["service_id"]` — where ffug addressed
+    the answer — is gone entirely (PORTH-623, 2026-08-27): a completion goes to
+    the verified `source_service` of the request being completed, so the
+    destination is no longer a string anybody writes down. One fewer place to
+    disagree, which is a better fix than checking it.
 
     `SOURCE_SERVICE` is derived from the Director rather than restated, so it
     cannot drift; it is checked anyway, because the thing that would break this
@@ -349,10 +354,15 @@ def test_one_service_is_spelled_one_way_everywhere():
     from sample_app.routers import approvals
     from sample_app_callback.handler import CallbackDirector
 
+    assert "service_id" not in FINGERPRINT_CALLBACK, (
+        "the callback declaration names a destination again. That is a fourth "
+        "spelling of this service, and it addresses the answer by resolving "
+        "THAT service's document — which can name only one requester."
+    )
+
     spellings = {
         "SampleAppDirector.SERVICE_ID": SampleAppDirector.SERVICE_ID,
         "approvals.SOURCE_SERVICE": approvals.SOURCE_SERVICE,
-        "FINGERPRINT_CALLBACK['service_id']": FINGERPRINT_CALLBACK["service_id"],
         "CallbackDirector.SERVICE_ID": CallbackDirector.SERVICE_ID,
     }
 

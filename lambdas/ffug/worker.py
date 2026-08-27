@@ -100,16 +100,17 @@ def _complete(scoped: Any) -> None:
     )
 
     declared = message["callback"]
+    # No destination passed. `send_callback` addresses the answer to the
+    # `source_service` of the request being completed — a verified claim this
+    # worker resumed with, not something the request body can state.
     send_callback(
         director,
-        CallbackDeclaration(
-            service_id=declared["service_id"], operation=declared["operation"]
-        ),
+        CallbackDeclaration(operation=declared["operation"]),
         {"prime": prime, "digest": digest},
     )
     log.info(
-        "ffug.worker.completed tenant_id=%s callback=%s/%s digest=%s trace_id=%s",
-        director.tenant_id, declared["service_id"], declared["operation"],
+        "ffug.worker.completed tenant_id=%s answering=%s operation=%s digest=%s trace_id=%s",
+        director.tenant_id, director.source_service or "-", declared["operation"],
         digest[:12], director.async_trace_id,
     )
 

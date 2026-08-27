@@ -109,17 +109,22 @@ def fingerprint(director, document: dict[str, Any]) -> dict[str, str]:
 #: side, so this app cannot hand a worker somewhere to post to and a compromised
 #: worker cannot be told to post somewhere else.
 #
-# `ffug`, not a second service id for the callback ingress. One service can hold
-# two ingresses and say so by DIRECTION in its own document, which is what
-# `services/ffug` already does:
+# WHAT to call, not where (PORTH-623, Richard 2026-08-27). There is no service
+# id here any more, and that is the point: ffug answers whoever asked it, taken
+# from the `source_service` of the request it is completing.
 #
-#     endpoints.default              -> porth-ffug-{env}            (request)
+# Naming the destination was the defect. It resolved the address from THAT
+# service's document, so a callee could serve exactly one requester — fine while
+# ffug had one, a silent collision on the second, whose answers would have gone
+# to this app's ingress.
+#
+# Where this app receives answers is now part of describing itself: the response
+# direction in its own document, which is `services/ffug` because this app IS
+# ffug's front half.
+#
+#     endpoints.default              -> porth-ffug-{env}            (a request)
 #     endpoints.directions.response  -> porth-sample-app-callback-{env}
-#
-# So a completion addressed to `ffug` in the response direction resolves to the
-# callback function. Addressing it to a separate `sample-app` service was the
-# workaround for an address lookup that understood one target per name.
-FINGERPRINT_CALLBACK = {"service_id": "ffug", "operation": "fingerprint-complete"}
+FINGERPRINT_CALLBACK = {"operation": "fingerprint-complete"}
 
 
 def fingerprint_async(director, document: dict[str, Any], *, trace_id: str) -> str:
