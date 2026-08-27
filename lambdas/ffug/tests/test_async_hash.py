@@ -301,3 +301,56 @@ def test_a_tenant_suspended_since_acceptance_is_refused_not_retried(monkeypatch,
     monkeypatch.setattr(w, "send_callback", lambda *a, **k: pytest.fail("called back"))
 
     assert w.handler({"Records": [item]})["batchItemFailures"] == []
+
+
+def test_a_message_from_before_the_endpoint_contract_says_so(monkeypatch, table, caplog):
+    """The queue is a version boundary, and it should read like one.
+
+    A message in flight when a deploy lands carries the body the PREVIOUS
+    version wrote. That is what a rolling deploy means, not a bug to prevent —
+    but the first time it happened it surfaced as a KeyError buried in a
+    traceback, four times over, in the log someone was reading to work out what
+    had gone wrong (Richard, 2026-08-27).
+
+    So it is named. Still returned as a batch item failure, still reaching the
+    dead-letter queue after maxReceiveCount — "never deleted quietly" is the
+    rule and this is not an exception to it. What changes is that each delivery
+    costs one line saying why instead of a stack trace.
+    """
+    import logging
+
+    table.get_item.return_value = {"Item": {"status": "active", "prime": ACME_PRIME}}
+    # The old shape: an operation, and no address.
+    item = _record("stale")
+    body = json.loads(item["body"])
+    body["callback"] = {"operation": "fingerprint-complete"}
+    item["body"] = json.dumps(body)
+
+    class _Batch:
+        def __init__(self, items, **kwargs):
+            self.refusals = ()
+            self.refused_count = 0
+
+        def __iter__(self):
+            return iter([_Scoped(item, "acme", table)])
+
+    monkeypatch.setattr(w, "PerRecordDirectors", _Batch)
+    sent = []
+    monkeypatch.setattr(w, "send_callback", lambda *a, **k: sent.append(a))
+
+    with caplog.at_level(logging.WARNING, logger="ffug.worker"):
+        result = w.handler({"Records": [item]})
+
+    assert sent == [], "a message with no address must not reach send_callback"
+    assert result["batchItemFailures"] == [{"itemIdentifier": "stale"}], (
+        "an unprocessable message still goes back and still reaches the DLQ"
+    )
+
+    line = next(r.getMessage() for r in caplog.records
+                if "ffug.worker.unprocessable" in r.getMessage())
+    assert "message_predates_callback_endpoint" in line
+    assert "Re-request the work" in line, "the line should say what to do about it"
+    assert not [r for r in caplog.records if r.exc_info], (
+        "an unprocessable message produced a traceback; the whole point is that "
+        "it reads as a version skew rather than a crash"
+    )
