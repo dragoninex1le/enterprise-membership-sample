@@ -100,12 +100,16 @@ def _complete(scoped: Any) -> None:
     )
 
     declared = message["callback"]
-    # No destination passed. `send_callback` addresses the answer to the
-    # `source_service` of the request being completed — a verified claim this
-    # worker resumed with, not something the request body can state.
+    # The AUDIENCE comes from the Director — the verified source_service this
+    # worker resumed with. The ADDRESS comes from the requester, relayed
+    # untouched. Keeping those two apart is what makes an unchecked address
+    # safe: the token is minted for whoever asked, so delivering it elsewhere
+    # produces a refusal rather than a leak (PORTH-624).
     send_callback(
         director,
-        CallbackDeclaration(operation=declared["operation"]),
+        CallbackDeclaration(
+            operation=declared["operation"], endpoint=declared["endpoint"]
+        ),
         {"prime": prime, "digest": digest},
     )
     log.info(

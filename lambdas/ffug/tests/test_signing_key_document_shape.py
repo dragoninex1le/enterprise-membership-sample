@@ -164,3 +164,36 @@ def test_ffug_holds_both_directions_because_it_is_on_both_legs():
     for direction in ("request", "response"):
         pair = '{ service_id = "ffug", direction = "%s" }' % direction
         assert pair in main, f"ffug has no {direction} key declared"
+
+
+def test_the_registry_holds_no_callback_address():
+    """The configuration PORTH-624 removed, asserted gone.
+
+    `services/{id}` says where a service is CALLED, what it signs with, and
+    whether it is active. It used to also carry a `directions.response` entry
+    naming this app's callback ingress.
+
+    That was a copy of a fact its owner already knew, in a document that could
+    hold exactly one of them — so a second requester's answers would have been
+    delivered to the first's ingress. A requester now supplies its own address
+    when it asks, and ffug relays it untouched.
+
+    Asserted here rather than left to the round trip because re-adding it would
+    not fail anything: `resolve` prefers a direction override when one exists,
+    so a stray entry would silently take precedence over the address the caller
+    gave and send answers to whoever the operator wrote down.
+    """
+    source = MAIN_TF.read_text()
+    # An assignment, not the word — the comment explaining the absence should
+    # not trip a guard about the presence.
+    assert not re.search(r"^\s*directions\s*=", source, re.M), (
+        "a direction override is back in the trust document. A callback "
+        "address in the registry takes precedence over the one the requester "
+        "supplied, and can name only one requester."
+    )
+    assert not re.search(r'"[^"]*sample-app-callback[^"]*"', source), (
+        "the callback function is named in a Terraform string again. Where this "
+        "app receives answers is app configuration "
+        "(SAMPLE_APP_CALLBACK_TARGET in template.yml), not something Porth's "
+        "registry holds."
+    )

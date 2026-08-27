@@ -115,21 +115,28 @@ def test_the_field_the_app_sends_is_the_field_ffug_reads():
     them on the wire the way the client does, and asserts the receiver finds
     them there.
     """
-    from ffug import handler as h
-    from sample_app.ffug_client import FINGERPRINT_CALLBACK
+    import os
 
+    from ffug import handler as h
+    from sample_app import ffug_client
+
+    os.environ[ffug_client.CALLBACK_TARGET_ENV] = "porth-sample-app-callback-test"
     document = {"record_type": "invoice", "record_id": "i-1"}
-    # The caller's arguments, spelled exactly as ffug_client.fingerprint_async
-    # spells them. If that call site changes, this line has to change with it —
-    # which is the coupling being made visible rather than removed.
-    event = _wire_event({"document": document, "callback": FINGERPRINT_CALLBACK})
+    # The caller's arguments, built by the same function the app calls rather
+    # than restated — so a change to what the app sends fails here instead of
+    # agreeing with a copy.
+    callback = ffug_client._callback_declaration()
+    event = _wire_event({"document": document, "callback": callback})
 
     args = event.get("payload") or {}
 
     assert args.get("document") == document, (
         "the document is not where ffug looks for it; ffug reads args['document']"
     )
-    assert args.get("callback") == FINGERPRINT_CALLBACK
+    assert args.get("callback") == callback
+    # Both halves reach the receiver: ffug reads the operation and relays the
+    # address, and refuses the call if either is absent (PORTH-624).
+    assert set(callback) == {"operation", "endpoint"}
     assert "callback" not in event, (
         "a top-level `callback` would mean ffug's original reading was right and "
         "this test is asserting the wrong shape"
@@ -330,11 +337,11 @@ def test_one_service_is_spelled_one_way_everywhere():
     * `approvals.SOURCE_SERVICE`      — commits the hash before asking
     * `CallbackDirector.SERVICE_ID`  — recomputes the hash on arrival
 
-    There were four. `FINGERPRINT_CALLBACK["service_id"]` — where ffug addressed
-    the answer — is gone entirely (PORTH-623, 2026-08-27): a completion goes to
-    the verified `source_service` of the request being completed, so the
-    destination is no longer a string anybody writes down. One fewer place to
-    disagree, which is a better fix than checking it.
+    There were four. The callback's `service_id` — where ffug addressed the
+    answer — is gone entirely (PORTH-623/624): the audience comes from the
+    verified `source_service`, and the address is the requester's own, supplied
+    per request. Neither is a spelling of this service that anybody writes
+    down. One fewer place to disagree, which beats checking it.
 
     `SOURCE_SERVICE` is derived from the Director rather than restated, so it
     cannot drift; it is checked anyway, because the thing that would break this
@@ -349,14 +356,17 @@ def test_one_service_is_spelled_one_way_everywhere():
     pinning the value here would make a legitimate rename fail in three places
     and teach the next reader to edit until the test is quiet.
     """
+    import os
+
+    from sample_app import ffug_client
     from sample_app.director import SampleAppDirector
-    from sample_app.ffug_client import FINGERPRINT_CALLBACK
     from sample_app.routers import approvals
     from sample_app_callback.handler import CallbackDirector
 
-    assert "service_id" not in FINGERPRINT_CALLBACK, (
-        "the callback declaration names a destination again. That is a fourth "
-        "spelling of this service, and it addresses the answer by resolving "
+    os.environ[ffug_client.CALLBACK_TARGET_ENV] = "porth-sample-app-callback-test"
+    assert "service_id" not in ffug_client._callback_declaration(), (
+        "the callback declaration names a service again. That is a fourth "
+        "spelling of this service, and it would address the answer by resolving "
         "THAT service's document — which can name only one requester."
     )
 
