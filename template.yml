@@ -68,6 +68,22 @@ Parameters:
       key was used, and did it verify against the one I expect", which is what
       you want while diagnosing a signature and noise the rest of the time.
 
+      INFO is enough to check a deploy, and deliberately so (PORTH-623). Two
+      lines sit at INFO because they answer the question asked after every
+      apply rather than during an investigation:
+
+        porth.plane.identity   once per process, before anything is called —
+                               the declared service id, the branch, and the
+                               parameter path this function WILL read. A wrong
+                               PORTH_BRANCH appears here as a wrong path.
+        porth.plane.resolved   once per service per container, on first load —
+                               the resolved path, whether a document was there,
+                               both endpoint targets and both signing aliases.
+
+      Turn DEBUG on for the per-crossing detail underneath: porth.config.read
+      names the resolved path of EVERY parameter read, and the token lifecycle
+      (minting/verify/accepted) names the alias and kid each crossing used.
+
   FfugLogLevel:
     Type: String
     Default: INFO
@@ -216,6 +232,24 @@ Parameters:
       arrives with PORTH-620. Declared here so the deploy can pass it and the
       wiring is visible rather than appearing all at once later.
 
+  FfugRequestSigningKeyArn:
+    Type: String
+    Default: ''
+    Description: >
+      ARN of ffug's REQUEST-direction signing key (PORTH-623), created by
+      infra/terraform/ems-install-once and published to
+      /porth/{branch}/infra/signing-key-arn/ffug/request.
+
+      Held by the sample app, and that is not a contradiction. The sample app
+      is not a service on the internal plane — it is ffug's front half, and
+      there is one service here. Requests going into ffug are ffug's requests,
+      so they are signed with ffug's request key.
+
+      This replaces PorthContextSigningKeyArn on SampleAppFunction. The install
+      key was standing in as "the app's request key" while the app claimed a
+      service identity of its own; with one identity there is one document,
+      one key per direction, and no second request authority for the same party.
+
 Conditions:
 
   # PORTH-587. Both KMS grants name a key ARN in their Resource, and IAM rejects
@@ -226,6 +260,8 @@ Conditions:
   # keys arrive independently — an install can have Porth's key seeded and its
   # own service keys not yet applied.
   HasFfugResponseSigningKey: !Not [!Equals [!Ref FfugResponseSigningKeyArn, '']]
+
+  HasFfugRequestSigningKey: !Not [!Equals [!Ref FfugRequestSigningKeyArn, '']]
 
 Resources:
 
@@ -544,12 +580,21 @@ Resources:
           # Reuses FfugLogLevel rather than adding a second knob: one dial for
           # "how loud is this install" is the thing an operator actually wants.
           SAMPLE_APP_LOG_LEVEL: !Ref FfugLogLevel
-          # PORTH-599 — this app's identity on Porth's internal plane, and the
-          # callee it reaches. PORTH_SERVICE_ID must match a service registered
-          # in /porth/{branch}/services or ffug refuses the call; that document
-          # is seeded CREATE-ONLY, so adding a service to Components' default
-          # file does nothing to an install that already has one.
-          PORTH_SERVICE_ID: sample-app
+          # PORTH-599 — this app's identity on Porth's internal plane. It must
+          # name a service registered at /porth/{branch}/services/{id} or the
+          # call is refused.
+          #
+          # `ffug`, and the app is not misdescribing itself (Richard,
+          # 2026-08-27). There is ONE service here: ffug. The sample app is its
+          # front half and porth-sample-app-callback is its other ingress, both
+          # named in ffug's own document by direction. `sample-app` as a second
+          # identity bought a second document, a second key and a hand-built
+          # alias, to describe a party that was never separate.
+          #
+          # The LEGACY source, note. porth-common 0.0.13 prefers what the
+          # Director declares (SERVICE_ID = "ffug" on both) and falls back here.
+          # They are kept in step so a reader is not told two things.
+          PORTH_SERVICE_ID: ffug
           PORTH_BRANCH: !Ref PorthBranch
           # PORTH-623 — the library's own level. Which key signed and which
           # key verified are porth_common's lines, and a per-package logger
@@ -606,24 +651,42 @@ Resources:
       # needs to be on its allow-list or every approval stops being fingerprinted.
       Policies:
         - Statement:
-            - Sid: MintContextForInternalCalls
-              Effect: Allow
-              Action:
-                - kms:Sign
-                # PORTH-604. Minting is two calls, not one. mint_token resolves
-                # the alias to the concrete key ARN it will name in `kid` —
-                # _resolve_kid() calls DescribeKey — and only then signs. The
-                # verifier follows `kid` rather than the alias, which is what
-                # gives rotation its dual-key window (M2) without a coordinated
-                # cutover; the cost is that the SIGNER has to look the key up.
+            # Conditional, like the ffug grants below and for the same IAM
+            # reason: an empty Resource is rejected outright, so an install
+            # whose Terraform has not been applied would fail to deploy at all
+            # rather than deploy without the ability to mint.
+            #
+            # Absent, the app still serves; approvals simply are not
+            # fingerprinted, and the deploy log says why. That is the state the
+            # workflow's warning describes, made real here.
+            - !If
+              - HasFfugRequestSigningKey
+              - Sid: MintContextForInternalCalls
+                Effect: Allow
+                Action:
+                  - kms:Sign
+                  # PORTH-604. Minting is two calls, not one. mint_token resolves
+                  # the alias to the concrete key ARN it will name in `kid` —
+                  # _resolve_kid() calls DescribeKey — and only then signs. The
+                  # verifier follows `kid` rather than the alias, which is what
+                  # gives rotation its dual-key window (M2) without a coordinated
+                  # cutover; the cost is that the SIGNER has to look the key up.
+                  #
+                  # Granting Sign alone gets you AccessDenied on DescribeKey one
+                  # frame earlier, wearing SigningUnavailableError.
+                  - kms:DescribeKey
+                # ffug's REQUEST key. The app is not a service in the per-service
+                # key model (PORTH-623) — it is ffug's front half — so the key it
+                # signs with is ffug's, in the request direction.
                 #
-                # Granting Sign alone gets you AccessDenied on DescribeKey one
-                # frame earlier, wearing SigningUnavailableError.
-                - kms:DescribeKey
-              # The install key. The app is not a service in the per-service
-              # key model (PORTH-623) — this key is its request key, and ffug
-              # already verifies it.
-              Resource: !Ref PorthContextSigningKeyArn
+                # This was Porth's install key, standing in as "the app's request
+                # key" while the app declared a service identity of its own. It
+                # signed correctly and ffug verified it; what it cost was a second
+                # trust document describing the app as a service, and a key whose
+                # alias had to be constructed by hand because Porth publishes an
+                # ARN and no alias. Both are gone with the identity.
+                Resource: !Ref FfugRequestSigningKeyArn
+              - !Ref AWS::NoValue
             - Sid: CallFfug
               Effect: Allow
               Action: lambda:InvokeFunction
@@ -735,7 +798,12 @@ Resources:
           # verify_callback recomputes the correlation hash from the callback's
           # own verified `aud`, which is this string. A second spelling would
           # make every authentic completion look like a mismatch.
-          PORTH_SERVICE_ID: sample-app
+          #
+          # Which is why this ingress being ffug is not a relabelling. ffug's
+          # document points the RESPONSE direction here, so a completion
+          # addressed to ffug arrives at this function while a request to ffug
+          # goes to porth-ffug-{env} — one service, two addresses, said once.
+          PORTH_SERVICE_ID: ffug
           PORTH_BRANCH: !Ref PorthBranch
           # PORTH-623 — the library's own level. Which key signed and which
           # key verified are porth_common's lines, and a per-package logger
@@ -1655,6 +1723,20 @@ Outputs:
       because there is no verifier. Published because the difference is
       otherwise invisible until something calls ffug.
     Value: !If [HasContextSigningKey, 'yes', 'no']
+
+  SampleAppCanMintContext:
+    Description: >
+      Whether the app can originate an internal call (PORTH-623). "yes" means
+      ffug's REQUEST key resolved, so the app holds Sign on it and an approval
+      is fingerprinted. "no" means the app serves normally and every approval
+      goes un-fingerprinted — a degraded state that is otherwise invisible
+      until someone approves something and finds the field empty.
+
+      A separate answer from FfugInternalPlaneWired above, which is now only
+      about the UAT runner and Porth's install key. The app stopped signing
+      with that key when it stopped claiming to be its own service, so one
+      output can no longer speak for both.
+    Value: !If [HasFfugRequestSigningKey, 'yes', 'no']
 
   FfugTenantRoleArn:
     Description: >

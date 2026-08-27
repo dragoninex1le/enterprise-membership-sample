@@ -400,19 +400,28 @@ def test_every_signer_signs_with_the_key_its_direction_entitles_it_to(template):
     which roles appear — the name list alone would pass if the worker were
     quietly given the install key, which is the failure worth catching.
 
-    Three signers, two keys:
+    Three signers, three keys:
 
-    * the app and the UAT runner sign REQUESTS, on the install key. The app is
-      not a service in the per-direction model, so the install key is its
-      request key; the runner mints as `porth` on the same key.
-    * the worker signs RESPONSES, on ffug's own key. A completing service holds
-      response authority and nothing else, so it cannot originate work even as
-      itself — the capability is absent rather than unused.
+    * the app signs REQUESTS on ffug's REQUEST key. It is not a service of its
+      own — it is ffug's front half — so a request going into ffug is ffug's,
+      and it is signed with ffug's request key (Richard, 2026-08-27). It held
+      Porth's install key while it claimed a separate identity.
+    * the worker signs RESPONSES, on ffug's own response key. A completing
+      service holds response authority and nothing else, so it cannot
+      originate work even as itself — the capability is absent rather than
+      unused.
+    * the UAT runner mints as `porth`, on the install key. It is the one
+      remaining holder of that key here, and deliberately: it stands outside
+      the app, minting as a third party to exercise the boundary.
+
+    The app and the worker now hold DIFFERENT keys for the same service, which
+    is the per-direction property doing its job: a compromised completion path
+    cannot mint a request even though both are ffug.
 
     ffug's REQUEST path appears nowhere, and that is what UAT-4 witnesses.
     """
     expected = {
-        "SampleAppFunction": {"Ref": "PorthContextSigningKeyArn"},
+        "SampleAppFunction": {"Ref": "FfugRequestSigningKeyArn"},
         "PorthUatRunnerRole": {"Ref": "PorthContextSigningKeyArn"},
         "FfugWorkerFunctionRole": {"Ref": "FfugResponseSigningKeyArn"},
     }
@@ -595,10 +604,16 @@ def test_the_app_narrows_the_same_data_identity_on_both_planes(resources):
     env = resources["SampleAppCallbackFunction"]["Properties"]["Environment"]["Variables"]
 
     assert env["PORTH_SERVICE_DATA_IDENTITY"] == {"GetAtt": "SampleAppTenantRole.Arn"}
-    assert env["PORTH_SERVICE_ID"] == "sample-app", (
-        "verify_callback recomputes the correlation hash from this service's own "
-        "registered id — a second spelling makes every authentic completion look "
-        "like a mismatch"
+    # `ffug` on BOTH ingresses, and they must agree exactly: verify_callback
+    # recomputes the correlation hash from this service's own registered id,
+    # and the app committed that hash using its own. Two spellings of one party
+    # make every authentic completion look like a mismatch — which is what the
+    # split identity was one rename away from causing.
+    assert env["PORTH_SERVICE_ID"] == "ffug", (
+        "the callback ingress declares a different service to the one that "
+        "initiates the work. They are the same service — ffug — reached at two "
+        "addresses, and the correlation hash is computed from this string at "
+        "both ends."
     )
 
 

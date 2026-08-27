@@ -102,7 +102,7 @@ def _wire_event(payload):
 
     # ServiceClient refuses to exist without a registered identity, which is
     # correct and is checked in its constructor rather than at call time.
-    with patch.dict(os.environ, {"PORTH_SERVICE_ID": "sample-app"}):
+    with patch.dict(os.environ, {"PORTH_SERVICE_ID": "ffug"}):
         body = ServiceClient(MagicMock())._body("hash_async", payload, None)
     return {**body, "porth_context": "<token>"}
 
@@ -188,10 +188,17 @@ def test_every_director_declares_who_it_is():
     from sample_app.director import SampleAppDirector
     from sample_app_callback.handler import CallbackDirector
 
+    # All three say `ffug`, and that is the point rather than a copy-paste
+    # (Richard, 2026-08-27). There is ONE service on the internal plane here.
+    # `porth-ffug` is its request ingress and `porth-sample-app-callback` is
+    # its response ingress; the app is its front half. A service with two
+    # addresses says so by DIRECTION in its own document — inventing a second
+    # service id to name the second address is the exact pressure this
+    # docstring describes, and it had produced two.
     declared = {
         FfugDirector: "ffug",
-        SampleAppDirector: "sample-app",
-        CallbackDirector: "sample-app",
+        SampleAppDirector: "ffug",
+        CallbackDirector: "ffug",
     }
     for cls, expected in declared.items():
         assert cls.SERVICE_ID == expected, (
@@ -304,4 +311,105 @@ def test_every_internal_plane_function_can_turn_the_library_up():
         f"{missing} cannot turn porth_common up. Its key-resolution and "
         f"verification lines will be silent there no matter what the app's own "
         f"level is set to."
+    )
+
+
+def test_one_service_is_spelled_one_way_everywhere():
+    """The correlation hash is computed twice, in two processes, and never sent.
+
+    That is the design — the app commits H before it asks for the work, ffug's
+    completion carries an audience, and the callback ingress recomputes H from
+    that audience. Nothing transmits H, so nothing can reconcile a
+    disagreement: three independent statements of one service's name have to
+    agree by construction or every authentic completion is refused as a
+    mismatch.
+
+    The three:
+
+    * `SampleAppDirector.SERVICE_ID`  — mints the request
+    * `approvals.SOURCE_SERVICE`      — commits the hash before asking
+    * `FINGERPRINT_CALLBACK["service_id"]` — where ffug addresses the answer
+    * `CallbackDirector.SERVICE_ID`  — recomputes the hash on arrival
+
+    `SOURCE_SERVICE` is derived from the Director rather than restated, so it
+    cannot drift; it is checked anyway, because the thing that would break this
+    is someone re-hardcoding it, and that is exactly what it was.
+
+    Checked here rather than left to the round trip because the round trip is
+    where it WAS checked: a rename in one file passes every unit test, deploys
+    clean, and fails on the fifth SQS redelivery — one short of the DLQ. The
+    same shape as the signing-direction variable PORTH-623 removed.
+
+    Not asserted against the literal "ffug". What matters is that they agree;
+    pinning the value here would make a legitimate rename fail in three places
+    and teach the next reader to edit until the test is quiet.
+    """
+    from sample_app.director import SampleAppDirector
+    from sample_app.ffug_client import FINGERPRINT_CALLBACK
+    from sample_app.routers import approvals
+    from sample_app_callback.handler import CallbackDirector
+
+    spellings = {
+        "SampleAppDirector.SERVICE_ID": SampleAppDirector.SERVICE_ID,
+        "approvals.SOURCE_SERVICE": approvals.SOURCE_SERVICE,
+        "FINGERPRINT_CALLBACK['service_id']": FINGERPRINT_CALLBACK["service_id"],
+        "CallbackDirector.SERVICE_ID": CallbackDirector.SERVICE_ID,
+    }
+
+    assert len(set(spellings.values())) == 1, (
+        f"one service, spelled several ways: {spellings}. The correlation hash "
+        f"is computed independently at both ends and never transmitted, so a "
+        f"disagreement here refuses every authentic completion — and does it at "
+        f"the callback, three hops from the edit."
+    )
+
+
+def test_every_internal_plane_entry_point_says_where_it_will_read():
+    """A log line has no caller, so nothing breaks when one is deleted.
+
+    These four are the deployables that cross the internal plane, and each one
+    is a place PORTH_BRANCH, PORTH_SERVICE_ID or a trust document can be wrong
+    independently of the others. The line is what makes a wrong one visible on
+    the first invocation instead of on the first refusal — and the refusal is
+    three layers away from the cause, which is how this install lost a day.
+
+    Checked by reading the source rather than by invoking the handlers: what is
+    being asserted is that the CALL is present at the entry point, and a
+    behavioural test would need each handler's full event, credentials and
+    table fakes to reach the same one line.
+
+    `sample_app.handler` wraps Mangum rather than being a plain function, so the
+    call sits in the wrapper — which is why this looks for it anywhere in the
+    module's handler definition rather than in a function of a fixed shape.
+    """
+    import ast
+    import pathlib
+
+    lambdas = pathlib.Path(__file__).resolve().parents[2]
+    entry_points = [
+        "sample_app/handler.py",
+        "sample_app_callback/handler.py",
+        "ffug/handler.py",
+        "ffug/worker.py",
+    ]
+
+    missing = []
+    for relative in entry_points:
+        source = (lambdas / relative).read_text()
+        tree = ast.parse(source)
+        called = any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "log_plane_identity"
+            for node in ast.walk(tree)
+        )
+        imported = "log_plane_identity" in source.split("def ")[0]
+        if not (called and imported):
+            missing.append(relative)
+
+    assert not missing, (
+        f"{missing} no longer announce their plane identity. Each is a "
+        f"deployable whose branch, service id and trust document can be wrong "
+        f"on its own; without the line a wrong one is invisible until a "
+        f"crossing fails somewhere else."
     )

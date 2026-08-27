@@ -50,6 +50,7 @@ from porth_common.internal_plane.config import (
 )
 from porth_common.protocols.cloud_clients import DOCUMENT_STORE
 from porth_common.protocols.signing import Direction
+from porth_common.internal_plane import log_plane_identity
 
 from sample_app.repository import APPROVABLE, SampleAppRepository
 
@@ -111,7 +112,14 @@ class CallbackDirector(Director):
     #: registered identity, so a second spelling of it makes every authentic
     #: completion look like a mismatch. Naming it here means the value the code
     #: uses and the value the template sets cannot drift.
-    SERVICE_ID = "sample-app"
+    #:
+    #: `ffug`, matching the Director that initiated the work. That is not a
+    #: convenience: `verify_callback` recomputes the correlation hash from THIS
+    #: value, and the app committed the hash using its own. Two spellings of
+    #: one party make every authentic completion a mismatch, which is the
+    #: failure this comment already warned about — it just named the wrong
+    #: string to keep.
+    SERVICE_ID = "ffug"
 
     RESOURCES = ((DOCUMENT_STORE, "resource"),)
 
@@ -223,6 +231,10 @@ _OPS = {"fingerprint-complete": _op_fingerprint_complete}
 
 
 def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
+    # PORTH-623 — who this deployable is and where it will read, once per
+    # process, at INFO. The post-deploy check: a wrong PORTH_BRANCH shows up
+    # here as a wrong path rather than three layers down as a refusal.
+    log_plane_identity(CallbackDirector.SERVICE_ID)
     event = event or {}
     try:
         # Before verification, so nothing here is claimed — only the shape of

@@ -134,7 +134,12 @@ def test_the_callback_is_declared_as_a_service_and_an_operation(monkeypatch):
     ffug_client.fingerprint_async(_Director(), {"amount": "1"}, trace_id="trace-1")
 
     callback = recorder.seen["payload"]["callback"]
-    assert callback == {"service_id": "sample-app", "operation": "fingerprint-complete"}
+    # `ffug`, not a second service id for the callback ingress. ffug's own
+    # document points the RESPONSE direction at porth-sample-app-callback, so
+    # addressing the completion to ffug in that direction resolves to the
+    # callback function. One service, two addresses, said once — which is what
+    # `endpoints.directions` is for (PORTH-623).
+    assert callback == {"service_id": "ffug", "operation": "fingerprint-complete"}
     assert not any(k in str(callback).lower() for k in ("http", "arn:", "://"))
 
 

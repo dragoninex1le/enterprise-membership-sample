@@ -53,12 +53,21 @@ def service_context(tenant_id=TENANT, environment=ENVIRONMENT, source="ffug", tr
 
 
 def expected_hash(environment=ENVIRONMENT, tenant_id=TENANT, trace=TRACE):
-    """What the app stored at initiation. `source_service` is OUR id, not ffug's
-    — the hash is anchored to the initiator, which is what the callback's
-    verified `aud` names."""
+    """What the app stored at initiation.
+
+    `source_service` is the INITIATOR's id, which is what the callback's
+    verified `aud` names — and it is `ffug`, because the initiator and this
+    ingress are the same service (Richard, 2026-08-27). The app is ffug's front
+    half; there is no `sample-app` on the internal plane to anchor a hash to.
+
+    That both ends now spell it the same way is the whole property: the app
+    commits this hash before the work is requested, and verify_callback
+    recomputes it from the token's audience. One string, computed twice, in two
+    processes that never exchange it.
+    """
     return context_hash(
         environment=environment, tenant_id=tenant_id,
-        source_service="sample-app", trace_id=trace,
+        source_service="ffug", trace_id=trace,
     )
 
 
@@ -81,7 +90,7 @@ def record(*, trace=TRACE, correlation=None, record_id="i-1"):
 @pytest.fixture
 def porth(monkeypatch):
     """Wire both seams. Returns a controller the tests drive."""
-    monkeypatch.setenv("PORTH_SERVICE_ID", "sample-app")
+    monkeypatch.setenv("PORTH_SERVICE_ID", "ffug")
     monkeypatch.setenv("PORTH_ENVIRONMENT", "dev")
 
     table = MagicMock()

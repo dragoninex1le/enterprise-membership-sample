@@ -254,6 +254,32 @@ jobs:
           fi
           echo "FFUG_RESPONSE_KEY_ARN=$FFUG_RESPONSE_KEY_ARN" >> $GITHUB_ENV
 
+          # ffug's REQUEST key — what the sample app signs with (PORTH-623).
+          #
+          # The app used to sign with the install key above, on the reasoning
+          # that it "is not a service in this model". It is not a service; it is
+          # ffug's front half, and a request going into ffug is ffug's request.
+          # So it signs with ffug's request key and there is one document, one
+          # identity and one key per direction for the whole conversation.
+          #
+          # Absent is a real state here too: the grant is conditional, so an
+          # install whose Terraform has not been applied deploys and refuses to
+          # originate rather than deploying a role that can sign nothing.
+          FFUG_REQUEST_KEY_ARN=$(aws ssm get-parameter \
+            --name "/porth/${PORTH_BRANCH}/infra/signing-key-arn/ffug/request" \
+            --query Parameter.Value --output text 2>/dev/null || echo "")
+          if [ -z "$FFUG_REQUEST_KEY_ARN" ] || [ "$FFUG_REQUEST_KEY_ARN" == "None" ]; then
+            FFUG_REQUEST_KEY_ARN=""
+            echo "::warning::No request signing key for ffug at"
+            echo "::warning::/porth/${PORTH_BRANCH}/infra/signing-key-arn/ffug/request."
+            echo "::warning::Apply infra/terraform/ems-install-once. Without it the"
+            echo "::warning::app cannot mint context and every approval goes"
+            echo "::warning::un-fingerprinted."
+          else
+            echo "✅ ffug request signing key resolved"
+          fi
+          echo "FFUG_REQUEST_KEY_ARN=$FFUG_REQUEST_KEY_ARN" >> $GITHUB_ENV
+
           echo "PORTH_CONTEXT_KEY_ARN=$CONTEXT_KEY_ARN" >> $GITHUB_ENV
           echo "PORTH_BRANCH=$PORTH_BRANCH" >> $GITHUB_ENV
           echo "PORTH_ENV_SLOT=$PORTH_ENV_SLOT" >> $GITHUB_ENV
@@ -515,6 +541,9 @@ jobs:
           fi
           if [ -n "${FFUG_RESPONSE_KEY_ARN:-}" ]; then
             OPTIONAL+=("FfugResponseSigningKeyArn=${FFUG_RESPONSE_KEY_ARN}")
+          fi
+          if [ -n "${FFUG_REQUEST_KEY_ARN:-}" ]; then
+            OPTIONAL+=("FfugRequestSigningKeyArn=${FFUG_REQUEST_KEY_ARN}")
           fi
 
           sam deploy \

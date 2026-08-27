@@ -12,9 +12,15 @@ fastapi==0.111.0
 #           status, its addresses and its keys, and each key names the ALIAS its
 #           owner signs with rather than a kid. The template reads services/* as
 #           a prefix.
+#   0.0.14  ServiceClient passes the call's DIRECTION to the endpoint resolver.
+#           Without it every call resolves the default address, and this app
+#           depends on the other one: ffug's document points the response
+#           direction at porth-sample-app-callback, so on 0.0.13 every
+#           completion would be delivered to ffug's own request ingress.
 #
-# An older porth-common against this install would call KMS with no grant, and
-# look under signing-keys/* for documents that no longer exist.
-porth-common>=0.0.13
+# An older porth-common against this install would call KMS with no grant, look
+# under signing-keys/* for documents that no longer exist, and deliver its
+# callbacks to the wrong function.
+porth-common>=0.0.14
 mangum==0.17.0
 boto3>=1.34.0

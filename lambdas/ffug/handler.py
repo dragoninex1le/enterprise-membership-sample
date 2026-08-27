@@ -52,6 +52,7 @@ from porth_common.internal_plane.config import (
     UnknownServiceError,
 )
 from porth_common.protocols.cloud_clients import DOCUMENT_STORE, IDENTITY_BROKER
+from porth_common.internal_plane import log_plane_identity
 
 from . import keys, salt
 
@@ -589,6 +590,10 @@ def _debug_identity(director: FfugDirector) -> None:
 
 
 def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
+    # PORTH-623 — who this deployable is and where it will read, once per
+    # process, at INFO. The post-deploy check: a wrong PORTH_BRANCH shows up
+    # here as a wrong path rather than three layers down as a refusal.
+    log_plane_identity(FfugDirector.SERVICE_ID)
     event = event or {}
     try:
         # Before verification, so nothing here can be trusted and nothing here

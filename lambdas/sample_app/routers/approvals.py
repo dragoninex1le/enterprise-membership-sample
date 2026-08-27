@@ -21,11 +21,22 @@ from ..repository import (
     fingerprint_document,
 )
 
-#: This app's own registered identity. The callback's `aud` will be this, and
-#: `verify_callback` recomputes the correlation hash from its own verified
-#: audience — so what is hashed HERE has to be the same string, or nothing ever
-#: correlates. Read from the environment in the ingress; spelled once here.
-SOURCE_SERVICE = "sample-app"
+#: The identity that initiates, taken from the Director that mints rather than
+#: restated. The callback's `aud` will be this, and `verify_callback` recomputes
+#: the correlation hash from its own verified audience — so what is hashed HERE
+#: has to be the same string or nothing ever correlates.
+#:
+#: It used to be a literal, with a comment claiming it was "spelled once here".
+#: It was the FOURTH statement of one service's name, and the only one on the
+#: path that commits the hash: a rename in the other three would have left this
+#: hashing a name nothing else used, and every authentic completion would have
+#: been refused as a mismatch three hops away from the edit.
+#:
+#: Derived, it cannot disagree. `SERVICE_ID` on the Director is what
+#: porth-common resolves the signing key from and what the token is minted as,
+#: so anchoring the hash to it is anchoring it to the thing that actually
+#: travels.
+SOURCE_SERVICE = SampleAppDirector.SERVICE_ID
 
 router = APIRouter(prefix="/sample/approvals", tags=["approvals"])
 
