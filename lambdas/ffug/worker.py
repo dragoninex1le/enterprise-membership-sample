@@ -59,6 +59,27 @@ logging.getLogger("porth_common").setLevel(
 
 
 
+class UnprocessableMessage(Exception):
+    """A message this worker can never process, however often it is redelivered.
+
+    Distinct from an ordinary failure because the response is the same and the
+    reasoning is opposite. A throttle or a briefly unreachable callee is worth
+    another delivery; a message whose SHAPE this version does not understand is
+    worth exactly none, and the four that follow produce four more identical
+    tracebacks in the log an operator is trying to read.
+
+    It still goes back to the queue and still reaches the dead-letter queue —
+    "never deleted quietly" is the rule and this is not an exception to it. What
+    changes is that each delivery says WHY in one line instead of raising.
+
+    The case that produced it: the queue is a version boundary. A message
+    written by the previous deploy, in flight when this one landed, carries the
+    body that version wrote. That is not a bug to prevent — it is what a rolling
+    deploy means — but it should read as a version skew rather than a KeyError
+    (Richard, 2026-08-27).
+    """
+
+
 def _context_of(record: dict[str, Any]) -> Any:
     """The persisted context out of one SQS record.
 
@@ -99,7 +120,21 @@ def _complete(scoped: Any) -> None:
         director.async_trace_id,
     )
 
-    declared = message["callback"]
+    declared = message.get("callback") or {}
+    if not declared.get("endpoint"):
+        # Written before the callback carried its own address (PORTH-624). The
+        # registry no longer holds one and this version resolves nothing, so
+        # there is genuinely nowhere for this answer to go.
+        #
+        # The initiator's record stays `queued`, and that is the honest state:
+        # it asked, and nobody can tell it the answer. Deleting the message
+        # would make the same outcome silent.
+        raise UnprocessableMessage(
+            "this message declares no callback.endpoint, so it was queued by a "
+            "deploy older than PORTH-624. The address is not in the registry to "
+            "fall back on — by design — so it cannot be delivered. Re-request "
+            "the work; retrying this message will produce this same refusal"
+        )
     # The AUDIENCE comes from the Director — the verified source_service this
     # worker resumed with. The ADDRESS comes from the requester, relayed
     # untouched. Keeping those two apart is what makes an unchecked address
@@ -134,6 +169,18 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
     for scoped in batch:
         try:
             _complete(scoped)
+        except UnprocessableMessage as exc:
+            # A reason, not a traceback. Same disposition as any other failure —
+            # back on the queue, and to the DLQ after maxReceiveCount — because
+            # a message nobody can process is exactly what a DLQ is for. What it
+            # must not be is four more stack traces.
+            log.warning(
+                "ffug.worker.unprocessable tenant_id=%s trace_id=%s reason=%s: %s",
+                getattr(scoped.director, "tenant_id", "-"),
+                getattr(scoped.director, "async_trace_id", "-"),
+                "message_predates_callback_endpoint", exc,
+            )
+            failures.append({"itemIdentifier": scoped.item["messageId"]})
         except Exception as exc:  # noqa: BLE001 — one bad record must not take the batch
             # Raised, not swallowed: a throttle, a lapsed credential or a callee
             # that was briefly unreachable are all worth another delivery. The
