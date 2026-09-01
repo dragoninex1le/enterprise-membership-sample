@@ -138,14 +138,26 @@ aws ssm delete-parameter --name /porth/dev/signing-keys --region us-east-1
 
 ### There is one service, and the app is not a second one
 
-`ffug` is the service. `porth-sample-app-{env}` is its front half and
-`porth-sample-app-callback-{env}` is its other ingress — both named in
-`services/ffug` under `endpoints`, by direction:
+`ffug` is the service. `ems-sample-app-{env}` is its front half and
+`ems-sample-app-callback-{env}` is its other ingress. Only one of them is named
+here:
 
 ```
-endpoints.default              -> porth-ffug-{env}                 (a request)
-endpoints.directions.response  -> porth-sample-app-callback-{env}   (an answer)
+endpoints.request  ->  ems-ffug-${environment}     (where a request goes)
 ```
+
+The answer's address is not in this document. A requester supplies its own
+callback endpoint in the envelope, because a service that several callers use
+cannot hold one response address for all of them — `directions.response` named
+exactly one, and the second caller collided with the first. What the registry
+still holds for a callback is ffug's response KEY, not where the answer lands.
+
+`${environment}` is written literally and substituted by porth-common at resolve
+time from the Director's verified environment claim. It has to be, now that EMS
+deploys a stack per environment: both declare `PORTH_SERVICE_ID: ffug` and so
+share this one document, and a literal name would send one environment's
+requests to the other's function. This module runs once and cannot know which
+environment is calling; the caller does.
 
 There used to be a second, hand-written `sample-app` document holding Porth's
 install key as "the app's request key". It was needed because a token's signer

@@ -19,11 +19,16 @@ was adopted to remove. A repository is now built FOR a scope and cannot be asked
 about another one. There is no parameter to get wrong.
 
 Both values come from the Director, which got them from the authorizer's own
-resolution. Neither is read from the environment: ``PORTH_ENVIRONMENT`` suffixes
-the table name and is a DIFFERENT VALUE from the ADR-Z8 slot — ``dev`` versus
-``prod`` on this install. Composing the key from the wrong one produces rows
-nothing can read and a policy that matches nothing, and each looks like the
-other's fault.
+resolution, and neither is read from the environment. That mattered more than it
+reads: the table name used to be composed here from ``PORTH_ENVIRONMENT``, a
+DIFFERENT VALUE from the ADR-Z8 slot — ``dev`` against ``prod`` — so a key built
+from the wrong one produced rows nothing could read and a policy that matched
+nothing, each looking like the other's fault.
+
+Both halves of that are gone (PORTH-627). The table arrives as
+``SAMPLE_APP_TABLE_NAME`` from the resource that creates it, and the slot is now
+the same word everywhere — ``porth-sample``, in the table name, in the partition
+key and in the host a tenant types.
 """
 
 from __future__ import annotations
@@ -152,7 +157,12 @@ def _as_approval(record_type: str, spec: _RecordSpec, item: dict) -> dict:
 #: The table NAME's environment — the deployment axis. Not the data axis; see
 #: the module docstring. These are different values and conflating them is the
 #: specific mistake this module is arranged to prevent.
-TABLE_NAME = f"porth-sample-app-{os.environ.get('PORTH_ENVIRONMENT', 'dev')}"
+#: The app's table, named by the resource that creates it (PORTH-627).
+#:
+#: Was `f"porth-sample-app-{PORTH_ENVIRONMENT}"`, rebuilt independently in three
+#: modules. Passed from `!Ref SampleAppTable` there is one source, so the name
+#: cannot drift from the table — the same reason ffug reads FFUG_TABLE_NAME.
+TABLE_NAME = os.environ.get("SAMPLE_APP_TABLE_NAME", "")
 
 
 def _now() -> str:

@@ -1,6 +1,6 @@
-"""Prove ffug's tenant isolation against the live install (PORTH-587).
+"""Prove ffug's tenant and environment isolation against the live install.
 
-Two stages, in the order Richard asked for them:
+Three stages (PORTH-587, PORTH-627):
 
 **A — the tenant exists in the service table.** Nobody called ffug to make that
 happen. Porth emitted ``tenant.created`` on the bus, ffug's lifecycle consumer
@@ -19,10 +19,27 @@ second is the one that matters:
    tenant-shaped for an unrelated reason. The service and this script arrive at
    the same answer from opposite directions.
 
+**C — the environment axis.** Two probes against the same function: this
+environment's credentials aimed at a REAL other environment's partition, which
+must be refused; and an envelope minted FOR that other environment, which must be
+served and narrowed to it. The first is the isolation property — nothing asserted
+it before EMS ran two environments — and the second pins the deliberate choice
+that an unpinned ingress follows the signed claim rather than its own
+configuration.
+
+Needs ``OTHER_ENVIRONMENT`` naming another deployed environment. Skipped without
+it, because a probe aimed at an invented environment is the vacuous version
+PORTH-598 objected to for tenants.
+
 What this does NOT do is the cross-tenant denial (UAT-3). Demonstrating that
 means assuming ``FfugTenantRole`` with tenant A's session policy and reading B's
 row, which needs a grant the UAT runner does not have. Deliberately left for its
 own change rather than widened in passing.
+
+Nor does it drive an async round trip in each environment, or read the same
+tenant's prime from both tables. Both need the OTHER environment's function and
+table, which this runner cannot reach; they are witnessed by running the app in
+each environment and recorded in EVIDENCE.md.
 
 Run from CI holding the UAT runner role — see .github/workflows/ffug-proof.yml.
 Nothing here writes.
@@ -113,13 +130,20 @@ def stage_a() -> list[dict]:
             "means no such event has been delivered SINCE ffug's consumer was",
             "deployed — tenants that already existed do not get one retroactively.",
             "",
-            "Create a tenant and re-run:",
-            "  - Actions > 'Porth - seed testbed tenants', or",
-            "  - create one in the admin UI at porth-sample.ems.estynsoftware.cloud",
+            "Create a tenant in the ADMIN UI and re-run — the environment under",
+            "test is a label in the host:",
+            "  https://{environment}.ems.estynsoftware.cloud",
             "",
-            "If a tenant IS created and this still reports nothing, the rule is not",
-            "matching: check FfugLifecycleFunction's log group for invocations at",
-            "all, then the rule's bus and pattern.",
+            "NOT 'Porth - seed testbed tenants'. That seeder writes tenant rows",
+            "straight to Porth's table and publishes NO tenant.created, so ffug",
+            "never hears about the tenant and this scan stays empty however many",
+            "times it is run. Only PUT /tenants/ emits the event.",
+            "",
+            "If a tenant IS created through the UI and this still reports nothing,",
+            "the rule is not matching: check FfugLifecycleFunction's log group for",
+            "invocations at all, then the rule's bus and pattern — it now filters",
+            "on detail.environment (PORTH-627), so an event for another",
+            "environment is correctly ignored by this deployment.",
         )
 
     active = [r for r in rows if r.get("status") == "active"]
@@ -192,9 +216,12 @@ def stage_b(tenants: list[dict]) -> None:
                 "                          ABSENT document fails closed on every lookup",
                 "                          — which is correct, and looks identical to a",
                 "                          rejected caller. Check the parameter exists.",
-                "  environment_mismatch    PORTH_FIXED_ENVIRONMENT on the function",
-                "                          disagrees with the slot these rows are keyed",
-                "                          under. The two axes again.",
+                "  environment_mismatch    the envelope's environment disagrees with",
+                "                          the slot these rows are keyed under. This USED",
+                "                          to mean PORTH_FIXED_ENVIRONMENT on the function;",
+                "                          that pin is gone (PORTH-627), so the claim now",
+                "                          comes from the Director and a mismatch means the",
+                "                          caller minted for the wrong environment.",
                 "  audience_mismatch       PORTH_SERVICE_ID on the function is not 'ffug'.",
                 "  unsigned / bad_signature  this script's envelope is wrong, or the key",
                 "                          it signed with is not the one ffug verifies.",
@@ -229,11 +256,128 @@ def stage_b(tenants: list[dict]) -> None:
     print("     and each matches its own stored prime.")
 
 
+def stage_c(tenants: list[dict]) -> None:
+    """The environment axis, which nothing asserted before EMS ran two of them.
+
+    Both probes go to the SAME function — this environment's ffug — because that
+    is the only one these credentials reach. What differs is the key, and that
+    is the point: FfugTenantRole's ceiling is ``ENV#*#TENANT#*``, so an
+    un-narrowed session would be ALLOWED to read a foreign environment's
+    partition. A denial here is attributable to the session policy's ``$env``
+    narrowing and to nothing else.
+
+    Skipped rather than failed when OTHER_ENVIRONMENT is unset: on a
+    single-environment install there is no second environment to name, and a
+    probe aimed at an invented one is the vacuous version PORTH-598 objected to.
+    """
+    from porth_common.context import build_envelope
+
+    other = os.environ.get("OTHER_ENVIRONMENT", "").strip()
+
+    print("\n" + "=" * 72)
+    print("STAGE C — the environment axis")
+    print("=" * 72)
+
+    if not other:
+        print("\n  SKIPPED — OTHER_ENVIRONMENT is not set.")
+        print("  This install serves one environment, so there is no real second")
+        print("  one to be refused. Set it to the other deployed environment")
+        print("  (e.g. porth-dau) to run this stage.")
+        return
+
+    _, environment, _, tenant_id = tenants[0]["pk"].split("#")
+    if other == environment:
+        fail(
+            f"OTHER_ENVIRONMENT is {other!r}, which is this environment.",
+            "It must name a DIFFERENT deployed environment, or the probe would",
+            "assert 'deny' against the one partition that must be allowed.",
+        )
+
+    client = boto3.client("lambda")
+
+    def probe(caller_environment: str, **args) -> dict:
+        envelope = build_envelope(
+            Caller(environment=caller_environment, tenant_id=tenant_id),
+            source_service="porth",
+            audience="ffug",
+            trace_id=f"ffug-proof-env-{caller_environment}",
+        )
+        response = client.invoke(
+            FunctionName=_env("FFUG_FUNCTION_ARN"),
+            Payload=json.dumps(
+                {
+                    "porth_context": envelope.to_payload_field(),
+                    "operation": "isolation_probe",
+                    "payload": args,
+                }
+            ).encode(),
+        )
+        if response.get("FunctionError"):
+            fail(
+                "ffug raised on isolation_probe: "
+                f"{response['Payload'].read().decode()[:600]}"
+            )
+        body = json.loads(response["Payload"].read())
+        if not body.get("ok"):
+            fail(f"ffug refused isolation_probe: {body.get('error')}")
+        return body
+
+    # ── C1 — this environment's credentials, aimed at a REAL other one ────────
+    print(f"\n  C1 — {environment} credentials against ENV#{other}#TENANT#{tenant_id}")
+    own = probe(environment, probe_environment=other)
+
+    named = [a for a in own["attempts"] if "a real environment" in a["attempt"]]
+    if not named:
+        fail(
+            f"ffug ran no probe against {other}.",
+            "The function is older than PORTH-627 and ignores probe_environment,",
+            "so this stage would pass without asking the question.",
+        )
+    row = named[0]
+    print(f"    {row['attempt']}")
+    print(f"    outcome: {row['outcome']}   allowed: {row['allowed']}")
+    if row["allowed"]:
+        fail(
+            f"{environment}'s credentials READ {other}'s partition.",
+            "The session policy is not narrowing on $env. Every environment on",
+            "this install can read every other one's rows for the same tenant.",
+        )
+    if not own["isolated"]:
+        failed = [a["attempt"] for a in own["attempts"] if not a["pass"]]
+        fail(f"the probe strip did not pass as a whole: {failed}")
+
+    # ── C2 — an envelope for the OTHER environment, served and narrowed ───────
+    #
+    # Deliberately NOT a refusal. With the pin gone there is no
+    # expected_environment to compare against, so this ingress serves a
+    # foreign-environment envelope — narrowed to that environment. That is the
+    # design (PORTH-627), not a leak: the claim is signed, and the narrowing
+    # follows the claim rather than the function it arrived at.
+    print(f"\n  C2 — an envelope minted for {other}, presented to {environment}'s ffug")
+    foreign = probe(other)
+
+    print(f"    served, and reports environment: {foreign['environment']}")
+    if foreign["environment"] != other:
+        fail(
+            f"ffug narrowed to {foreign['environment']!r}, not the envelope's {other!r}.",
+            "The environment is being taken from the function's configuration",
+            "rather than from the signed claim — which is the pin PORTH-627",
+            "removed, still in effect somewhere.",
+        )
+    if not foreign["isolated"]:
+        failed = [a["attempt"] for a in foreign["attempts"] if not a["pass"]]
+        fail(f"narrowed to {other}, but the probe strip did not pass: {failed}")
+
+    print(f"\n  -> {environment} cannot read {other}'s rows for the same tenant,")
+    print(f"     and an envelope for {other} is served narrowed to {other}.")
+
+
 def main() -> None:
     active = stage_a()
     if not active:
         fail("no active tenants to call.")
     stage_b(active)
+    stage_c(active)
 
     print("\n" + "=" * 72)
     print("PROVEN")
@@ -241,6 +385,8 @@ def main() -> None:
     print("  A. The bus created each tenant in ffug's table, with its own prime.")
     print("  B. A synchronous call returns that tenant's digest, and two tenants")
     print("     disagree on an identical payload.")
+    print("  C. An environment's credentials are refused another environment's")
+    print("     rows for the same tenant, and an envelope narrows to its claim.")
     print("\n  NOT proven here: that ffug CANNOT reach another tenant's prime.")
     print("  That is the cross-tenant denial (UAT-3) and needs its own change —")
     print("  assume FfugTenantRole under tenant A's session policy, read B's row,")
