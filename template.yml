@@ -1586,6 +1586,13 @@ Resources:
             AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
             CachedMethods: [GET, HEAD]
             Compress: true
+            # For the header, not the strip (PORTH-627). These paths reach the
+            # same authorizer, which needs the environment on every request —
+            # the login exchange included, since the session it writes is what
+            # later requests present. The function leaves /auth/* URIs alone.
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt PorthApiPathStripFunction.FunctionMetadata.FunctionARN
           # PORTH-531 — the API must be same-origin too, not only /auth/*.
           #
           # A credentialed cross-origin call to the Porth API can never pass the
@@ -1636,6 +1643,12 @@ Resources:
             AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
             CachedMethods: [GET, HEAD]
             Compress: true
+            # Same reason as /auth/* above: the sample API is guarded by Porth's
+            # authorizer, so it resolves an environment per request like any
+            # other. Its URIs pass through unchanged.
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt PorthApiPathStripFunction.FunctionMetadata.FunctionARN
         Origins:
           - Id: S3Origin
             DomainName: !GetAtt AdminUIBucket.RegionalDomainName
@@ -1692,13 +1705,41 @@ Resources:
       Name: !Sub ems-admin-strip-${EnvironmentSlot}
       AutoPublish: true
       FunctionConfig:
-        Comment: Strip the /porth prefix before forwarding to the Porth API origin
+        Comment: Name this distribution's environment, and strip the /porth prefix
         Runtime: cloudfront-js-2.0
-      FunctionCode: |
+      # Two jobs, and the header is the one that is load-bearing (PORTH-627).
+      #
+      # Unpinned, Porth's authorizer resolves the ADR-Z8 environment from the BFF
+      # session or this header, and RAISES if it gets neither — it does not
+      # derive it from the host. The session cannot carry it: the resolver that
+      # builds a session sees only the ID token's claims, so it writes
+      # `environment: ""` and says so. And the admin SPA does not send it.
+      #
+      # So the edge does. It is the right place and not a workaround: one
+      # distribution serves exactly one environment, so the value is known when
+      # this is deployed and cannot disagree with the host the viewer typed. The
+      # same shape as Elegans' rewrite, which injects x-porth-forwarded-host
+      # here for the proxy's redirect_uri.
+      #
+      # Attached to all three API behaviours. `/porth/*` is the only one whose
+      # path is rewritten, which is why the strip is guarded rather than
+      # unconditional — on /auth/* and /sample/* it must be a no-op.
+      FunctionCode: !Sub |
         function handler(event) {
           var request = event.request;
-          request.uri = request.uri.replace(/^\/porth/, '');
-          if (request.uri === '') { request.uri = '/'; }
+
+          // The ADR-Z8 environment this distribution serves. Substituted at
+          // deploy time; the other environment's distribution carries its own.
+          request.headers['x-porth-environment'] = { value: '${EnvironmentSlot}' };
+
+          // Strip the /porth routing prefix so the Porth API sees its native
+          // paths (/users/me, not /porth/users/me). Guarded: this function is
+          // attached to behaviours whose paths must pass through untouched.
+          if (request.uri === '/porth' || request.uri === '/porth/') {
+            request.uri = '/';
+          } else if (request.uri.startsWith('/porth/')) {
+            request.uri = request.uri.slice(6);
+          }
           return request;
         }
 
