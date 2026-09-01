@@ -220,7 +220,7 @@ def test_the_session_policy_fits_inside_the_sts_ceiling(resources):
     table ARN on top, so the headroom is worth asserting rather than assuming."""
     document = resources["FfugSessionPolicy"]["Properties"]["Value"]["Sub"]
     rendered = document.replace(
-        "${FfugTable.Arn}", "arn:aws:dynamodb:eu-west-2:000000000000:table/porth-ffug-dev"
+        "${FfugTable.Arn}", "arn:aws:dynamodb:eu-west-2:000000000000:table/ems-ffug-porth-sample"
     )
 
     assert len(rendered) < 2048, len(rendered)

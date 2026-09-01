@@ -6,12 +6,6 @@ Description: >
   Deploys a React SPA to S3/CloudFront backed by the Porth API.
 
 Parameters:
-  Environment:
-    Type: String
-    Default: dev
-    AllowedValues: [dev, staging, prod]
-    Description: Deployment environment
-
   PorthApiUrl:
     Type: String
     Description: >
@@ -102,22 +96,37 @@ Parameters:
       logs are world-readable (PORTH-533) and that rule is asserted by a test,
       not left to the level.
 
-  PorthEnvSlot:
+  EnvironmentSlot:
     Type: String
-    Default: prod
+    Default: porth-sample
+    AllowedPattern: '[a-z][a-z0-9-]*'
     Description: >-
-      The ADR-Z8 slot this install is pinned to — EMS's FixedEnvironment, which
-      is what Porth puts in the porth-env session tag. Deliberately NOT
-      PorthEnvironment below: that one suffixes table names (porth-sample-app-dev)
-      and this one scopes identities (ENV#prod#…). They differ in EMS, and
-      conflating them silently scopes a policy to a slot that never appears in a
-      tag.
+      The ADR-Z8 environment this deployment answers for, and **the label in the
+      domain**: porth-sample.ems.estynsoftware.cloud is this environment, and a
+      tenant of it is acme.porth-sample.ems.estynsoftware.cloud.
 
-      Two readers now: the session-tag condition below, and ffug's
-      PORTH_FIXED_ENVIRONMENT (PORTH-587) — the value an inbound context
-      envelope is checked against. deploy.yml resolves it from the Porth stack
-      rather than defaulting, because both readers fail silently when it is
-      wrong.
+      It names EVERY resource this stack deploys, scopes every identity
+      (ENV#porth-sample#…), and is what Porth puts in the porth-env session tag.
+      One deployment per environment; EMS is not Porth, so these resources carry
+      an ems- prefix (PORTH-627).
+
+      Formerly PorthEnvSlot, and formerly `prod` — which was neither the domain
+      label nor anything Porth called it, so the deployed name and the partition
+      key disagreed with the URL a tenant typed. They agree now.
+
+      Two other parameters said "environment" and meant something else, and
+      both are gone because this one absorbed their readers:
+
+        PorthEnvironment (`dev`) suffixed table names with a value that was NOT
+        the environment. Tables are per environment now, so it has no reader.
+
+        Environment (`dev|staging|prod`) named only the admin UI's bucket, OAC
+        and CloudFront function. Those had to become per-environment anyway —
+        two stacks in one account collide on a bucket name — so it collapsed
+        into this rather than being a fourth word for one axis.
+
+      Two axes remain, which is the point: PorthBranch addresses configuration
+      (/porth/{branch}/…), this addresses everything else.
 
   SampleApiDomainName:
     Type: String
@@ -128,14 +137,6 @@ Parameters:
       and the execute-api hostname it used to send carries the API id, so a
       binding keyed on it breaks silently the moment the API is replaced.
       Covered by the wildcard in CloudFrontAlias.
-
-  PorthEnvironment:
-    Type: String
-    Default: dev
-    AllowedValues: [dev, staging, prod]
-    Description: >
-      Environment name passed to Lambda functions as PORTH_ENVIRONMENT.
-      Used to resolve DynamoDB table names (e.g. porth-sample-app-dev).
 
   UatRunnerComponentsRepo:
     Type: String
@@ -270,7 +271,7 @@ Resources:
   SampleAppTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub porth-sample-app-${PorthEnvironment}
+      TableName: !Sub ems-sample-app-${EnvironmentSlot}
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: pk
@@ -370,11 +371,12 @@ Resources:
   # below: same account, so a resource-based grant stands on its own.
   #
   # The name is composed by the index from ${role_type}, so it has to match
-  # porth-sample-app-{role_type}-{env}.
+  # ems-sample-app-{role_type}-{env} — see deploy/porth/session-policy/
+  # index.template.json, which composes it and must be renamed in step.
   SampleAppTenantRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub porth-sample-app-tenant-${PorthEnvironment}
+      RoleName: !Sub ems-sample-app-tenant-${EnvironmentSlot}
       Description: >-
         Assumed by Porth's authorizer for requests to the sample app's API.
         The CEILING: this app's table and nothing else. Which tenant a given
@@ -482,9 +484,9 @@ Resources:
   SampleAppSessionPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
-      ManagedPolicyName: !Sub porth-sample-app-tenant-session-${PorthEnvironment}
+      ManagedPolicyName: !Sub ems-sample-app-tenant-session-${EnvironmentSlot}
       Description: >-
-        Narrows an assumed porth-sample-app-tenant session to one tenant, via
+        Narrows an assumed ems-sample-app-tenant session to one tenant, via
         the session tags Porth attaches to every assume.
       PolicyDocument:
         Version: "2012-10-17"
@@ -527,20 +529,30 @@ Resources:
               # outright, which looks like what it is. Belt and braces where the
               # braces produce a better error.
               StringEquals:
-                aws:PrincipalTag/porth-env: !Ref PorthEnvSlot
+                aws:PrincipalTag/porth-env: !Ref EnvironmentSlot
 
   # API Gateway assumes this to call Porth's authorizer, which lives in another
   # stack. Scoped to that one function ARN and nothing else.
   SampleAppAuthorizerInvokeRole:
     Type: AWS::IAM::Role
     Properties:
-      # No RoleName on purpose. The CFN execution role scopes IAM to
-      # role/enterprise-membership-sample-* (see
-      # infra/receiving-account-templates/sample-app-deploy-role.yaml in
-      # Components), and every other role in this stack is CloudFormation-named,
-      # so it inherits the stack prefix and matches. An explicit name outside
-      # that prefix is denied at CREATE — and would have required widening a
-      # deliberately narrow IAM grant to add one role.
+      # No RoleName on purpose, and the reason is portability rather than a
+      # denial — the earlier wording here said otherwise and was wrong.
+      #
+      # Porth's receiving-account template (Components,
+      # infra/receiving-account-templates/sample-app-deploy-role.yaml) scopes
+      # IAM to role/enterprise-membership-sample-*, so an account installed from
+      # it can only create roles a CloudFormation-generated name matches. THIS
+      # account is not that account: sample-app-deploy-role's managed policy
+      # grants iam:* on role/* (verified 2026-09-01), and the workflow passes no
+      # --role-arn, so CloudFormation runs as the deploy role and the execution
+      # role's narrow grant never applies. Nothing here is denied at CREATE.
+      #
+      # Leave it unnamed anyway. It keeps this template deployable into a
+      # receiving account that DID follow the vendor's grant, which is the whole
+      # claim EMS exists to make. SampleAppTenantRole below is named, because
+      # the session-policy index composes its ARN from a string and has to be
+      # able to predict it — that one is a deliberate exception, not the rule.
       #
       # Nothing refers to this role by name; the API references it by ARN.
       AssumeRolePolicyDocument:
@@ -564,7 +576,7 @@ Resources:
   SampleAppFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: !Sub porth-sample-app-${PorthEnvironment}
+      FunctionName: !Sub ems-sample-app-${EnvironmentSlot}
       CodeUri: lambdas/
       Handler: sample_app.handler.handler
       Runtime: python3.12
@@ -572,7 +584,8 @@ Resources:
       MemorySize: 256
       Environment:
         Variables:
-          PORTH_ENVIRONMENT: !Ref PorthEnvironment
+          EMS_ENVIRONMENT_SLOT: !Ref EnvironmentSlot
+          SAMPLE_APP_TABLE_NAME: !Ref SampleAppTable
           AWS_ACCOUNT_ID: !Ref AWS::AccountId
           CLOUDFRONT_ALIAS: !Ref CloudFrontAlias
           # PORTH-622 — the app configured no level at all, so it inherited
@@ -586,7 +599,7 @@ Resources:
           #
           # `ffug`, and the app is not misdescribing itself (Richard,
           # 2026-08-27). There is ONE service here: ffug. The sample app is its
-          # front half and porth-sample-app-callback is its other ingress, both
+          # front half and ems-sample-app-callback is its other ingress, both
           # named in ffug's own document by direction. `sample-app` as a second
           # identity bought a second document, a second key and a hand-built
           # alias, to describe a party that was never separate.
@@ -611,7 +624,6 @@ Resources:
           # key verified are porth_common's lines, and a per-package logger
           # means this app's level does not reach them.
           PORTH_COMMON_LOG_LEVEL: !Ref PorthCommonLogLevel
-          PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
           # No signing-key variable (PORTH-623, 2026-08-25). What this function
           # signs requests with comes from its own trust document at
           # /porth/{branch}/services/{PORTH_SERVICE_ID}, by direction.
@@ -796,7 +808,7 @@ Resources:
   SampleAppCallbackFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: !Sub porth-sample-app-callback-${PorthEnvironment}
+      FunctionName: !Sub ems-sample-app-callback-${EnvironmentSlot}
       CodeUri: lambdas/
       Handler: sample_app_callback.handler.handler
       Runtime: python3.12
@@ -813,15 +825,15 @@ Resources:
           # Which is why this ingress being ffug is not a relabelling. ffug's
           # document points the RESPONSE direction here, so a completion
           # addressed to ffug arrives at this function while a request to ffug
-          # goes to porth-ffug-{env} — one service, two addresses, said once.
+          # goes to ems-ffug-{env} — one service, two addresses, said once.
           PORTH_SERVICE_ID: ffug
           PORTH_BRANCH: !Ref PorthBranch
           # PORTH-623 — the library's own level. Which key signed and which
           # key verified are porth_common's lines, and a per-package logger
           # means this app's level does not reach them.
           PORTH_COMMON_LOG_LEVEL: !Ref PorthCommonLogLevel
-          PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
-          PORTH_ENVIRONMENT: !Ref PorthEnvironment
+          EMS_ENVIRONMENT_SLOT: !Ref EnvironmentSlot
+          SAMPLE_APP_TABLE_NAME: !Ref SampleAppTable
           PORTH_SERVICE_DATA_IDENTITY: !GetAtt SampleAppTenantRole.Arn
           # Derived from the parameter's own name rather than spelled again —
           # the two cannot disagree about which document is being asked for.
@@ -833,7 +845,7 @@ Resources:
   SampleAppEventConsumerFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: !Sub porth-sample-app-events-${PorthEnvironment}
+      FunctionName: !Sub ems-sample-app-events-${EnvironmentSlot}
       CodeUri: lambdas/
       Handler: sample_app_events.handler.handler
       Runtime: python3.12
@@ -841,7 +853,15 @@ Resources:
       MemorySize: 128
       Environment:
         Variables:
-          PORTH_ENVIRONMENT: !Ref PorthEnvironment
+          EMS_ENVIRONMENT_SLOT: !Ref EnvironmentSlot
+          SAMPLE_APP_TABLE_NAME: !Ref SampleAppTable
+          # Explicit, and it was not before (PORTH-627). This function carried
+          # PORTH_ENVIRONMENT and no PORTH_BRANCH, and porth-common resolves the
+          # branch as `PORTH_BRANCH or PORTH_ENVIRONMENT` — so the old variable
+          # was silently doing two jobs here. Removing it would have dropped this
+          # function onto the library's `dev` default, which is correct today and
+          # for no stated reason.
+          PORTH_BRANCH: !Ref PorthBranch
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref SampleAppTable
@@ -854,6 +874,13 @@ Resources:
                 - porth.components
               detail-type:
                 - EntityEvent
+              # Same reasoning as the tenant-lifecycle rule below: `environment`
+              # is top-level on this detail too (claim_resolver publishes it),
+              # and without the filter a login in one environment would write a
+              # user row into the other environment's table.
+              detail:
+                environment:
+                  - !Ref EnvironmentSlot
 
   # ── ffug — deliberately dumb consuming service (ADR-Z11 PORTH-555) ───────
   # A test fixture, not a product. Echo-with-storage only; see lambdas/ffug/README.md
@@ -862,7 +889,7 @@ Resources:
   FfugTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub porth-ffug-${PorthEnvironment}
+      TableName: !Sub ems-ffug-${EnvironmentSlot}
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: pk
@@ -944,9 +971,9 @@ Resources:
   # caller — applied here by the service to itself, because on the internal
   # plane there was no authorizer to do it.
   #
-  # Unnamed, like every other role in this stack: the CFN execution role scopes
-  # IAM to role/enterprise-membership-sample-*, which a CloudFormation-generated
-  # name inherits and an explicit one would not.
+  # Unnamed, like every other role in this stack except SampleAppTenantRole.
+  # For portability, not because this account would refuse a name — see the
+  # longer note on SampleAppAuthorizerInvokeRole above.
   FfugTenantRole:
     Type: AWS::IAM::Role
     Properties:
@@ -1079,7 +1106,7 @@ Resources:
   FfugFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: !Sub porth-ffug-${PorthEnvironment}
+      FunctionName: !Sub ems-ffug-${EnvironmentSlot}
       CodeUri: lambdas/
       Handler: ffug.handler.handler
       Runtime: python3.12
@@ -1091,15 +1118,19 @@ Resources:
       Environment:
         Variables:
           # The two axes, kept apart on purpose. PORTH_BRANCH addresses
-          # configuration; PORTH_FIXED_ENVIRONMENT addresses data. They hold
-          # different values on this install.
+          # CONFIGURATION — which /porth/{branch}/… tree this reads.
+          # EMS_ENVIRONMENT_SLOT addresses DATA and names every resource.
+          #
+          # PORTH_FIXED_ENVIRONMENT is gone (PORTH-627). It pinned this install
+          # to one slot, and this install now serves several. Its absence IS the
+          # mode: with nothing to compare against, verify_envelope performs no
+          # environment check and the signed claim scopes the data instead.
           PORTH_BRANCH: !Ref PorthBranch
           # PORTH-623 — the library's own level. Which key signed and which
           # key verified are porth_common's lines, and a per-package logger
           # means this app's level does not reach them.
           PORTH_COMMON_LOG_LEVEL: !Ref PorthCommonLogLevel
-          PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
-          PORTH_ENVIRONMENT: !Ref PorthEnvironment
+          EMS_ENVIRONMENT_SLOT: !Ref EnvironmentSlot
           # This service's registered identity — the audience it will accept in
           # a context token. Unset, the Director refuses every internal call
           # rather than skipping the audience check.
@@ -1163,7 +1194,7 @@ Resources:
   FfugLifecycleFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: !Sub porth-ffug-lifecycle-${PorthEnvironment}
+      FunctionName: !Sub ems-ffug-lifecycle-${EnvironmentSlot}
       CodeUri: lambdas/
       Handler: ffug.lifecycle.handler
       Runtime: python3.12
@@ -1177,7 +1208,7 @@ Resources:
           # key verified are porth_common's lines, and a per-package logger
           # means this app's level does not reach them.
           PORTH_COMMON_LOG_LEVEL: !Ref PorthCommonLogLevel
-          PORTH_ENVIRONMENT: !Ref PorthEnvironment
+          EMS_ENVIRONMENT_SLOT: !Ref EnvironmentSlot
           FFUG_TABLE_NAME: !Ref FfugTable
           # The consumer reads the same variable, so one parameter turns up both
           # halves of ffug. Its debug lines are where a projection that never
@@ -1204,6 +1235,27 @@ Resources:
                 - tenant.suspended
                 - tenant.reactivated
                 - tenant.deleted
+              # THE environment filter (PORTH-627), and it is load-bearing now.
+              #
+              # This rule had none, which was harmless while one table was
+              # shared. It is not harmless with a table per environment: every
+              # deployment's consumer would receive every environment's events,
+              # so ems-ffug-porth-sample would ingest a porth-dau tenant.created
+              # and write ENV#porth-dau#TENANT#… into PORTH-SAMPLE's table.
+              #
+              # `environment` is a top-level detail key on the v1 contract and
+              # is always present (PORTH-503), so this filter is exact rather
+              # than best-effort. On a single-environment install it is "" —
+              # which is why the pin has to come off before this can match.
+              #
+              # Tempting to leave it off so the isolation probe has real foreign
+              # rows to be denied. Resist it: IAM refuses on the KEY, before any
+              # data is consulted, so the probe is exactly as conclusive against
+              # an empty partition. Real rows would buy nothing and leave each
+              # table quietly wrong.
+              detail:
+                environment:
+                  - !Ref EnvironmentSlot
 
   # ── ffug's async half (PORTH-620) ────────────────────────────────────────
   #
@@ -1218,7 +1270,7 @@ Resources:
   FfugWorkQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: !Sub porth-ffug-work-${PorthEnvironment}
+      QueueName: !Sub ems-ffug-work-${EnvironmentSlot}
       # Comfortably above the worker's 60s timeout. Shorter and a slow record is
       # redelivered while the first attempt is still running, which looks like
       # duplicate work and is really a misconfigured timeout.
@@ -1233,7 +1285,7 @@ Resources:
   FfugWorkDeadLetterQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: !Sub porth-ffug-work-dlq-${PorthEnvironment}
+      QueueName: !Sub ems-ffug-work-dlq-${EnvironmentSlot}
       # Longer than the source queue: the whole point is that something survives
       # long enough for a person to look at it.
       MessageRetentionPeriod: 1209600 # 14 days
@@ -1306,7 +1358,7 @@ Resources:
   FfugWorkerFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: !Sub porth-ffug-worker-${PorthEnvironment}
+      FunctionName: !Sub ems-ffug-worker-${EnvironmentSlot}
       CodeUri: lambdas/
       Handler: ffug.worker.handler
       Runtime: python3.12
@@ -1320,8 +1372,7 @@ Resources:
           # key verified are porth_common's lines, and a per-package logger
           # means this app's level does not reach them.
           PORTH_COMMON_LOG_LEVEL: !Ref PorthCommonLogLevel
-          PORTH_FIXED_ENVIRONMENT: !Ref PorthEnvSlot
-          PORTH_ENVIRONMENT: !Ref PorthEnvironment
+          EMS_ENVIRONMENT_SLOT: !Ref EnvironmentSlot
           PORTH_SERVICE_ID: ffug
           PORTH_SERVICE_DATA_IDENTITY: !GetAtt FfugTenantRole.Arn
           PORTH_SERVICE_DATA_SCOPE: !Select [4, !Split ["/", !Ref FfugSessionPolicy]]
@@ -1433,7 +1484,7 @@ Resources:
   AdminUIBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub porth-admin-ui-${Environment}-${AWS::AccountId}
+      BucketName: !Sub ems-admin-ui-${EnvironmentSlot}-${AWS::AccountId}
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -1462,7 +1513,7 @@ Resources:
     Type: AWS::CloudFront::OriginAccessControl
     Properties:
       OriginAccessControlConfig:
-        Name: !Sub porth-admin-oac-${Environment}
+        Name: !Sub ems-admin-oac-${EnvironmentSlot}
         OriginAccessControlOriginType: s3
         SigningBehavior: always
         SigningProtocol: sigv4
@@ -1475,7 +1526,7 @@ Resources:
         Enabled: true
         HttpVersion: http2
         IPV6Enabled: true
-        Comment: !Sub Porth Admin UI - ${Environment}
+        Comment: !Sub EMS Admin UI - ${EnvironmentSlot}
         Aliases:
           - !Ref CloudFrontAlias
           - !Ref CloudFrontApexAlias
@@ -1535,6 +1586,13 @@ Resources:
             AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
             CachedMethods: [GET, HEAD]
             Compress: true
+            # For the header, not the strip (PORTH-627). These paths reach the
+            # same authorizer, which needs the environment on every request —
+            # the login exchange included, since the session it writes is what
+            # later requests present. The function leaves /auth/* URIs alone.
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt PorthApiPathStripFunction.FunctionMetadata.FunctionARN
           # PORTH-531 — the API must be same-origin too, not only /auth/*.
           #
           # A credentialed cross-origin call to the Porth API can never pass the
@@ -1585,6 +1643,12 @@ Resources:
             AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
             CachedMethods: [GET, HEAD]
             Compress: true
+            # Same reason as /auth/* above: the sample API is guarded by Porth's
+            # authorizer, so it resolves an environment per request like any
+            # other. Its URIs pass through unchanged.
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt PorthApiPathStripFunction.FunctionMetadata.FunctionARN
         Origins:
           - Id: S3Origin
             DomainName: !GetAtt AdminUIBucket.RegionalDomainName
@@ -1638,16 +1702,44 @@ Resources:
   PorthApiPathStripFunction:
     Type: AWS::CloudFront::Function
     Properties:
-      Name: !Sub porth-admin-porth-strip-${Environment}
+      Name: !Sub ems-admin-strip-${EnvironmentSlot}
       AutoPublish: true
       FunctionConfig:
-        Comment: Strip the /porth prefix before forwarding to the Porth API origin
+        Comment: Name this distribution's environment, and strip the /porth prefix
         Runtime: cloudfront-js-2.0
-      FunctionCode: |
+      # Two jobs, and the header is the one that is load-bearing (PORTH-627).
+      #
+      # Unpinned, Porth's authorizer resolves the ADR-Z8 environment from the BFF
+      # session or this header, and RAISES if it gets neither — it does not
+      # derive it from the host. The session cannot carry it: the resolver that
+      # builds a session sees only the ID token's claims, so it writes
+      # `environment: ""` and says so. And the admin SPA does not send it.
+      #
+      # So the edge does. It is the right place and not a workaround: one
+      # distribution serves exactly one environment, so the value is known when
+      # this is deployed and cannot disagree with the host the viewer typed. The
+      # same shape as Elegans' rewrite, which injects x-porth-forwarded-host
+      # here for the proxy's redirect_uri.
+      #
+      # Attached to all three API behaviours. `/porth/*` is the only one whose
+      # path is rewritten, which is why the strip is guarded rather than
+      # unconditional — on /auth/* and /sample/* it must be a no-op.
+      FunctionCode: !Sub |
         function handler(event) {
           var request = event.request;
-          request.uri = request.uri.replace(/^\/porth/, '');
-          if (request.uri === '') { request.uri = '/'; }
+
+          // The ADR-Z8 environment this distribution serves. Substituted at
+          // deploy time; the other environment's distribution carries its own.
+          request.headers['x-porth-environment'] = { value: '${EnvironmentSlot}' };
+
+          // Strip the /porth routing prefix so the Porth API sees its native
+          // paths (/users/me, not /porth/users/me). Guarded: this function is
+          // attached to behaviours whose paths must pass through untouched.
+          if (request.uri === '/porth' || request.uri === '/porth/') {
+            request.uri = '/';
+          } else if (request.uri.startsWith('/porth/')) {
+            request.uri = request.uri.slice(6);
+          }
           return request;
         }
 

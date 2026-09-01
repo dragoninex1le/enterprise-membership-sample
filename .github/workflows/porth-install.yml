@@ -20,9 +20,15 @@ name: Porth components — install + upgrade
 # A change-set inspection step aborts before execute if the change set would
 # Remove or Replace any DynamoDB table (ADR-Z1/Z2 — DDB safety).
 #
-# PORTH-530 — environment model: EMS is a SINGLE-environment instance (no slots), so
-# FixedEnvironment=prod. This turns on the ADR-Z8 `ENV#prod#` partition-key prefix
-# for all Porth data.
+# PORTH-627 — environment model: EMS runs SEVERAL ADR-Z8 environments, so
+# FixedEnvironment is EMPTY. Each one is a label in the domain and a deployment of
+# its own — porth-sample.ems.… is where main lands, porth-dau.ems.… is the working
+# environment — and every partition key is prefixed ENV#{that environment}#.
+#
+# It was `prod` and single-environment (PORTH-530). That is the value that made the
+# deployed names disagree with the URL a tenant types, and it is why the multiple-
+# environment access path — the one Elegans has always run — was asserted by unit
+# tests here and witnessed by nothing.
 #
 # PORTH-557 (SAR 0.2.0): the EnvironmentMode parameter is GONE. A non-empty
 # FixedEnvironment *is* single mode; empty is multi. The two can no longer
@@ -114,7 +120,7 @@ jobs:
     # Passed to the bootstrap job, which runs under its own role on a fresh runner and so
     # cannot see anything this job put in GITHUB_ENV.
     outputs:
-      env_scope: ${{ steps.tables.outputs.env_scope }}
+      env_scopes: ${{ steps.tables.outputs.env_scopes }}
       tenants_table: ${{ steps.tables.outputs.tenants_table }}
       permissions_table: ${{ steps.tables.outputs.permissions_table }}
       roles_table: ${{ steps.tables.outputs.roles_table }}
@@ -139,7 +145,10 @@ jobs:
           echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
           echo "EFF_SAR_APP_ID=${{ inputs.sar_app_id || 'arn:aws:serverlessrepo:us-east-1:084847995635:applications/porth-user-management' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
-          echo "EFF_FIXED_ENV=${{ inputs.fixed_environment || 'prod' }}" >> "$GITHUB_ENV"
+          # Empty by default, and empty IS the mode (PORTH-557): a non-empty
+          # FixedEnvironment pins every envelope to one slot. An input can still
+          # pin an install deliberately; nothing here should.
+          echo "EFF_FIXED_ENV=${{ inputs.fixed_environment || '' }}" >> "$GITHUB_ENV"
           echo "EFF_LOG_LEVEL=${{ inputs.log_level || 'INFO' }}" >> "$GITHUB_ENV"
 
       - name: Configure AWS credentials (OIDC)
@@ -173,7 +182,11 @@ jobs:
           DNS_ZONE_VAR: ${{ vars.DNS_ZONE }}
           SPA_ORIGINS_VAR: ${{ vars.PORTH_SPA_ORIGINS }}
           ROOT_URL_VAR: ${{ vars.PORTH_ROOT_URL }}
-          ENVIRONMENTS_VAR: ${{ vars.PORTH_AUTH_ENVIRONMENTS }}
+          # The ADR-Z8 environments this install serves (PORTH-627). Defaulted
+          # rather than required, so the environments EMS actually deploys are
+          # written down in the repo instead of in repository settings; the
+          # variable still overrides.
+          ENVIRONMENTS_VAR: ${{ vars.PORTH_AUTH_ENVIRONMENTS || 'porth-sample,porth-dau' }}
         run: |
           set -euo pipefail
           APP_ARN="${{ env.EFF_SAR_APP_ID }}"
@@ -613,8 +626,24 @@ jobs:
 
           # Step outputs for the bootstrap job — different role, fresh runner, so GITHUB_ENV
           # does not reach it.
+          # One scope per ADR-Z8 environment (PORTH-627). This was
+          # EFF_FIXED_ENV, a single pinned slot; with the pin gone that is empty
+          # and the platform tenant would be written under ENV##… — a key the
+          # authorizer never looks for, so no operator could sign in anywhere.
+          #
+          # A JSON array because the bootstrap runs as a matrix over it: the
+          # platform tenant is per environment, like every other row.
+          if [ -z "${PORTH_AUTH_ENVIRONMENTS_RAW:-}" ]; then
+            echo "❌ No environments configured, so the platform tenant would be"
+            echo "❌ written nowhere and no operator could sign in to any"
+            echo "❌ environment. Set PORTH_AUTH_ENVIRONMENTS or take the default."
+            exit 1
+          fi
+          ENV_SCOPES=$(printf '%s' "$PORTH_AUTH_ENVIRONMENTS_RAW" \
+            | python3 -c 'import json,sys; print(json.dumps([e.strip() for e in sys.stdin.read().split(",") if e.strip()]))')
+
           {
-            echo "env_scope=${{ env.EFF_FIXED_ENV }}"
+            echo "env_scopes=${ENV_SCOPES}"
             echo "tenants_table=$TENANTS_TABLE"
             echo "permissions_table=$PERMISSIONS_TABLE"
             echo "roles_table=$ROLES_TABLE"
@@ -891,6 +920,25 @@ jobs:
         continue-on-error: true
         run: |
           ENV="${{ env.EFF_ENV_NAME }}"
+
+          # PORTH-627 — the second axis, and it is NOT this one. ENV is the
+          # configuration axis: it selects /porth/{branch}/… and names Porth's
+          # own roles, which Porth's stack deploys from its Environment
+          # parameter. ENV_SLOT is the ADR-Z8 environment: it names EMS's
+          # resources, which the sample-app stack deploys from EnvironmentSlot.
+          #
+          # They were one placeholder while both read `dev`. EMS's roles are now
+          # ems-sample-app-tenant-porth-sample and Porth's are still
+          # porth-tenant-dev, so one value cannot render both — the authorizer
+          # would assume a role that does not exist and every request would fail
+          # at the assume, not at anything that names the mistake.
+          # Every ADR-Z8 environment this install serves. The session-policy
+          # index needs one rule and one binding per environment, because the
+          # authorizer substitutes ${role_type}, {account} and {region} into a
+          # role ARN and NOTHING else — there is no $env, so one binding cannot
+          # answer for two.
+          ENV_SLOTS="${PORTH_AUTH_ENVIRONMENTS_RAW:-porth-sample}"
+
           # PORTH-598: payloads live in deploy/porth/ as reviewable JSON.
           ALLOW_ALL=$(cat deploy/porth/auth-policy/allow-all.json)
           INDEX=$(cat deploy/porth/auth-policy/index.json)
@@ -929,9 +977,14 @@ jobs:
           TEMPLATE_NAME="tenant-scoped-default"
           PLATFORM_TEMPLATE_NAME="platform-scoped-default"
 
-          # PORTH-514/530 — LeadingKeys must carry the ENV#$env# prefix. EMS pins
-          # FixedEnvironment, so every item is written under ENV#{slot}#…; the old
+          # PORTH-514/530 — LeadingKeys must carry the ENV#$env# prefix; the old
           # un-prefixed TENANT#$tenant / ORG#$org_id matched no key that exists.
+          #
+          # `$env` is substituted by the AUTHORIZER, per request, from the
+          # environment it resolved. That used to be the pinned slot and is now
+          # whichever environment the host belongs to (PORTH-627) — so this one
+          # template narrows correctly in every environment, and is the only
+          # thing separating them now that no envelope carries a pin.
           TENANT_SESSION_POLICY=$(cat deploy/porth/session-policy/tenant-scoped-default.json)
           aws ssm put-parameter \
             --name "/porth/${ENV}/auth-session-policy/${TEMPLATE_NAME}" \
@@ -972,7 +1025,12 @@ jobs:
           #
           # PORTH-576 — platform_paths selects the template for the platform-admin
           # role.
-          SESSION_INDEX=$(python3 deploy/porth/scripts/render.py deploy/porth/session-policy/index.template.json ENV="$ENV")
+          # compose_session_index.py, not render.py: the template describes ONE
+          # environment and this fans it out over ENV_SLOTS, preserving rule
+          # order so the `*` catch-all stays below the specific hosts.
+          SESSION_INDEX=$(python3 deploy/porth/scripts/compose_session_index.py \
+            deploy/porth/session-policy/index.template.json \
+            ENV="$ENV" ENVIRONMENTS="$ENV_SLOTS")
           aws ssm put-parameter \
             --name "/porth/${ENV}/auth-session-policy/index" \
             --value "$SESSION_INDEX" \
@@ -1021,7 +1079,8 @@ jobs:
             echo "- **Target version:** ${{ env.EFF_SAR_VERSION }}"
             echo "- **Stack:** ${{ env.EFF_STACK_NAME }}"
             echo "- **Environment param:** ${{ env.EFF_ENV_NAME }}"
-            echo "- **Env mode:** single (FixedEnvironment=\`${{ env.EFF_FIXED_ENV }}\`)"
+            echo "- **Env mode:** ${{ env.EFF_FIXED_ENV == '' && 'MULTI (FixedEnvironment empty)' || format('single (FixedEnvironment=`{0}`)', env.EFF_FIXED_ENV) }}"
+            echo "- **Environments:** ${PORTH_AUTH_ENVIRONMENTS_RAW:-'(none)'}"
             echo "- **Log level:** \`${{ env.EFF_LOG_LEVEL }}\` (authorizer + api + auth-proxy)"
             echo "- **Porth API URL:** ${PORTH_API_URL:-'(unresolved)'}"
             echo "- **Custom domain:** ${PORTH_DOMAIN:-'OFF (execute-api only)'}"
@@ -1040,10 +1099,22 @@ jobs:
     name: Bootstrap platform tenant
     needs: install-or-upgrade
     uses: ./.github/workflows/porth-bootstrap.yml
+    # Once per environment (PORTH-627). The platform tenant is a row like any
+    # other and rows are keyed ENV#{environment}#…, so an operator can only sign
+    # in to an environment whose platform tenant exists. One bootstrap left the
+    # second environment with no way in — and nothing to say so, because the
+    # authorizer simply fails to resolve a tenant.
+    #
+    # fail-fast off: the environments are independent, and one failing should
+    # not cancel a bootstrap that would have succeeded.
+    strategy:
+      fail-fast: false
+      matrix:
+        env_scope: ${{ fromJSON(needs.install-or-upgrade.outputs.env_scopes) }}
     with:
-      # ADR-Z8 (PORTH-532): the install pins FixedEnvironment, so the bootstrap must write
-      # ENV#{scope}#… or the authorizer will never resolve the platform tenant.
-      env_scope: ${{ needs.install-or-upgrade.outputs.env_scope }}
+      # ADR-Z8 (PORTH-532): rows are written ENV#{scope}#… or the authorizer
+      # will never resolve the platform tenant.
+      env_scope: ${{ matrix.env_scope }}
       tenants_table: ${{ needs.install-or-upgrade.outputs.tenants_table }}
       permissions_table: ${{ needs.install-or-upgrade.outputs.permissions_table }}
       roles_table: ${{ needs.install-or-upgrade.outputs.roles_table }}

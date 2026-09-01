@@ -2,7 +2,11 @@ name: Deploy Admin UI
 
 on:
   push:
-    branches: [main]
+    # Every branch, not just main (PORTH-627). main deploys porth-sample; any
+    # other branch deploys porth-dau, the working environment. Branches did not
+    # deploy at all before, so there was nowhere to exercise a change against a
+    # real Porth install except main.
+    branches: ['**']
   workflow_dispatch:
 
 # Serialise deploy runs per branch so concurrent runs don't race on the
@@ -18,9 +22,20 @@ on:
 # old one. The group had to change too: `deploy-${{ github.ref }}` is the same
 # string whatever the file is called, so a rename alone would have left new runs
 # queued behind the wedged one.
+#
+# Keyed on the ENVIRONMENT, not the ref (PORTH-627). On the ref, two branches
+# both targeting porth-dau would not serialise and would race on one stack,
+# while a branch deploy and a main deploy — two independent stacks — would
+# serialise for no reason.
+#
+# cancel-in-progress follows from what the environment is FOR. porth-dau is the
+# working environment and the latest push is what you want, so supersede.
+# porth-sample is what a merge lands in; a queued merge deploy must wait its
+# turn rather than be discarded, or main silently stops matching what is
+# deployed.
 concurrency:
-  group: deploy-sample-app-${{ github.ref }}
-  cancel-in-progress: true
+  group: deploy-sample-app-${{ github.ref == 'refs/heads/main' && 'porth-sample' || 'porth-dau' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   id-token: write
@@ -28,8 +43,13 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
-  ENVIRONMENT: dev
-  SAM_STACK_NAME: enterprise-membership-sample
+  # The ADR-Z8 environment this run deploys. Everything else that varies per
+  # environment — stack name, S3 prefix, three domain names, the certificate —
+  # is derived from it in the first step, so this is the only place the mapping
+  # from ref to environment is written down.
+  #
+  # `ENVIRONMENT: dev` used to sit here and was read by nothing.
+  ENVIRONMENT_SLOT: ${{ github.ref == 'refs/heads/main' && 'porth-sample' || 'porth-dau' }}
   NODE_VERSION: '20'
 
 jobs:
@@ -45,6 +65,44 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # ── everything this environment is called (PORTH-627) ───────────────────
+      #
+      # One environment per run. The slot comes from the ref (see the workflow
+      # env above); every name below is derived from it, so adding a third
+      # environment is a certificate and nothing here.
+      #
+      # The domain shape is {tenant}.{environment}.{root} — a tenant of this
+      # environment is acme.porth-sample.ems.estynsoftware.cloud — which is why
+      # the wildcard is per environment and cannot be shared.
+      - name: Resolve the environment from the ref
+        run: |
+          set -euo pipefail
+          SLOT="${{ env.ENVIRONMENT_SLOT }}"
+          ROOT="ems.estynsoftware.cloud"
+
+          # porth-sample keeps the unsuffixed stack name. Not cosmetic: that
+          # stack exists, and renaming it would build a second one beside it and
+          # strand the first — bucket, distribution and DNS records included.
+          if [ "$SLOT" = "porth-sample" ]; then
+            STACK="enterprise-membership-sample"
+          else
+            STACK="enterprise-membership-sample-${SLOT}"
+          fi
+
+          {
+            echo "SAM_STACK_NAME=${STACK}"
+            echo "SAMPLE_API_DOMAIN=sample-api.${SLOT}.${ROOT}"
+            echo "CLOUDFRONT_ALIAS=*.${SLOT}.${ROOT}"
+            echo "CLOUDFRONT_APEX=${SLOT}.${ROOT}"
+            echo "DNS_ROOT=${ROOT}."
+          } >> "$GITHUB_ENV"
+
+          echo "environment  : ${SLOT}"
+          echo "stack        : ${STACK}"
+          echo "apex         : ${SLOT}.${ROOT}"
+          echo "api          : sample-api.${SLOT}.${ROOT}"
+          echo "tenant hosts : *.${SLOT}.${ROOT}"
 
       - name: Set up Node.js ${{ env.NODE_VERSION }}
         uses: actions/setup-node@v4
@@ -67,7 +125,11 @@ jobs:
       - name: Validate required config
         run: |
           MISSING=()
-          [ -z "${{ vars.ACM_CERTIFICATE_ARN }}" ] && MISSING+=("ACM_CERTIFICATE_ARN (env var)")
+          # ACM_CERTIFICATE_ARN is no longer checked here (PORTH-627). It names
+          # ONE certificate and there is now one per environment, so the check
+          # would pass while the certificate was the wrong one. Resolved by
+          # domain after credentials instead, where a miss can say which
+          # certificate is absent.
           # PORTH-540: the GH_PAT check is gone. It was never used by this workflow, and its
           # only consumer anywhere in the repo was bootstrap.yml's `pip install git+https://…`,
           # which is deleted. Requiring a secret nothing reads just blocks deploys.
@@ -91,6 +153,44 @@ jobs:
       # question each time was "which role is this?".
       - name: Caller identity
         run: aws sts get-caller-identity
+
+      # ── the certificate for THIS environment's tenants ──────────────────────
+      #
+      # Resolved by domain rather than read from a variable. A variable holds one
+      # ARN, and a wildcard covers exactly one label — *.porth-sample.… does not
+      # match acme.porth-dau.… — so the two environments cannot share one.
+      #
+      # Looking it up means adding an environment needs a certificate and no
+      # repository settings change, and a missing one fails HERE naming the
+      # domain, rather than mid-deploy as a CloudFront alias rejection.
+      - name: Resolve the ACM certificate for this environment
+        run: |
+          set -euo pipefail
+          WANT="${{ env.CLOUDFRONT_ALIAS }}"
+
+          # us-east-1 regardless of AWS_REGION: CloudFront reads certificates
+          # only from there. It happens to be the same here, and stating it
+          # keeps that a fact rather than a coincidence.
+          ARN=$(aws acm list-certificates             --region us-east-1             --certificate-statuses ISSUED             --includes "extendedKeyUsage=TLS_WEB_SERVER_AUTHENTICATION"             --query "CertificateSummaryList[?DomainName=='${WANT}'].CertificateArn | [0]"             --output text 2>/dev/null || echo "None")
+
+          if [ -n "$ARN" ] && [ "$ARN" != "None" ]; then
+            echo "✅ certificate for ${WANT}"
+          elif [ "${{ env.ENVIRONMENT_SLOT }}" = "porth-sample" ] && [ -n "${{ vars.ACM_CERTIFICATE_ARN }}" ]; then
+            # The environment that predates the lookup. Its certificate was
+            # configured by hand and may not carry ${WANT} as its primary
+            # DomainName, so the variable stays authoritative for it alone.
+            ARN="${{ vars.ACM_CERTIFICATE_ARN }}"
+            echo "✅ certificate from ACM_CERTIFICATE_ARN (porth-sample)"
+          else
+            echo "❌ No ISSUED certificate in us-east-1 whose domain is ${WANT}."
+            echo "❌ Every tenant of ${{ env.ENVIRONMENT_SLOT }} is a label under"
+            echo "❌ ${{ env.CLOUDFRONT_APEX }}, so this environment needs its own"
+            echo "❌ wildcard — an existing one for another environment will not"
+            echo "❌ cover it, and CloudFront refuses the alias rather than"
+            echo "❌ serving the wrong name."
+            exit 1
+          fi
+          echo "ACM_CERTIFICATE_ARN_RESOLVED=$ARN" >> "$GITHUB_ENV"
 
       - name: Verify Porth components are deployed in EMS (pre-check)
         run: |
@@ -186,12 +286,31 @@ jobs:
               --output text
           }
           PORTH_BRANCH=$(get_param Environment)
-          PORTH_ENV_SLOT=$(get_param FixedEnvironment)
           PORTH_EVENT_BUS=$(get_output EventBusName)
+
+          # FixedEnvironment must be EMPTY, and its ABSENCE is what is checked
+          # (PORTH-627). This used to be read as the slot and required to be
+          # present — the opposite of what multiple environments need.
+          #
+          # Presence IS single-environment mode: porth-common pins every envelope
+          # it mints to that one slot and makes verify_envelope compare against
+          # it. A pinned install serves exactly one environment no matter how
+          # many stacks are deployed, and the second one fails at the receiver
+          # rather than anywhere that names the cause.
+          PORTH_FIXED_ENV=$(get_param FixedEnvironment)
+          if [ -n "$PORTH_FIXED_ENV" ] && [ "$PORTH_FIXED_ENV" != "None" ]; then
+            echo "❌ Porth is installed with FixedEnvironment=$PORTH_FIXED_ENV."
+            echo "❌ That pins every envelope to one ADR-Z8 slot, so this stack's"
+            echo "❌ environment (${{ env.ENVIRONMENT_SLOT }}) cannot be reached and"
+            echo "❌ its rows would be keyed under ENV#${PORTH_FIXED_ENV}# instead."
+            echo "❌"
+            echo "❌ Fix: re-run porth-install.yml, which now installs with"
+            echo "❌ FixedEnvironment empty (multi-environment mode, PORTH-557)."
+            exit 1
+          fi
 
           MISSING=()
           [ -z "$PORTH_BRANCH" ] || [ "$PORTH_BRANCH" == "None" ] && MISSING+=("Environment (stack parameter)")
-          [ -z "$PORTH_ENV_SLOT" ] || [ "$PORTH_ENV_SLOT" == "None" ] && MISSING+=("FixedEnvironment (stack parameter)")
           [ -z "$PORTH_EVENT_BUS" ] || [ "$PORTH_EVENT_BUS" == "None" ] && MISSING+=("EventBusName (stack output)")
           if [ ${#MISSING[@]} -gt 0 ]; then
             echo "❌ Could not resolve from $STACK: ${MISSING[*]}"
@@ -282,10 +401,9 @@ jobs:
 
           echo "PORTH_CONTEXT_KEY_ARN=$CONTEXT_KEY_ARN" >> $GITHUB_ENV
           echo "PORTH_BRANCH=$PORTH_BRANCH" >> $GITHUB_ENV
-          echo "PORTH_ENV_SLOT=$PORTH_ENV_SLOT" >> $GITHUB_ENV
           echo "PORTH_EVENT_BUS=$PORTH_EVENT_BUS" >> $GITHUB_ENV
           echo "✅ Porth branch (config axis) = $PORTH_BRANCH"
-          echo "✅ Porth slot   (data axis)   = $PORTH_ENV_SLOT"
+          echo "✅ Environment  (data axis)   = ${{ env.ENVIRONMENT_SLOT }} (from the ref)"
           echo "✅ Porth event bus            = $PORTH_EVENT_BUS"
 
       # ── The app's own permissions (PORTH-610) ────────────────────────────────
@@ -376,7 +494,7 @@ jobs:
           # on its own origin, which CloudFront routes to the app's API — the only
           # arrangement where the zone-scoped session cookie is actually sent.
           VITE_SAMPLE_APP_API_URL: ''
-          VITE_PLATFORM_APEX: porth-sample
+          VITE_PLATFORM_APEX: ${{ env.ENVIRONMENT_SLOT }}
 
       # ffug is a test fixture for ADR-Z11 (PORTH-555) — its own suite gates the
       # deploy that ships it. Scoped to ffug deliberately: this workflow had no
@@ -546,6 +664,20 @@ jobs:
             OPTIONAL+=("FfugRequestSigningKeyArn=${FFUG_REQUEST_KEY_ARN}")
           fi
 
+          # EnvironmentSlot and all three domain names come from one place —
+          # the ref, resolved in the first step — so they cannot disagree. They
+          # have to agree: the stack names every resource from the slot and a
+          # tenant reaches them at that host.
+          #
+          # This was PORTH_ENV_SLOT, read from the Porth install's
+          # FixedEnvironment (`prod`), which is the value that made the deployed
+          # names disagree with the URL a tenant types. It is also the value
+          # PORTH-627 empties to turn multi-environment mode on, so a stack
+          # cannot take its own identity from it.
+          #
+          # Keep comments OUT of the continued argument list below: the
+          # backslash-newlines are joined before `#` is read, so a comment there
+          # silently eats every argument after it.
           sam deploy \
             --stack-name ${{ env.SAM_STACK_NAME }} \
             --region ${{ env.AWS_REGION }} \
@@ -553,17 +685,15 @@ jobs:
             --resolve-s3 \
             --s3-prefix ${{ env.SAM_STACK_NAME }} \
             --parameter-overrides \
-              Environment=dev \
               PorthApiUrl=${{ env.PORTH_API_URL }} \
               PorthAuthorizerFunctionArn=${{ env.PORTH_AUTHORIZER_ARN }} \
               PorthAuthorizerFunctionRoleArn=${{ env.PORTH_AUTHORIZER_ROLE_ARN }} \
-              SampleApiDomainName='sample-api.porth-sample.ems.estynsoftware.cloud' \
-              PorthEnvSlot=${{ env.PORTH_ENV_SLOT }} \
-              AcmCertificateArn=${{ vars.ACM_CERTIFICATE_ARN }} \
-              CloudFrontAlias='*.porth-sample.ems.estynsoftware.cloud' \
-              CloudFrontApexAlias='porth-sample.ems.estynsoftware.cloud' \
-              PorthEnvironment=dev \
+              SampleApiDomainName=${{ env.SAMPLE_API_DOMAIN }} \
+              AcmCertificateArn=${{ env.ACM_CERTIFICATE_ARN_RESOLVED }} \
+              CloudFrontAlias='${{ env.CLOUDFRONT_ALIAS }}' \
+              CloudFrontApexAlias=${{ env.CLOUDFRONT_APEX }} \
               PorthBranch=${{ env.PORTH_BRANCH }} \
+              EnvironmentSlot=${{ env.ENVIRONMENT_SLOT }} \
               PorthEventBusName=${{ env.PORTH_EVENT_BUS }} \
               ${OPTIONAL[@]+"${OPTIONAL[@]}"} \
             --no-fail-on-empty-changeset
@@ -604,7 +734,7 @@ jobs:
             echo "## CloudFront Distribution"
             echo "- **Domain:** $CF_DOMAIN"
             echo "- **Distribution ID:** $CF_DIST_ID"
-            echo "- **Alias record needed:** porth-sample.ems.estynsoftware.cloud → $CF_DOMAIN"
+            echo "- **Alias record needed:** ${{ env.CLOUDFRONT_APEX }} → $CF_DOMAIN"
             echo "- **CloudFront Hosted Zone ID for Alias:** Z2FDTNDATAQYW2"
           } >> $GITHUB_STEP_SUMMARY
 
@@ -631,7 +761,7 @@ jobs:
           TARGET=$(get_output SampleApiDomainRegionalDomainName)
           TARGET_ZONE=$(get_output SampleApiDomainRegionalHostedZoneId)
           HOSTED_ZONE_ID=$(aws route53 list-hosted-zones-by-name \
-            --dns-name "ems.estynsoftware.cloud." \
+            --dns-name "${{ env.DNS_ROOT }}" \
             --query "HostedZones[0].Id" \
             --output text | sed 's|/hostedzone/||')
           echo "Upserting: $API_DOMAIN → $TARGET (HZ $HOSTED_ZONE_ID)"
@@ -654,7 +784,7 @@ jobs:
           echo "✅ Route 53 alias upserted: $API_DOMAIN → $TARGET"
 
       - name: Upsert Route 53 alias for CloudFront (apex)
-        # Creates/updates porth-sample.ems.estynsoftware.cloud → CloudFront
+        # Creates/updates {environment}.ems.estynsoftware.cloud → CloudFront
         # distribution on every deploy so the alias is always current even if
         # the distribution is recreated. Requires route53:ListHostedZonesByName,
         # route53:ChangeResourceRecordSets, route53:GetChange on sample-app-deploy-role.
@@ -665,17 +795,17 @@ jobs:
             --query "Stacks[0].Outputs[?OutputKey=='CloudFrontUrl'].OutputValue" \
             --output text | sed 's|https://||')
           HOSTED_ZONE_ID=$(aws route53 list-hosted-zones-by-name \
-            --dns-name "ems.estynsoftware.cloud." \
+            --dns-name "${{ env.DNS_ROOT }}" \
             --query "HostedZones[0].Id" \
             --output text | sed 's|/hostedzone/||')
-          echo "Upserting: porth-sample.ems.estynsoftware.cloud → $CF_DOMAIN (HZ $HOSTED_ZONE_ID)"
+          echo "Upserting: ${{ env.CLOUDFRONT_APEX }} → $CF_DOMAIN (HZ $HOSTED_ZONE_ID)"
           aws route53 change-resource-record-sets \
             --hosted-zone-id "$HOSTED_ZONE_ID" \
             --change-batch "{
               \"Changes\": [{
                 \"Action\": \"UPSERT\",
                 \"ResourceRecordSet\": {
-                  \"Name\": \"porth-sample.ems.estynsoftware.cloud\",
+                  \"Name\": \"${{ env.CLOUDFRONT_APEX }}\",
                   \"Type\": \"A\",
                   \"AliasTarget\": {
                     \"HostedZoneId\": \"Z2FDTNDATAQYW2\",
@@ -685,7 +815,7 @@ jobs:
                 }
               }]
             }"
-          echo "✅ Route 53 alias upserted: porth-sample.ems.estynsoftware.cloud → $CF_DOMAIN"
+          echo "✅ Route 53 alias upserted: ${{ env.CLOUDFRONT_APEX }} → $CF_DOMAIN"
 
       - name: Resolve stack outputs
         id: outputs
