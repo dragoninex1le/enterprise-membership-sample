@@ -430,7 +430,19 @@ jobs:
           export PORTH_PERMISSIONS_TABLE=$(get_output PermissionsTableName)
           export PORTH_ROLES_TABLE=$(get_output RolesTableName)
           export PORTH_TENANTS_TABLE=$(get_output TenantsTableName)
-          export PORTH_ENV_SCOPE="${{ vars.PORTH_ENV_SCOPE || 'prod' }}"
+          # The ADR-Z8 slot these permission rows are keyed under, and it is
+          # THIS deployment's environment (PORTH-627).
+          #
+          # It was `vars.PORTH_ENV_SCOPE || 'prod'` — one value for an axis that
+          # now has one per deployment. Both environments would have written to
+          # ENV#prod#, and neither environment's authorizer would have looked
+          # there: the app's pages 403 while Porth's logs stay clean, which is
+          # the same failure PORTH-609/610 recorded and the reason the block
+          # above resolves these tables rather than defaulting them.
+          #
+          # No variable override. A single one cannot answer for two
+          # environments, and setting it would quietly re-point both.
+          export PORTH_ENV_SCOPE="${{ env.ENVIRONMENT_SLOT }}"
 
           if [ -z "$PORTH_PERMISSIONS_TABLE" ] || [ "$PORTH_PERMISSIONS_TABLE" = "None" ]; then
             echo "::error::could not resolve Porth table names from $STACK."

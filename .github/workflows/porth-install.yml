@@ -74,9 +74,15 @@ on:
         required: false
         default: 'dev'
       fixed_environment:
-        description: 'ADR-Z8 environment slot this install is pinned to. Non-empty = single-environment mode.'
+        # EMPTY, and it has to be the INPUT's default rather than a fallback
+        # further down (PORTH-627). On workflow_dispatch GitHub fills an omitted
+        # input with its declared default, so `inputs.fixed_environment || ''`
+        # can never see an empty value while this says 'prod' — the install
+        # would quietly stay pinned and the sample-app deploy would keep failing
+        # its pin check, having just told the operator to re-run this.
+        description: 'ADR-Z8 slot to PIN this install to. Empty (the default) = multi-environment, which is what EMS runs.'
         required: false
-        default: 'prod'
+        default: ''
       api_domain_name:
         description: 'API Gateway custom domain FQDN. Blank = use the vars value.'
         required: false
