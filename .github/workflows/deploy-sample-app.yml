@@ -194,12 +194,36 @@ jobs:
             ARN="${{ vars.ACM_CERTIFICATE_ARN }}"
             echo "✅ certificate from ACM_CERTIFICATE_ARN (porth-sample)"
           else
-            echo "❌ No ISSUED certificate in us-east-1 whose domain is ${WANT}."
-            echo "❌ Every tenant of ${{ env.ENVIRONMENT_SLOT }} is a label under"
-            echo "❌ ${{ env.CLOUDFRONT_APEX }}, so this environment needs its own"
-            echo "❌ wildcard — an existing one for another environment will not"
-            echo "❌ cover it, and CloudFront refuses the alias rather than"
-            echo "❌ serving the wrong name."
+            # Say WHICH of the two it is. "Not issued yet" and "does not exist"
+            # need completely different actions, and the first message here
+            # asserted the second — telling someone to create a certificate
+            # that was sitting in front of them validating.
+            OTHER=$(aws acm list-certificates \
+              --region us-east-1 \
+              --query "CertificateSummaryList[${MATCH}].[CertificateArn,Status]" \
+              --output text 2>/dev/null || true)
+
+            if [ -n "$OTHER" ]; then
+              echo "❌ A certificate for ${WANT} EXISTS but is not usable yet:"
+              printf '❌   %s\n' "$OTHER"
+              echo "❌"
+              echo "❌ PENDING_VALIDATION means the DNS validation records are not"
+              echo "❌ in ${{ env.DNS_ROOT }} yet, or have not propagated. ACM"
+              echo "❌ publishes the CNAME to add; CloudFront will not accept the"
+              echo "❌ certificate until ACM issues it. Nothing to recreate — add"
+              echo "❌ the record, wait, and push again."
+            else
+              echo "❌ No certificate in us-east-1 matches ${WANT}, in any state."
+              echo "❌ Every tenant of ${{ env.ENVIRONMENT_SLOT }} is a label under"
+              echo "❌ ${{ env.CLOUDFRONT_APEX }}, so this environment needs its own"
+              echo "❌ wildcard — an existing one for another environment will not"
+              echo "❌ cover it, and CloudFront refuses the alias rather than"
+              echo "❌ serving the wrong name."
+              echo "❌"
+              echo "❌ If you believe you created one, check the REGION: CloudFront"
+              echo "❌ reads certificates only from us-east-1, and one issued"
+              echo "❌ elsewhere is invisible here however correct its domain."
+            fi
             exit 1
           fi
           echo "ACM_CERTIFICATE_ARN_RESOLVED=$ARN" >> "$GITHUB_ENV"
