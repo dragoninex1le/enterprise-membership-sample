@@ -28,6 +28,6 @@ fastapi==0.111.0
 # An older porth-common against this install would call KMS with no grant, look
 # under signing-keys/* for documents that no longer exist, deliver its callbacks
 # to the wrong function, and refuse the declaration this app now makes.
-porth-common>=0.0.16
+porth-common>=0.0.17
 mangum==0.17.0
 boto3>=1.34.0

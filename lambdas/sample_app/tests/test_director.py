@@ -428,15 +428,28 @@ def test_the_caller_carries_everything_the_internal_plane_reads():
         "PORTH_SERVICE_ID",
         # the CONFIGURATION axis — which /porth/{branch}/… documents to read
         "PORTH_BRANCH",
-        # the ADR-Z8 DATA axis — which slot the envelope is minted for
-        "PORTH_FIXED_ENVIRONMENT",
-        # the key mint_token describes, then signs with
     }
     missing = required - variables
     assert not missing, (
         f"SampleAppFunction is missing {sorted(missing)}. Each is read at a "
         f"different depth of one ServiceClient call, so the first to fail hides "
         f"the rest — which is why these cost four deploys to find individually."
+    )
+
+    # The other half of the same contract, and the reason this is not simply a
+    # shorter list than it was: PORTH_FIXED_ENVIRONMENT must be ABSENT.
+    #
+    # Its presence IS single-environment mode — porth-common pins every envelope
+    # to that one slot and makes verify_envelope compare against it. Set here, a
+    # deployment serving porth-dau would mint porth-sample envelopes, and the
+    # second environment becomes unreachable rather than broken. Nothing else
+    # fails, which is what makes it worth asserting: EMS runs two environments
+    # (PORTH-627) and the pin is how that silently stops being true.
+    assert "PORTH_FIXED_ENVIRONMENT" not in variables, (
+        "SampleAppFunction sets PORTH_FIXED_ENVIRONMENT. Presence is the mode, "
+        "not the value: this pins the app to a single ADR-Z8 slot and EMS now "
+        "deploys one stack per environment. The slot each stack serves is "
+        "EMS_ENVIRONMENT_SLOT, which porth-common does not read."
     )
 
 
