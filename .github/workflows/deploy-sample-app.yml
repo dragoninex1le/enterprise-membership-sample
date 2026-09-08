@@ -154,88 +154,63 @@ jobs:
       - name: Caller identity
         run: aws sts get-caller-identity
 
-      # ── the certificate for THIS environment's tenants ──────────────────────
+      # ── the certificate for THIS environment's tenants ─────────────────────
       #
-      # Resolved by domain rather than read from a variable. A variable holds one
-      # ARN, and a wildcard covers exactly one label — *.porth-sample.… does not
-      # match acme.porth-dau.… — so the two environments cannot share one.
+      # A variable per environment, NOT an ACM lookup. The lookup was tried and
+      # removed: sample-app-deploy-role holds no acm:ListCertificates, so the
+      # call returned AccessDenied — and because it was written
+      # `2>/dev/null || echo "None"`, a denial read as "no certificate exists".
+      # Three runs failed telling us to create a certificate that was already
+      # there. Granting the role ACM read would work too, but it needs a
+      # terraform apply to buy back something a variable already does.
       #
-      # Looking it up means adding an environment needs a certificate and no
-      # repository settings change, and a missing one fails HERE naming the
-      # domain, rather than mid-deploy as a CloudFront alias rejection.
+      # One per environment because a wildcard covers exactly one label:
+      # *.porth-sample.… does not match acme.porth-dau.…, so the two cannot
+      # share a certificate. Adding an environment is a line in the case below
+      # and a variable beside it.
       - name: Resolve the ACM certificate for this environment
+        env:
+          CERT_PORTH_SAMPLE: ${{ vars.ACM_CERTIFICATE_ARN }}
+          CERT_PORTH_DAU: ${{ vars.ACM_CERTIFICATE_ARN_PORTH_DAU }}
         run: |
           set -euo pipefail
-          WANT="${{ env.CLOUDFRONT_ALIAS }}"
+          case "${{ env.ENVIRONMENT_SLOT }}" in
+            porth-sample) ARN="${CERT_PORTH_SAMPLE:-}"; VAR=ACM_CERTIFICATE_ARN ;;
+            porth-dau)    ARN="${CERT_PORTH_DAU:-}";    VAR=ACM_CERTIFICATE_ARN_PORTH_DAU ;;
+            *)
+              echo "❌ No certificate variable is mapped for environment"
+              echo "❌ '${{ env.ENVIRONMENT_SLOT }}'. Add a case here and set the"
+              echo "❌ matching variable in the sample-app-deploy environment."
+              exit 1
+              ;;
+          esac
 
-          # us-east-1 regardless of AWS_REGION: CloudFront reads certificates
-          # only from there. It happens to be the same here, and stating it
-          # keeps that a fact rather than a coincidence.
-          # DomainName OR a subject alternative name. Which of the two carries
-          # the wildcard depends on how the certificate was REQUESTED — ask for
-          # the apex and add *.apex as a SAN and the primary name is the apex —
-          # and a deploy should not depend on that. Matching DomainName alone
-          # finds nothing for a perfectly good certificate, and the error then
-          # says "no certificate" about one that is sitting right there.
-          MATCH="?DomainName=='${WANT}' || contains(not_null(SubjectAlternativeNameSummaries, \`[]\`), '${WANT}')"
-          ARN=$(aws acm list-certificates \
-            --region us-east-1 \
-            --certificate-statuses ISSUED \
-            --includes "extendedKeyUsage=TLS_WEB_SERVER_AUTHENTICATION" \
-            --query "CertificateSummaryList[${MATCH}].CertificateArn | [0]" \
-            --output text 2>/dev/null || echo "None")
-
-          if [ -n "$ARN" ] && [ "$ARN" != "None" ]; then
-            echo "✅ certificate for ${WANT}"
-          elif [ "${{ env.ENVIRONMENT_SLOT }}" = "porth-sample" ] && [ -n "${{ vars.ACM_CERTIFICATE_ARN }}" ]; then
-            # The environment that predates the lookup. Its certificate was
-            # configured by hand and may not carry ${WANT} as its primary
-            # DomainName, so the variable stays authoritative for it alone.
-            ARN="${{ vars.ACM_CERTIFICATE_ARN }}"
-            echo "✅ certificate from ACM_CERTIFICATE_ARN (porth-sample)"
-          else
-            # Say WHICH of the two it is. "Not issued yet" and "does not exist"
-            # need completely different actions, and the first message here
-            # asserted the second — telling someone to create a certificate
-            # that was sitting in front of them validating.
-            OTHER=$(aws acm list-certificates \
-              --region us-east-1 \
-              --query "CertificateSummaryList[${MATCH}].[CertificateArn,Status]" \
-              --output text 2>/dev/null || true)
-
-            if [ -n "$OTHER" ]; then
-              echo "❌ A certificate for ${WANT} EXISTS but is not usable yet:"
-              printf '❌   %s\n' "$OTHER"
-              echo "❌"
-              echo "❌ PENDING_VALIDATION means the DNS validation records are not"
-              echo "❌ in ${{ env.DNS_ROOT }} yet, or have not propagated. ACM"
-              echo "❌ publishes the CNAME to add; CloudFront will not accept the"
-              echo "❌ certificate until ACM issues it. Nothing to recreate — add"
-              echo "❌ the record, wait, and push again."
-            else
-              echo "❌ No certificate in us-east-1 matches ${WANT}, in any state."
-              echo "❌ Every tenant of ${{ env.ENVIRONMENT_SLOT }} is a label under"
-              echo "❌ ${{ env.CLOUDFRONT_APEX }}, so this environment needs its own"
-              echo "❌ wildcard — an existing one for another environment will not"
-              echo "❌ cover it, and CloudFront refuses the alias rather than"
-              echo "❌ serving the wrong name."
-              echo "❌"
-              echo "❌ If you believe you created one, check the REGION: CloudFront"
-              echo "❌ reads certificates only from us-east-1, and one issued"
-              echo "❌ elsewhere is invisible here however correct its domain."
-            fi
-
-            # What IS there, so the next question does not need another run.
-            # Scoped to this zone: the account holds unrelated certificates and
-            # these logs are world-readable (PORTH-533). Every domain printed
-            # here is already written down in this file.
+          if [ -z "$ARN" ]; then
+            echo "❌ ${VAR} is not set in the sample-app-deploy environment."
             echo "❌"
-            echo "❌ Certificates in us-east-1 for ems.estynsoftware.cloud:"
-            aws acm list-certificates --region us-east-1 \
-              --query "CertificateSummaryList[?contains(DomainName,'ems.estynsoftware.cloud')].[Status,DomainName,CertificateArn]" \
-              --output text 2>/dev/null | sed 's/^/❌   /' || echo "❌   (could not list)"
+            echo "❌ It must be the ARN of an ISSUED us-east-1 certificate covering"
+            echo "❌ ${{ env.CLOUDFRONT_ALIAS }} — every tenant of this environment is"
+            echo "❌ a label under ${{ env.CLOUDFRONT_APEX }}. us-east-1 regardless of"
+            echo "❌ AWS_REGION: CloudFront reads certificates only from there."
             exit 1
           fi
+
+          # Region, not existence. CloudFront rejects a certificate from any
+          # other region at CREATE, and that failure names the distribution
+          # rather than the certificate — worth catching on a variable that a
+          # human pasted.
+          case "$ARN" in
+            arn:aws:acm:us-east-1:*) ;;
+            *)
+              echo "❌ ${VAR} is not a us-east-1 ACM ARN:"
+              echo "❌   ${ARN}"
+              echo "❌ CloudFront reads certificates only from us-east-1 and will"
+              echo "❌ refuse this one mid-deploy, naming the distribution."
+              exit 1
+              ;;
+          esac
+
+          echo "✅ certificate for ${{ env.ENVIRONMENT_SLOT }} from ${VAR}"
           echo "ACM_CERTIFICATE_ARN_RESOLVED=$ARN" >> "$GITHUB_ENV"
 
       - name: Verify Porth components are deployed in EMS (pre-check)
