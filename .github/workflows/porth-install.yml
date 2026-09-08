@@ -40,6 +40,8 @@ name: Porth components — install + upgrade
 #   vars.DNS_ZONE                     e.g. ems.estynsoftware.cloud — cookie-domain derivation
 #   vars.API_DOMAIN_NAME              (or legacy vars.PORTH_API_DOMAIN_NAME)
 #   vars.PORTH_SPA_ORIGINS            CSV of SPA origins, e.g. https://app.ems.estynsoftware.cloud
+#   vars.PORTH_FIXED_ENVIRONMENT      ADR-Z8 slot to PIN this install to. UNSET on EMS, which
+#                                     is multi-environment. Presence is the mode (PORTH-557).
 #   secrets.ACM_CERTIFICATE_ARN       cert for the custom domain (us-east-1)
 #   secrets.PORTH_AUTH_TEST_TOKEN     (optional) authorizer test-token bypass
 #
@@ -74,13 +76,21 @@ on:
         required: false
         default: 'dev'
       fixed_environment:
-        # EMPTY, and it has to be the INPUT's default rather than a fallback
-        # further down (PORTH-627). On workflow_dispatch GitHub fills an omitted
-        # input with its declared default, so `inputs.fixed_environment || ''`
-        # can never see an empty value while this says 'prod' — the install
-        # would quietly stay pinned and the sample-app deploy would keep failing
-        # its pin check, having just told the operator to re-run this.
-        description: 'ADR-Z8 slot to PIN this install to. Empty (the default) = multi-environment, which is what EMS runs.'
+        # A per-run OVERRIDE of vars.PORTH_FIXED_ENVIRONMENT, and empty by
+        # default so it overrides nothing unless typed.
+        #
+        # The install's mode belongs in the environment's variables with every
+        # other setting, not in a form default. A default is whatever the last
+        # person left prefilled and changes with the ref the run was dispatched
+        # from — which is not control, and re-pinning an install by accepting a
+        # prefilled box is silent: envelopes keep being minted for one slot and
+        # the other environment simply cannot be reached.
+        #
+        # It also has to default to empty rather than be handled further down:
+        # on workflow_dispatch GitHub fills an omitted input with its declared
+        # default, so `inputs.fixed_environment || …` never sees an empty value
+        # while a default is set here.
+        description: 'Override vars.PORTH_FIXED_ENVIRONMENT for this run only. Leave blank to use the configured value.'
         required: false
         default: ''
       api_domain_name:
@@ -151,10 +161,11 @@ jobs:
           echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
           echo "EFF_SAR_APP_ID=${{ inputs.sar_app_id || 'arn:aws:serverlessrepo:us-east-1:084847995635:applications/porth-user-management' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
-          # Empty by default, and empty IS the mode (PORTH-557): a non-empty
-          # FixedEnvironment pins every envelope to one slot. An input can still
-          # pin an install deliberately; nothing here should.
-          echo "EFF_FIXED_ENV=${{ inputs.fixed_environment || '' }}" >> "$GITHUB_ENV"
+          # The configured mode, overridable for one run. Empty IS the mode
+          # (PORTH-557): a non-empty FixedEnvironment pins every envelope to one
+          # slot, so on EMS — which runs porth-sample and porth-dau — the
+          # variable is left unset and this resolves empty.
+          echo "EFF_FIXED_ENV=${{ inputs.fixed_environment || vars.PORTH_FIXED_ENVIRONMENT || '' }}" >> "$GITHUB_ENV"
           echo "EFF_LOG_LEVEL=${{ inputs.log_level || 'INFO' }}" >> "$GITHUB_ENV"
 
       - name: Configure AWS credentials (OIDC)
