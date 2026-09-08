@@ -156,18 +156,25 @@ jobs:
 
       # ── the certificate for THIS environment's tenants ─────────────────────
       #
-      # A variable per environment, NOT an ACM lookup. The lookup was tried and
-      # removed: sample-app-deploy-role holds no acm:ListCertificates, so the
-      # call returned AccessDenied — and because it was written
-      # `2>/dev/null || echo "None"`, a denial read as "no certificate exists".
-      # Three runs failed telling us to create a certificate that was already
-      # there. Granting the role ACM read would work too, but it needs a
-      # terraform apply to buy back something a variable already does.
+      # Picks a variable. It does NOT check the certificate — that was tried and
+      # removed, and the removal is the point of this comment.
       #
-      # One per environment because a wildcard covers exactly one label:
-      # *.porth-sample.… does not match acme.porth-dau.…, so the two cannot
-      # share a certificate. Adding an environment is a line in the case below
-      # and a variable beside it.
+      # The check called acm:ListCertificates, which sample-app-deploy-role does
+      # not hold; written `2>/dev/null || echo "None"` the AccessDenied read as
+      # "no certificate exists", and three runs failed telling us to create one
+      # that was already there. Nothing here calls AWS now.
+      #
+      # Verification is not lost, it moved to where it was already happening:
+      # template.yml's AcmCertificateArn carries an AllowedPattern requiring an
+      # us-east-1 ACM ARN, and CloudFront refuses a certificate that does not
+      # cover its aliases. Both fail the deploy with a better message than a
+      # pre-flight check could, because they are the things that actually care.
+      #
+      # The step cannot simply be deleted: AcmCertificateArn is a REQUIRED
+      # template parameter, so the deploy needs this value resolved. One
+      # variable per environment, because a wildcard covers exactly one label —
+      # *.porth-sample.… does not match acme.porth-dau.… — so the two cannot
+      # share a certificate.
       - name: Resolve the ACM certificate for this environment
         env:
           CERT_PORTH_SAMPLE: ${{ vars.ACM_CERTIFICATE_ARN }}
@@ -175,43 +182,12 @@ jobs:
         run: |
           set -euo pipefail
           case "${{ env.ENVIRONMENT_SLOT }}" in
-            porth-sample) ARN="${CERT_PORTH_SAMPLE:-}"; VAR=ACM_CERTIFICATE_ARN ;;
-            porth-dau)    ARN="${CERT_PORTH_DAU:-}";    VAR=ACM_CERTIFICATE_ARN_PORTH_DAU ;;
-            *)
-              echo "❌ No certificate variable is mapped for environment"
-              echo "❌ '${{ env.ENVIRONMENT_SLOT }}'. Add a case here and set the"
-              echo "❌ matching variable in the sample-app-deploy environment."
-              exit 1
-              ;;
+            porth-sample) ARN="${CERT_PORTH_SAMPLE:-}" ;;
+            porth-dau)    ARN="${CERT_PORTH_DAU:-}" ;;
+            *)            ARN="" ;;
           esac
-
-          if [ -z "$ARN" ]; then
-            echo "❌ ${VAR} is not set in the sample-app-deploy environment."
-            echo "❌"
-            echo "❌ It must be the ARN of an ISSUED us-east-1 certificate covering"
-            echo "❌ ${{ env.CLOUDFRONT_ALIAS }} — every tenant of this environment is"
-            echo "❌ a label under ${{ env.CLOUDFRONT_APEX }}. us-east-1 regardless of"
-            echo "❌ AWS_REGION: CloudFront reads certificates only from there."
-            exit 1
-          fi
-
-          # Region, not existence. CloudFront rejects a certificate from any
-          # other region at CREATE, and that failure names the distribution
-          # rather than the certificate — worth catching on a variable that a
-          # human pasted.
-          case "$ARN" in
-            arn:aws:acm:us-east-1:*) ;;
-            *)
-              echo "❌ ${VAR} is not a us-east-1 ACM ARN:"
-              echo "❌   ${ARN}"
-              echo "❌ CloudFront reads certificates only from us-east-1 and will"
-              echo "❌ refuse this one mid-deploy, naming the distribution."
-              exit 1
-              ;;
-          esac
-
-          echo "✅ certificate for ${{ env.ENVIRONMENT_SLOT }} from ${VAR}"
           echo "ACM_CERTIFICATE_ARN_RESOLVED=$ARN" >> "$GITHUB_ENV"
+          echo "certificate for ${{ env.ENVIRONMENT_SLOT }}: ${ARN:-'(none — the deploy will say so)'}"
 
       - name: Verify Porth components are deployed in EMS (pre-check)
         run: |
