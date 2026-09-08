@@ -224,6 +224,16 @@ jobs:
               echo "❌ reads certificates only from us-east-1, and one issued"
               echo "❌ elsewhere is invisible here however correct its domain."
             fi
+
+            # What IS there, so the next question does not need another run.
+            # Scoped to this zone: the account holds unrelated certificates and
+            # these logs are world-readable (PORTH-533). Every domain printed
+            # here is already written down in this file.
+            echo "❌"
+            echo "❌ Certificates in us-east-1 for ems.estynsoftware.cloud:"
+            aws acm list-certificates --region us-east-1 \
+              --query "CertificateSummaryList[?contains(DomainName,'ems.estynsoftware.cloud')].[Status,DomainName,CertificateArn]" \
+              --output text 2>/dev/null | sed 's/^/❌   /' || echo "❌   (could not list)"
             exit 1
           fi
           echo "ACM_CERTIFICATE_ARN_RESOLVED=$ARN" >> "$GITHUB_ENV"
