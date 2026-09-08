@@ -62,7 +62,12 @@ on:
         # release the consumer is expected to move to.
         description: 'Porth SAR app semantic version to install/upgrade to'
         required: true
-        default: '0.3.0'
+        # 0.3.1 is what run 32524612746 installed on 2026-08-21. It said 0.3.0,
+        # which is the stale-default trap the comment above describes, one
+        # release later: accepting the prefilled box asks for an OLDER version
+        # than the one deployed and the change set is refused with an error that
+        # reads as a stack problem.
+        default: '0.3.1'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
