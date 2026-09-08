@@ -171,7 +171,19 @@ jobs:
           # us-east-1 regardless of AWS_REGION: CloudFront reads certificates
           # only from there. It happens to be the same here, and stating it
           # keeps that a fact rather than a coincidence.
-          ARN=$(aws acm list-certificates             --region us-east-1             --certificate-statuses ISSUED             --includes "extendedKeyUsage=TLS_WEB_SERVER_AUTHENTICATION"             --query "CertificateSummaryList[?DomainName=='${WANT}'].CertificateArn | [0]"             --output text 2>/dev/null || echo "None")
+          # DomainName OR a subject alternative name. Which of the two carries
+          # the wildcard depends on how the certificate was REQUESTED — ask for
+          # the apex and add *.apex as a SAN and the primary name is the apex —
+          # and a deploy should not depend on that. Matching DomainName alone
+          # finds nothing for a perfectly good certificate, and the error then
+          # says "no certificate" about one that is sitting right there.
+          MATCH="?DomainName=='${WANT}' || contains(not_null(SubjectAlternativeNameSummaries, \`[]\`), '${WANT}')"
+          ARN=$(aws acm list-certificates \
+            --region us-east-1 \
+            --certificate-statuses ISSUED \
+            --includes "extendedKeyUsage=TLS_WEB_SERVER_AUTHENTICATION" \
+            --query "CertificateSummaryList[${MATCH}].CertificateArn | [0]" \
+            --output text 2>/dev/null || echo "None")
 
           if [ -n "$ARN" ] && [ "$ARN" != "None" ]; then
             echo "✅ certificate for ${WANT}"
