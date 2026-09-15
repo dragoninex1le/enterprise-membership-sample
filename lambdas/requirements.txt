@@ -24,10 +24,17 @@ fastapi==0.111.0
 #           none. CallbackDeclaration takes (operation, endpoint) and
 #           ServiceClient.call accepts a supplied endpoint. This app passes
 #           both; on 0.0.15 the endpoint is an unexpected argument.
+#   0.0.18  BREAKING (PORTH-634, Components PR #342), and the reason for the
+#           upper bound: the context envelope moves to wire v2, a caller has no
+#           identity on the internal plane, and Director.source_service becomes
+#           called_service. ffug (handler.py, worker.py), sample_app_callback and
+#           the approvals router still use source_service, so this app stays
+#           below 0.0.18 until that migration lands. Lift the cap in the same
+#           change as the migration.
 #
 # An older porth-common against this install would call KMS with no grant, look
 # under signing-keys/* for documents that no longer exist, deliver its callbacks
 # to the wrong function, and refuse the declaration this app now makes.
-porth-common>=0.0.16
+porth-common>=0.0.16,<0.0.18
 mangum==0.17.0
 boto3>=1.34.0
