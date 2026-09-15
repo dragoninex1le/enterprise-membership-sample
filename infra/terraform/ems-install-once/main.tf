@@ -404,6 +404,34 @@ resource "aws_iam_role_policy" "deploy_role_async_work" {
           "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/enterprise-membership-sample-*",
         ]
       },
+      {
+        # PORTH-627 — one stack per environment, and the vendor's grant names
+        # exactly one stack.
+        #
+        # Porth's receiving-account template (Components,
+        # infra/receiving-account-templates/sample-app-deploy-role.yaml) grants
+        # cloudformation:* on stack/enterprise-membership-sample/* — the bare
+        # name, nothing after it. porth-sample deploys as that stack and matches;
+        # porth-dau deploys as enterprise-membership-sample-porth-dau and matches
+        # nothing.
+        #
+        # CONFIRMED by run 35014793418: SAM deploy denied cloudformation:
+        # DescribeStacks on stack/enterprise-membership-sample-porth-dau/*, after
+        # every earlier step had passed. Step 22 queried the same stack first and
+        # was denied too, but reads with `2>/dev/null || echo "NONE"`, so it
+        # reported "no stack" and passed — the denial surfaced one step later
+        # than it happened.
+        #
+        # Here rather than in the vendor template: that file is Porth's product,
+        # and EMS works within the grant it ships, adding to it on its own role.
+        # The pattern is the suffix, not porth-dau by name, so a further
+        # environment needs no new grant. The unsuffixed stack stays covered by
+        # the vendor statement.
+        Sid      = "CloudFormationPerEnvironmentStacks"
+        Effect   = "Allow"
+        Action   = "cloudformation:*"
+        Resource = "arn:aws:cloudformation:${var.aws_region}:${data.aws_caller_identity.current.account_id}:stack/enterprise-membership-sample-*/*"
+      },
     ]
   })
 }
