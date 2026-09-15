@@ -792,11 +792,28 @@ jobs:
             }"
           echo "✅ Route 53 alias upserted: $API_DOMAIN → $TARGET"
 
-      - name: Upsert Route 53 alias for CloudFront (apex)
+      - name: Upsert Route 53 aliases for CloudFront (apex and tenants)
         # Creates/updates {environment}.ems.estynsoftware.cloud → CloudFront
         # distribution on every deploy so the alias is always current even if
         # the distribution is recreated. Requires route53:ListHostedZonesByName,
         # route53:ChangeResourceRecordSets, route53:GetChange on sample-app-deploy-role.
+        #
+        # AND the wildcard *.{environment}.ems.estynsoftware.cloud (PORTH-627).
+        # Every tenant is a label under the apex, and without this record no
+        # tenant host resolves at all — the browser reports the site as not
+        # responding, which reads like a CloudFront or certificate problem when
+        # both are fine. porth-dau deployed without it and acme.porth-dau.… had
+        # no DNS, while CloudFront served that host correctly when resolved to
+        # it directly.
+        #
+        # porth-sample only ever worked because its wildcard was created by
+        # hand. Writing it here puts both environments' tenant DNS under the
+        # deploy, and an UPSERT onto porth-sample's existing A-alias record is a
+        # no-op when it already points at this distribution.
+        #
+        # One change batch, so the apex and the wildcard move together: a
+        # recreated distribution cannot leave tenants on the old one while the
+        # platform origin follows the new.
         run: |
           set -euo pipefail
           CF_DOMAIN=$(aws cloudformation describe-stacks \
@@ -807,7 +824,7 @@ jobs:
             --dns-name "${{ env.DNS_ROOT }}" \
             --query "HostedZones[0].Id" \
             --output text | sed 's|/hostedzone/||')
-          echo "Upserting: ${{ env.CLOUDFRONT_APEX }} → $CF_DOMAIN (HZ $HOSTED_ZONE_ID)"
+          echo "Upserting: ${{ env.CLOUDFRONT_APEX }} and ${{ env.CLOUDFRONT_ALIAS }} → $CF_DOMAIN (HZ $HOSTED_ZONE_ID)"
           aws route53 change-resource-record-sets \
             --hosted-zone-id "$HOSTED_ZONE_ID" \
             --change-batch "{
@@ -822,9 +839,20 @@ jobs:
                     \"EvaluateTargetHealth\": false
                   }
                 }
+              }, {
+                \"Action\": \"UPSERT\",
+                \"ResourceRecordSet\": {
+                  \"Name\": \"${{ env.CLOUDFRONT_ALIAS }}\",
+                  \"Type\": \"A\",
+                  \"AliasTarget\": {
+                    \"HostedZoneId\": \"Z2FDTNDATAQYW2\",
+                    \"DNSName\": \"$CF_DOMAIN\",
+                    \"EvaluateTargetHealth\": false
+                  }
+                }
               }]
             }"
-          echo "✅ Route 53 alias upserted: ${{ env.CLOUDFRONT_APEX }} → $CF_DOMAIN"
+          echo "✅ Route 53 aliases upserted: ${{ env.CLOUDFRONT_APEX }}, ${{ env.CLOUDFRONT_ALIAS }} → $CF_DOMAIN"
 
       - name: Resolve stack outputs
         id: outputs
