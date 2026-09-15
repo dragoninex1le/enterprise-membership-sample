@@ -14,15 +14,15 @@ interface NewOrgForm { name: string; slug: string; admin_role_source_key: string
 interface NewTenantForm {
   org_id: string; tenant_id: string; display_name: string; tenant_tier: TenantTier
   admin_role_source_key: string
-  idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string
+  idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string; idp_org_id: string
 }
 interface EditTenantForm {
   display_name: string
-  idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string
+  idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string; idp_org_id: string
 }
 
 const EMPTY_ORG: NewOrgForm = { name: '', slug: '', admin_role_source_key: 'tenant-admin' }
-const EMPTY_TENANT: NewTenantForm = { org_id: '', tenant_id: '', display_name: '', tenant_tier: 'production', admin_role_source_key: 'tenant-admin', idp_enabled: false, idp_domain: '', idp_client_id: '', idp_audience: '' }
+const EMPTY_TENANT: NewTenantForm = { org_id: '', tenant_id: '', display_name: '', tenant_tier: 'production', admin_role_source_key: 'tenant-admin', idp_enabled: false, idp_domain: '', idp_client_id: '', idp_audience: '', idp_org_id: '' }
 
 /** The Auth0 domain an operator typed, reduced to the host it names. */
 function hostOf(domain: string): string {
@@ -42,12 +42,18 @@ function hostOf(domain: string): string {
  * would not. `issuer` keeps its trailing slash — it has to equal the token's
  * `iss`, and Auth0 issues `https://{domain}/`.
  *
+ * `provider_org_id` is what makes a tenant login a TENANT login. Porth's auth
+ * proxy maps the host a user logs in at to this id and sends it to Auth0 as the
+ * organization; resolution then keys on (issuer, client_id, provider_org_id).
+ * Left empty on a tenant that shares its Auth0 app with the platform tenant, the
+ * login is unscoped and resolves to platform.
+ *
  * `base` is the tenant's existing config when editing. PATCH replaces the whole
- * object, so fields this form never shows (provider_org_id) are carried over
- * rather than wiped by an edit to the audience.
+ * object, so fields this form never shows (explicit authorize and token
+ * endpoints) are carried over rather than wiped by an edit to the audience.
  */
 function idpFromForm(
-  f: { idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string },
+  f: { idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string; idp_org_id: string },
   base?: TenantIdpConfig,
 ): TenantIdpConfig | undefined {
   if (!f.idp_enabled) return undefined
@@ -59,6 +65,7 @@ function idpFromForm(
     jwks_uri: `https://${host}/.well-known/jwks.json`,
     client_id: f.idp_client_id,
     audience: f.idp_audience || undefined,
+    provider_org_id: f.idp_org_id.trim() || undefined,
   }
 }
 
@@ -73,7 +80,7 @@ function domainOf(cfg?: TenantIdpConfig): string {
   return (cfg as unknown as { domain?: string }).domain ?? ''
 }
 
-function IdpFields<T extends { idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string }>(
+function IdpFields<T extends { idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string; idp_org_id: string }>(
   { prefix, form, setForm }: { prefix: string; form: T; setForm: (fn: (f: T) => T) => void }
 ) {
   return (
@@ -105,6 +112,16 @@ function IdpFields<T extends { idp_enabled: boolean; idp_domain: string; idp_cli
               onChange={e => setForm(f => ({ ...f, idp_audience: e.target.value }))}
               placeholder="https://your-api.example.com"
               className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+          </div>
+          <div>
+            <label htmlFor={`${prefix}-idp-org`} className="block text-sm font-medium text-gray-700 mb-1">Auth0 Organization ID</label>
+            <input id={`${prefix}-idp-org`} type="text" value={form.idp_org_id}
+              onChange={e => setForm(f => ({ ...f, idp_org_id: e.target.value }))}
+              placeholder="org_…"
+              pattern="org_[A-Za-z0-9]+"
+              title="An Auth0 Organization ID, e.g. org_AbC123"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+            <p className="mt-1 text-xs text-gray-400">Needed when this Auth0 app is shared with other tenants. Without it, logging in at this tenant's address lands in the platform tenant.</p>
           </div>
         </div>
       )}
@@ -139,7 +156,7 @@ export default function TenantsPage() {
 
   // Edit Tenant
   const [editing, setEditing] = useState<TenantRow | null>(null)
-  const [editForm, setEditForm] = useState<EditTenantForm>({ display_name: '', idp_enabled: false, idp_domain: '', idp_client_id: '', idp_audience: '' })
+  const [editForm, setEditForm] = useState<EditTenantForm>({ display_name: '', idp_enabled: false, idp_domain: '', idp_client_id: '', idp_audience: '', idp_org_id: '' })
   const [editSaving, setEditSaving] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
 
@@ -193,9 +210,27 @@ export default function TenantsPage() {
     }
     try {
       await tenantsApi.create(body)
-      setTenantOpen(false); setTenantForm(EMPTY_TENANT); loadAll()
-    } catch (e: unknown) { setTenantError(e instanceof Error ? e.message : 'Failed') }
-    finally { setTenantSaving(false) }
+    } catch (e: unknown) {
+      setTenantError(e instanceof Error ? e.message : 'Failed')
+      setTenantSaving(false)
+      return
+    }
+    // Porth's create accepts idp_config_override and does not store it:
+    // TenantRepository.create writes an explicit field list that omits it, so
+    // the tenant comes back with no IdP and nobody can log in to it. PATCH does
+    // store it, so set it straight away. Harmless once Porth's create is fixed —
+    // this writes the same config a second time.
+    if (body.idp_config_override) {
+      try {
+        await tenantsApi.update(body.tenant_id, { idp_config_override: body.idp_config_override })
+      } catch (e: unknown) {
+        setTenantError(`Tenant created, but its identity provider was not saved: ${e instanceof Error ? e.message : 'Failed'}. Use Edit to set it.`)
+        setTenantSaving(false)
+        loadAll()
+        return
+      }
+    }
+    setTenantOpen(false); setTenantForm(EMPTY_TENANT); setTenantSaving(false); loadAll()
   }
 
   async function submitEdit(e: React.FormEvent) {
@@ -249,6 +284,7 @@ export default function TenantsPage() {
       idp_domain: domainOf(t.idp_config_override),
       idp_client_id: t.idp_config_override?.client_id ?? '',
       idp_audience: t.idp_config_override?.audience ?? '',
+      idp_org_id: t.idp_config_override?.provider_org_id ?? '',
     })
     setEditError(null)
   }
