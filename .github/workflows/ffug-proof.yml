@@ -4,18 +4,34 @@ name: ffug — prove tenant isolation
 # driven by a workflow_dispatch, with the GitHub run as the evidence pack of
 # record. It reads and invokes; it deploys nothing and writes nothing.
 #
-# Two stages, in the order they were asked for:
+# Three stages, in the order they were asked for:
 #   A. the bus created the tenant in ffug's table, with its own prime
 #   B. a synchronous call returns that tenant's digest, and two tenants
 #      disagree on an identical payload
+#   C. this environment's credentials are refused another environment's rows
+#      for the same tenant, and an envelope narrows to its own signed claim
+#      (PORTH-627). Skipped when only one environment is deployed.
 #
 # PRECONDITION: at least one tenant must have been created AFTER the ffug
 # lifecycle consumer was deployed. A tenant that already existed gets no prime
-# retroactively. Run 'Porth - seed testbed tenants', or create one in the admin
-# UI, then run this.
+# retroactively.
+#
+# Create it in the ADMIN UI. NOT the QA seeder: it writes tenant rows straight
+# to Porth's table and publishes no `tenant.created`, so ffug never hears about
+# the tenant, never mints a prime, and stage A finds nothing — with the remedy
+# printed being the very step that cannot work. Only PUT /tenants/ emits the
+# event.
 
 on:
   workflow_dispatch:
+    inputs:
+      environment_slot:
+        description: 'Which ADR-Z8 environment to prove'
+        type: choice
+        default: porth-sample
+        options:
+          - porth-sample
+          - porth-dau
 
 permissions:
   id-token: write
@@ -23,11 +39,18 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
-  SAM_STACK_NAME: enterprise-membership-sample
+  # Which environment is under test, and the stack that deploys it. The two
+  # move together: every resource is named from the slot (PORTH-627), so
+  # proving the other environment is a different stack, not a flag.
+  #
+  # porth-sample keeps the unsuffixed stack name, matching deploy-sample-app.yml
+  # — that stack predates the convention and renaming it would strand it.
+  ENVIRONMENT_SLOT: ${{ inputs.environment_slot || 'porth-sample' }}
+  SAM_STACK_NAME: ${{ (inputs.environment_slot || 'porth-sample') == 'porth-sample' && 'enterprise-membership-sample' || format('enterprise-membership-sample-{0}', inputs.environment_slot) }}
 
 jobs:
   prove:
-    name: A - tenant seeded from the bus, B - synchronous call
+    name: A - seeded from the bus, B - synchronous call, C - environment isolation
     runs-on: ubuntu-latest
     environment: sample-app-deploy
     env:
@@ -148,8 +171,22 @@ jobs:
         #
         # An evidence workflow that can report green while proving nothing is
         # worse than no evidence workflow, because someone will cite it.
+        env:
+          # The other deployed environment, for stage C. Derived from the
+          # environments this install serves, minus the one being proved — so a
+          # third environment needs no change here.
+          #
+          # Empty skips stage C rather than failing it: on a single-environment
+          # install there is no real second environment to be refused, and a
+          # probe aimed at an invented one proves nothing (PORTH-598).
+          PORTH_AUTH_ENVIRONMENTS: ${{ vars.PORTH_AUTH_ENVIRONMENTS || 'porth-sample,porth-dau' }}
         run: |
           set -o pipefail
+          THIS="${ENVIRONMENT_SLOT:-porth-sample}"
+          OTHER=$(printf '%s' "$PORTH_AUTH_ENVIRONMENTS" \
+            | tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep -v "^${THIS}$" | head -1)
+          export OTHER_ENVIRONMENT="${OTHER}"
+          echo "proving ${THIS}; stage C probes ${OTHER:-'(none — skipped)'}"
           python scripts/ffug_proof.py | tee proof.txt
 
       - name: Publish the evidence

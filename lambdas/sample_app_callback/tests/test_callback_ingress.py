@@ -91,7 +91,10 @@ def record(*, trace=TRACE, correlation=None, record_id="i-1"):
 def porth(monkeypatch):
     """Wire both seams. Returns a controller the tests drive."""
     monkeypatch.setenv("PORTH_SERVICE_ID", "ffug")
-    monkeypatch.setenv("PORTH_ENVIRONMENT", "dev")
+    # The CONFIGURATION axis. This read PORTH_ENVIRONMENT, which porth-common
+    # accepted as a fallback branch — the variable is gone (PORTH-627) and the
+    # branch is named directly.
+    monkeypatch.setenv("PORTH_BRANCH", "dev")
 
     table = MagicMock()
 

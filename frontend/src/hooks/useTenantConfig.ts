@@ -1,3 +1,5 @@
+import { ROLES_NAMESPACE } from '../constants'
+
 // Roles-claim namespace, for DISPLAY ONLY (the diagnostics panel on /unauthorized).
 // Role resolution happens server-side in the authorizer against the claim-mapping
 // config — nothing here affects it.
@@ -9,8 +11,7 @@
 // showed on an install whose real namespace is
 // https://porth.ems.estynsoftware.io/roles, which is actively misleading when
 // the thing you are debugging IS the namespace.
-const ROLES_NAMESPACE =
-  import.meta.env.VITE_ROLES_NAMESPACE ?? 'https://porth.ems.estynsoftware.io/roles'
+// Defined in constants.ts, shared with the default claim mapping.
 
 export interface TenantConfig {
   tenantId: string
