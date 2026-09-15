@@ -188,7 +188,9 @@ def test_the_scope_name_is_derived_from_the_document_not_spelled_twice(resources
         ]["Select"]
     )
 
-    assert name.split("/")[index] == "ffug-tenant-scoped"
+    # Suffixed per environment (PORTH-627): two deployments share PorthBranch,
+    # so a branch-only name is one parameter claimed by both stacks.
+    assert name.split("/")[index] == "ffug-tenant-scoped-${EnvironmentSlot}"
 
 
 def test_ffug_deploys_its_own_narrowing_rule_and_does_not_borrow_porths(resources):
