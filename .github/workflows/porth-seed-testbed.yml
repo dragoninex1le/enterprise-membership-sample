@@ -56,6 +56,7 @@ jobs:
   seed:
     name: Seed testbed tenants
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # Its own environment, so its role's OIDC `sub` pins it here. That role can invoke the
     # seed Lambda and read the manifest — it cannot delete stacks or read credentials.
     environment: porth-seed

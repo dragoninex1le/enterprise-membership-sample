@@ -42,6 +42,7 @@ env:
 jobs:
   e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Same environment as deploy.yml: its role provably holds the CodeArtifact
     # permissions (every green deploy runs the identical token step).
     environment: sample-app-deploy

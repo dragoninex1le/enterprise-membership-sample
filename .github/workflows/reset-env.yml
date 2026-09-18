@@ -51,6 +51,7 @@ jobs:
   reset:
     name: Clear tenant data
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Shares the bootstrap role rather than having one of its own. That role already holds
     # dynamodb:DeleteItem on porth-* — it rewrites role-permission links wholesale — so it
     # can already destroy every tenant record one call at a time. Invoking the cleanup
@@ -199,6 +200,7 @@ jobs:
     name: Done
     needs: [reset, bootstrap]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Done
         run: |

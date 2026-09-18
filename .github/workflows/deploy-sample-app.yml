@@ -36,6 +36,7 @@ jobs:
   deploy:
     name: Build and Deploy
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     environment: sample-app-deploy
     env:
       # Porth components CloudFormation stack name. A SAR *console* install

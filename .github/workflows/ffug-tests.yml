@@ -25,6 +25,12 @@ on:
       - '.github/workflows/ffug-tests.yml'
   workflow_dispatch:
 
+# One run per PR: a newer commit supersedes the run in flight. (Actions minutes are an
+# account-wide budget, shared with Components and style-classifier.)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   id-token: write
   contents: read
@@ -36,6 +42,7 @@ jobs:
   test:
     name: ffug unit tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # PORTH-587 — this job needs AWS now, which it did not before.
     #
     # porth-common is published to the Porth CodeArtifact repository and not to
@@ -57,6 +64,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
+          cache-dependency-path: lambdas/requirements.txt
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
