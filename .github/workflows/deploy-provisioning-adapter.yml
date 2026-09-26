@@ -1,0 +1,292 @@
+name: Deploy provisioning adapter (prawf)
+
+# PRF-9 - the prawf provisioning adapter for EMS: one adapter per target, slot chosen per call,
+# invoked directly by ARN with no HTTP surface. See infra/provisioning-adapter/README.md.
+#
+# Two jobs. `test` runs on every PR that touches the adapter and gates `deploy`, which runs only on
+# dispatch. Deploying stays a deliberate act: this stack writes Porth's tables.
+#
+# Identity: GitHub environment `prawf-adapter`. Its AWS_ROLE_ARN may deploy this stack and nothing
+# else, and passes AWS_CFN_EXECUTION_ROLE_ARN to CloudFormation, which alone may create the adapter's
+# roles. The test job borrows the same environment only to read prawf-schemas from CodeArtifact.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'infra/provisioning-adapter/**'
+      - '.github/workflows/deploy-provisioning-adapter.yml'
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: prawf-adapter-deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  STACK_NAME: porth-provisioning-adapter
+  PORTH_STACK_NAME: serverlessrepo-porth-components
+  PRAWF_DOMAIN: estyn-prawf
+  PRAWF_DOMAIN_OWNER: '084847995635'
+
+jobs:
+  test:
+    name: Adapter tests (offline, against the real prawf schemas)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: prawf-adapter
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # Without this, an unset role reads as "Could not load credentials from any providers" -
+      # an error that names the symptom and not the cause.
+      - name: Require the deploy role
+        env:
+          ROLE: ${{ vars.AWS_ROLE_ARN }}
+        run: |
+          if [ -z "${ROLE:-}" ]; then
+            echo "::error::vars.AWS_ROLE_ARN is not set in the prawf-adapter environment"
+            exit 1
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # prawf-schemas is the PRF-1 package: the canonical schemas, bundled at build time. Validating
+      # against it - not a copy - is what makes "speaks the contract" mean the contract.
+      - name: pip from CodeArtifact (estyn-prawf-py)
+        run: |
+          aws codeartifact login --tool pip --region "$AWS_REGION" \
+            --domain "$PRAWF_DOMAIN" --domain-owner "$PRAWF_DOMAIN_OWNER" \
+            --repository estyn-prawf-py
+
+      - name: Install test dependencies
+        run: python -m pip install --quiet 'prawf-schemas>=1.0.0,<2' pytest boto3 pyyaml
+
+      - name: Test the adapter
+        run: python -m pytest infra/provisioning-adapter/tests -q
+
+  deploy:
+    name: Deploy and prove in-account
+    needs: test
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: prawf-adapter
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # Without this, an unset role reads as "Could not load credentials from any providers" -
+      # an error that names the symptom and not the cause.
+      - name: Require the deploy role
+        env:
+          ROLE: ${{ vars.AWS_ROLE_ARN }}
+        run: |
+          if [ -z "${ROLE:-}" ]; then
+            echo "::error::vars.AWS_ROLE_ARN is not set in the prawf-adapter environment"
+            exit 1
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: Require the CloudFormation execution role
+        env:
+          CFN_EXECUTION_ROLE: ${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}
+        run: |
+          # The deploy role has no iam:CreateRole by design. Without the execution role,
+          # CloudFormation acts as the deploy role and fails creating the adapter's roles.
+          if [ -z "${CFN_EXECUTION_ROLE:-}" ]; then
+            echo "::error::vars.AWS_CFN_EXECUTION_ROLE_ARN is not set in the prawf-adapter environment"
+            exit 1
+          fi
+
+      # Table names come from the Porth stack's own outputs, never typed. PORTH-582: a pattern only
+      # ever evaluated against a missing stack has not been tested - so a missing output is fatal.
+      - name: Resolve Porth's tables
+        id: porth
+        run: |
+          set -euo pipefail
+          out() {
+            aws cloudformation describe-stacks --stack-name "$PORTH_STACK_NAME" --region "$AWS_REGION" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text
+          }
+          for key in TenantsTableName RolesTableName PermissionsTableName ClaimMappingConfigsTableName; do
+            value=$(out "$key")
+            if [ -z "$value" ] || [ "$value" = "None" ]; then
+              echo "::error::$PORTH_STACK_NAME has no $key output"
+              exit 1
+            fi
+            echo "$key=$value" >> "$GITHUB_OUTPUT"
+            echo "$key: $value"
+          done
+
+      - name: SAM build
+        run: sam build --template-file infra/provisioning-adapter/template.yml
+
+      # Lifted verbatim from deploy-qa-tools.yml. A stack left in ROLLBACK_* cannot be updated; it
+      # has to be deleted first, and --retain-resources is only accepted from DELETE_FAILED.
+      - name: Clear a wedged stack
+        env:
+          CFN_EXECUTION_ROLE: ${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          ROLE_ARG=(--role-arn "$CFN_EXECUTION_ROLE")
+
+          STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query "Stacks[0].StackStatus" --output text --region "$AWS_REGION" 2>/dev/null || echo "NONE")
+          echo "$STACK_NAME: $STATUS"
+
+          case "$STATUS" in
+            ROLLBACK_COMPLETE|ROLLBACK_FAILED|CREATE_FAILED|DELETE_FAILED|REVIEW_IN_PROGRESS)
+              echo "Deleting so the stack can be recreated cleanly"
+              aws cloudformation delete-stack --stack-name "$STACK_NAME" \
+                "${ROLE_ARG[@]}" --region "$AWS_REGION"
+
+              if aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" \
+                   --region "$AWS_REGION" 2>/dev/null; then
+                echo "Deleted"
+              else
+                STUCK=$(aws cloudformation list-stack-resources --stack-name "$STACK_NAME" \
+                  --query "StackResourceSummaries[?ResourceStatus=='DELETE_FAILED'].LogicalResourceId" \
+                  --output text --region "$AWS_REGION" 2>/dev/null || echo "")
+                if [ -z "$STUCK" ]; then
+                  echo "::error::Delete failed and no resource is in DELETE_FAILED - inspect the stack events"
+                  exit 1
+                fi
+                echo "Retrying, retaining: $STUCK"
+                echo "::warning::Retaining $STUCK - these are orphaned in the account and safe to"
+                echo "::warning::delete by hand; the redeploy creates new ones with fresh suffixes."
+                aws cloudformation delete-stack --stack-name "$STACK_NAME" \
+                  --retain-resources $STUCK "${ROLE_ARG[@]}" --region "$AWS_REGION"
+                aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" \
+                  --region "$AWS_REGION"
+                echo "Deleted (with retained resources)"
+              fi
+              ;;
+            *)
+              echo "No cleanup needed"
+              ;;
+          esac
+
+      # SlotMap is left at the template's single-slot default until PRF-19 publishes contract 1.1.0.
+      #
+      # CallerRoleArn comes from vars.PRAWF_CALLER_ROLE_ARN (PRF-10). Unset, no cross-account
+      # permission exists and the adapter is in-account only. Set, it must be EXACTLY a prawf-runner
+      # role: granting the canary would turn the canary's pass into a false one, and anything wider
+      # (an account root, a wildcard) would admit principals the harness cannot see.
+      - name: SAM deploy
+        env:
+          CFN_EXECUTION_ROLE: ${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}
+          CALLER: ${{ vars.PRAWF_CALLER_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          CALLER_ARG=()
+          if [ -n "${CALLER:-}" ]; then
+            if ! [[ "$CALLER" =~ ^arn:aws:iam::[0-9]{12}:role/prawf-runner$ ]]; then
+              echo "::error::PRAWF_CALLER_ROLE_ARN must be exactly a prawf-runner role ARN, got: $CALLER"
+              exit 1
+            fi
+            CALLER_ARG=("CallerRoleArn=$CALLER")
+            echo "Cross-account invoke granted to $CALLER"
+          else
+            echo "PRAWF_CALLER_ROLE_ARN unset - in-account only"
+          fi
+          sam deploy \
+            --stack-name "$STACK_NAME" \
+            --resolve-s3 \
+            --capabilities CAPABILITY_IAM \
+            --role-arn "$CFN_EXECUTION_ROLE" \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --region "$AWS_REGION" \
+            --parameter-overrides \
+              "PorthStackName=$PORTH_STACK_NAME" \
+              "PorthTenantsTable=${{ steps.porth.outputs.TenantsTableName }}" \
+              "PorthRolesTable=${{ steps.porth.outputs.RolesTableName }}" \
+              "PorthPermissionsTable=${{ steps.porth.outputs.PermissionsTableName }}" \
+              "PorthClaimMappingConfigsTable=${{ steps.porth.outputs.ClaimMappingConfigsTableName }}" \
+              "AdapterVersion=${GITHUB_SHA::12}" \
+              "${CALLER_ARG[@]}"
+
+      - name: pip from CodeArtifact (estyn-prawf-py)
+        run: |
+          aws codeartifact login --tool pip --region "$AWS_REGION" \
+            --domain "$PRAWF_DOMAIN" --domain-owner "$PRAWF_DOMAIN_OWNER" \
+            --repository estyn-prawf-py
+          python -m pip install --quiet 'prawf-schemas>=1.0.0,<2'
+
+      # The PRF-9 proof: invoked from inside the account, the adapter answers capabilities in a form
+      # the real schemas accept, and answers what it does not implement honestly.
+      - name: Prove it in-account
+        run: |
+          set -euo pipefail
+          invoke() {
+            aws lambda invoke --function-name "$STACK_NAME" --region "$AWS_REGION" \
+              --cli-binary-format raw-in-base64-out --payload "$1" "$2" > /dev/null
+          }
+          invoke '{"contract_version":"1.0.0","verb":"capabilities"}' caps.json
+          invoke '{"contract_version":"1.0.0","verb":"seed","run":{"run_id":"prf-9-proof"},"entity":"porth-tenant"}' unsupported.json
+          invoke '{"contract_version":"1.0.0","verb":"seed","run":{"run_id":"prf-9-proof"},"entity":"porth-tables"}' unknown.json
+
+          python - <<'PY'
+          import json, os
+          from prawf_schemas import validate_capabilities, validate_contract_response
+
+          def load(path):
+              doc = json.load(open(path))
+              result = validate_contract_response(doc)
+              assert result.valid, (path, [str(e) for e in result.errors])
+              return doc
+
+          caps = load("caps.json")
+          assert caps["outcome"] == "ok", caps
+          result = validate_capabilities(caps["results"][0])
+          assert result.valid, [str(e) for e in result.errors]
+          body = caps["results"][0]
+          assert body["verbs"] == ["capabilities"], body["verbs"]
+          assert body["environment"].get("slot"), "environment.slot must be populated"
+
+          unsupported = load("unsupported.json")
+          assert (unsupported["outcome"], unsupported["reason_code"]) == ("unsupported", "not_implemented"), unsupported
+
+          unknown = load("unknown.json")
+          assert (unknown["outcome"], unknown["reason_code"]) == ("refused", "unknown_entity"), unknown
+
+          env = body["environment"]
+          lines = [
+              "## Provisioning adapter - in-account proof",
+              "",
+              f"- **environment**: `{env['id']}`, slot `{env['slot']}`, Porth `{env.get('candidate_version', 'unknown')}`",
+              f"- **environment_class**: `{body['environment_class']}`",
+              f"- **adapter**: `{body['adapter_version']}`, contract {', '.join(body['contract_versions'])}",
+              f"- **verbs**: {', '.join(body['verbs'])}",
+              f"- **entities**: {', '.join(e['id'] for e in body['entities'])}",
+              "- `seed porth-tenant` -> `unsupported / not_implemented`",
+              "- `seed porth-tables` -> `refused / unknown_entity`",
+          ]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("\n".join(lines) + "\n")
+          print("\n".join(lines))
+          PY
