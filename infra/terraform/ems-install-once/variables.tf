@@ -20,9 +20,13 @@ variable "porth_branch" {
     and the segment in every `/porth/{branch}/…` document path. On EMS this is
     `dev`.
 
-    Deliberately NOT the ADR-Z8 data slot (`PorthEnvSlot`, which is `prod` here).
-    They are two axes wearing one word and they hold different values on this
-    install; the SSM paths this module writes are on the configuration axis.
+    Deliberately NOT the ADR-Z8 slot (`EnvironmentSlot` — `porth-sample`, and
+    `porth-dau` alongside it). They are two axes wearing one word and hold
+    different values here; the SSM paths this module writes are configuration.
+
+    There was a third, `porth_environment`, which suffixed deployed names. Its
+    only reader was ffug's endpoint, now `ems-ffug-$${environment}` and resolved
+    per call, so it is gone (PORTH-627).
   EOT
   type        = string
   default     = "dev"
@@ -121,17 +125,4 @@ variable "deploy_role_name" {
   EOT
   type        = string
   default     = "sample-app-deploy-role"
-}
-
-variable "porth_environment" {
-  description = <<-EOT
-    The deployment axis — what suffixes function and table names.
-
-    A DIFFERENT value from porth_branch, which selects configuration, and from
-    the ADR-Z8 slot in partition keys. Three axes that all read "dev" on this
-    install and are not interchangeable; composing a name from the wrong one
-    produces something that deploys and is never found.
-  EOT
-  type        = string
-  default     = "dev"
 }

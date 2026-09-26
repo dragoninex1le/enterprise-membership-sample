@@ -14,31 +14,56 @@ export interface Organization {
 export interface CreateOrganizationRequest {
   name: string
   slug: string
-  tenant: { tenant_id: string; org_id?: string; display_name: string; environment_type: 'production' | 'staging' | 'development' | 'sandbox'; admin_role_source_key: string }
+  tenant: { tenant_id: string; org_id?: string; display_name: string; tenant_tier: TenantTier; admin_role_source_key: string }
 }
 export interface OrganizationCreateResponse { organization: Organization; tenant: Tenant }
 export interface UpdateOrganizationRequest { name?: string; idp_config?: IdpConfig }
 
 // Tenants — field names match the Porth API Tenant model (PORTH-413)
+//
+// `tenant_tier` is what Porth now calls the field this file used to call
+// `environment_type` — same four values. The rename keeps it from being read as
+// the ADR-Z8 environment, which is a different thing: a tenant's tier is a label
+// on the record, its environment is part of every key it has.
+export type TenantTier = 'production' | 'staging' | 'development' | 'sandbox'
+
+/** Porth's neutral OIDC IdP config for a tenant (PORTH-488/S5).
+ *
+ * Replaced `{ provider, domain }`. Porth ignores fields it does not know, so a
+ * body in the old shape is not rejected for them — it simply arrives with no
+ * issuer and no JWKS URI, and the create fails on those instead. */
+export interface TenantIdpConfig {
+  issuer: string
+  jwks_uri: string
+  client_id: string
+  audience?: string
+  /** Defaults to "oidc" server-side. An Auth0 tenant must say "auth0". */
+  protocol?: 'auth0' | 'oidc'
+  authorization_endpoint?: string
+  token_endpoint?: string
+  provider_org_id?: string
+}
+
 export interface Tenant {
   tenant_id: string
   org_id: string
   org_name?: string
   display_name: string
-  environment_type: 'production' | 'staging' | 'development' | 'sandbox'
+  tenant_tier: TenantTier
   status: 'active' | 'suspended' | 'decommissioning' | 'deleted'
-  idp_config_override?: IdpConfig
+  idp_config_override?: TenantIdpConfig
   created_at: string
   updated_at: string
 }
 export interface CreateTenantRequest {
-  org_id: string; tenant_id: string; display_name: string; environment_type: 'production' | 'staging' | 'development' | 'sandbox'
+  org_id: string; tenant_id: string; display_name: string; tenant_tier: TenantTier
   admin_role_source_key: string
-  idp_config_override?: IdpConfig
+  idp_config_override?: TenantIdpConfig
 }
 export interface UpdateTenantRequest {
   display_name?: string
-  idp_config_override?: IdpConfig
+  /** PATCH replaces the whole object — send every field that should survive. */
+  idp_config_override?: TenantIdpConfig
 }
 
 // Users

@@ -40,7 +40,12 @@ from .repository import SampleAppRepository
 
 #: This app's own table. Named from the same environment variable the repository
 #: has always used, so the two cannot disagree about which table is "ours".
-TABLE_NAME = f"porth-sample-app-{os.environ.get('PORTH_ENVIRONMENT', 'dev')}"
+#: The app's table, named by the resource that creates it (PORTH-627).
+#:
+#: Was `f"porth-sample-app-{PORTH_ENVIRONMENT}"`, rebuilt independently in three
+#: modules. Passed from `!Ref SampleAppTable` there is one source, so the name
+#: cannot drift from the table — the same reason ffug reads FFUG_TABLE_NAME.
+TABLE_NAME = os.environ.get("SAMPLE_APP_TABLE_NAME", "")
 
 
 class SampleAppDirector(PorthDirector):
@@ -85,7 +90,7 @@ class SampleAppDirector(PorthDirector):
 
         Falling back to the ambient execution role was the right answer to that.
         The index now binds this app's host to this app's own role, so the same
-        call returns ``porth-sample-app-tenant-{env}``: a role this app owns,
+        call returns ``ems-sample-app-tenant-{env}``: a role this app owns,
         granted this table and nothing of Porth's, and narrowed to one tenant by
         the ``porth-tenant`` / ``porth-env`` session tags Porth attaches to every
         assume. The call site did not change meaning; what arrives did.
@@ -116,8 +121,9 @@ class SampleAppDirector(PorthDirector):
         if getattr(self, "_repository", None) is None:
             # PORTH-594 — the repository is built FOR this request's scope, and
             # both halves come from the authorizer's own resolution rather than
-            # from the environment. `environment` here is the ADR-Z8 slot; the
-            # PORTH_ENVIRONMENT that names the table is a different value.
+            # from the environment. `environment` here is the ADR-Z8 slot, which
+            # used to be a different value from the PORTH_ENVIRONMENT that named
+            # the table; one slot names both now (PORTH-627).
             #
             # A missing scope raises in the repository's constructor rather than
             # producing ENV##TENANT#… — a key that writes fine, matches no

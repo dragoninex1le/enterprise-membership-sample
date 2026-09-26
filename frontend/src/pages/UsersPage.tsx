@@ -150,7 +150,7 @@ export default function UsersPage() {
               <option value="">— Select a tenant —</option>
               {tenants.map(t => (
                 <option key={t.tenant_id} value={t.tenant_id}>
-                  {t.display_name} ({t.environment_type})
+                  {t.display_name} ({t.tenant_tier})
                 </option>
               ))}
             </select>

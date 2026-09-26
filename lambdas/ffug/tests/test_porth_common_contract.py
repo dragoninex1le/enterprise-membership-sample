@@ -120,7 +120,7 @@ def test_the_field_the_app_sends_is_the_field_ffug_reads():
     from ffug import handler as h
     from sample_app import ffug_client
 
-    os.environ[ffug_client.CALLBACK_TARGET_ENV] = "porth-sample-app-callback-test"
+    os.environ[ffug_client.CALLBACK_TARGET_ENV] = "ems-sample-app-callback-test"
     document = {"record_type": "invoice", "record_id": "i-1"}
     # The caller's arguments, built by the same function the app calls rather
     # than restated — so a change to what the app sends fails here instead of
@@ -197,7 +197,7 @@ def test_every_director_declares_who_it_is():
 
     # All three say `ffug`, and that is the point rather than a copy-paste
     # (Richard, 2026-08-27). There is ONE service on the internal plane here.
-    # `porth-ffug` is its request ingress and `porth-sample-app-callback` is
+    # `ems-ffug` is its request ingress and `ems-sample-app-callback` is
     # its response ingress; the app is its front half. A service with two
     # addresses says so by DIRECTION in its own document — inventing a second
     # service id to name the second address is the exact pressure this
@@ -363,7 +363,7 @@ def test_one_service_is_spelled_one_way_everywhere():
     from sample_app.routers import approvals
     from sample_app_callback.handler import CallbackDirector
 
-    os.environ[ffug_client.CALLBACK_TARGET_ENV] = "porth-sample-app-callback-test"
+    os.environ[ffug_client.CALLBACK_TARGET_ENV] = "ems-sample-app-callback-test"
     assert "service_id" not in ffug_client._callback_declaration(), (
         "the callback declaration names a service again. That is a fourth "
         "spelling of this service, and it would address the answer by resolving "

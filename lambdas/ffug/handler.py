@@ -374,6 +374,13 @@ def _op_isolation_probe(args: dict[str, Any], director: FfugDirector) -> dict[st
     # found exactly that in Porth's own policy. Denied here means the pattern
     # is the strict pair rather than a prefix.
     sibling = f"{own}-probe"
+    # The same hole on the ENVIRONMENT axis (PORTH-627). Prefix extension was
+    # only ever tested on the tenant half of the key, and the two halves are
+    # written by different substitutions — $env and $tenant — so one being
+    # strict says nothing about the other. Denied here means 'porth-sample'
+    # does not reach 'porth-sample-probe', and by extension not 'porth-dau'
+    # either had the environments been named that way.
+    env_sibling = keys.partition(f"{environment}-probe", tenant_id)
 
     store = director.resource(DOCUMENT_STORE)
 
@@ -398,6 +405,7 @@ def _op_isolation_probe(args: dict[str, Any], director: FfugDirector) -> dict[st
         _attempt(f"query {own}", "allow", query(own)),
         _attempt(f"query {foreign_tenant}", "deny", query(foreign_tenant)),
         _attempt(f"query {sibling}", "deny", query(sibling)),
+        _attempt(f"query {env_sibling}", "deny", query(env_sibling)),
         _attempt(f"query {foreign_env}", "deny", query(foreign_env)),
         _attempt(
             "batch-get this tenant AND a foreign one in ONE request",
@@ -424,6 +432,32 @@ def _op_isolation_probe(args: dict[str, Any], director: FfugDirector) -> dict[st
     if probe_tenant and probe_tenant != tenant_id:
         named = keys.partition(environment, probe_tenant)
         attempts.append(_attempt(f"query {named} (a real tenant)", "deny", query(named)))
+
+    # The same, on the ENVIRONMENT axis (PORTH-627), and the one EMS could not
+    # ask until it ran two environments.
+    #
+    # `foreign_env` above aims at a sentinel that exists nowhere, so it is
+    # vacuous in exactly the way PORTH-598 objected to for tenants. Naming a
+    # REAL environment — one with its own stack, its own table and this same
+    # tenant's rows in it — is what makes the refusal evidence.
+    #
+    # Note where the query goes: THIS environment's table, since that is the
+    # only table these credentials can reach at all. The foreign part is the
+    # KEY. So a denial here is attributable to the session policy's $env
+    # narrowing and not to the resource layer, which is the whole point —
+    # FfugTenantRole's ceiling is ENV#*#TENANT#*, so an un-narrowed session
+    # would be ALLOWED to read this partition.
+    #
+    # Safe to let the caller name it for the same reason probe_tenant is: the
+    # value scopes nothing. The Director's environment still comes from the
+    # signed envelope, and this string only builds a partition asserted to be
+    # refused. The result carries counts, never rows.
+    probe_environment = (args.get("probe_environment") or "").strip()
+    if probe_environment and probe_environment != environment:
+        named_env = keys.partition(probe_environment, tenant_id)
+        attempts.append(
+            _attempt(f"query {named_env} (a real environment)", "deny", query(named_env))
+        )
 
     # The role STS actually issued, asked through the same narrowed credentials
     # everything else here uses. A client built from the ambient identity would
@@ -456,6 +490,7 @@ def _op_isolation_probe(args: dict[str, Any], director: FfugDirector) -> dict[st
         "environment": environment,
         "tenant_id": tenant_id,
         "probe_tenant": probe_tenant or None,
+        "probe_environment": probe_environment or None,
         "role": role,
         "attempts": attempts,
         # Every attempt, not the readable one. A successful read of your own

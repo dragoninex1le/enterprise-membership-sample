@@ -102,7 +102,7 @@ class _Recording:
 #: (SAMPLE_APP_CALLBACK_TARGET, set from the function resource); set here so the
 #: async path can run at all — there is no registry entry to fall back on, and
 #: that is the design rather than an omission (PORTH-624).
-CALLBACK_TARGET = "porth-sample-app-callback-test"
+CALLBACK_TARGET = "ems-sample-app-callback-test"
 
 
 @pytest.fixture(autouse=True)
