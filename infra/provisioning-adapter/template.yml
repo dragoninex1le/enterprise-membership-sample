@@ -1,0 +1,203 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  prawf provisioning adapter for EMS (PRF-9). One adapter per target; the slot is chosen per call.
+  Invoked directly by ARN, with no HTTP surface. This slice answers capabilities only.
+
+# A standalone stack, like infra/qa-tools and for the same reasons: it writes Porth's tables, which
+# the sample-app stack does not own, and it is prawf's backdoor rather than part of the application.
+# Everything lives under infra/provisioning-adapter/ so it can be lifted out whole.
+#
+# IAM, in one paragraph. The function's own role (ExecutionRole) holds NO DynamoDB access. Every data
+# call assumes DataRole with an inline session policy that admits only partition keys under
+# ENV#{slot}#, so a request routed to the wrong slot is denied by AWS rather than avoided by code.
+# DataRole's policy is the ceiling: read-only in this slice, the four Porth tables named explicitly
+# (never porth-*, which on main also matches the sample app's own table), and Scan denied outright -
+# ForAllValues over the absent LeadingKeys of a Scan evaluates true and would read every slot.
+
+Parameters:
+  SlotMap:
+    Type: String
+    Default: '{"slots":{"porth-dau":{"environment_id":"ems-porth-dau","environment_class":"disposable"}}}'
+    Description: >
+      The target's own list of its slots. Single-slot until PRF-19 publishes contract 1.1.0, because
+      a 1.0.0 caller cannot name a slot and a multi-slot adapter refuses a call that does not.
+  PorthStackName:
+    Type: String
+    Default: serverlessrepo-porth-components
+    Description: The Porth SAR stack. Its serverlessrepo:semanticVersion tag is the candidate version.
+  PorthTenantsTable:
+    Type: String
+    Description: From the Porth stack's TenantsTableName output. Resolved by the deploy, never typed.
+  PorthRolesTable:
+    Type: String
+    Description: From the Porth stack's RolesTableName output.
+  PorthPermissionsTable:
+    Type: String
+    Description: From the Porth stack's PermissionsTableName output.
+  PorthClaimMappingConfigsTable:
+    Type: String
+    Description: From the Porth stack's ClaimMappingConfigsTableName output.
+  AdapterVersion:
+    Type: String
+    Default: 0.0.0-dev
+    Description: Build identity, set from the commit by the deploy.
+  CallerRoleArn:
+    Type: String
+    Default: ''
+    Description: >
+      prawf-runner in the Components account. Empty in PRF-9, which is proven in-account only;
+      PRF-10 sets it and the cross-account permission appears.
+
+Conditions:
+  HasCaller: !Not [!Equals [!Ref CallerRoleArn, '']]
+
+Resources:
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: prawf adapter runtime. No data access - it assumes DataRole narrowed to one slot.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: adapter-runtime
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: OwnLogGroup
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/porth-provisioning-adapter:*
+              - Sid: ReadSlotMap
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/prawf/adapter/slot-map
+              - Sid: ReadPorthStackVersion
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${PorthStackName}/*
+
+  DataRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Ceiling for Porth data access. Always assumed with a one-slot session policy.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt ExecutionRole.Arn
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: porth-tables-ceiling
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadPorthTables
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:Query
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthTenantsTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthTenantsTable}/index/*
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthRolesTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthRolesTable}/index/*
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthPermissionsTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthPermissionsTable}/index/*
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthClaimMappingConfigsTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthClaimMappingConfigsTable}/index/*
+              - Sid: NeverScan
+                Effect: Deny
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:PartiQLSelect
+                  - dynamodb:ExecuteStatement
+                  - dynamodb:BatchExecuteStatement
+                  - dynamodb:ExecuteTransaction
+                Resource: '*'
+
+  # A separate policy, not an inline statement on ExecutionRole: DataRole's trust names
+  # ExecutionRole, so granting AssumeRole inline would make each role depend on the other.
+  ExecutionRoleMayAssumeDataRole:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: assume-data-role
+      Roles:
+        - !Ref ExecutionRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AssumeDataRoleOnly
+            Effect: Allow
+            Action: sts:AssumeRole
+            Resource: !GetAtt DataRole.Arn
+
+  SlotMapParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /prawf/adapter/slot-map
+      Type: String
+      Value: !Ref SlotMap
+      Description: The target's own list of its slots. Read by the adapter on every call.
+
+  AdapterLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/porth-provisioning-adapter
+      RetentionInDays: 30
+
+  AdapterFunction:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - ExecutionRoleMayAssumeDataRole
+      - AdapterLogGroup
+    Properties:
+      FunctionName: porth-provisioning-adapter
+      Handler: handler.handler
+      Runtime: python3.13
+      CodeUri: src/adapter/
+      Timeout: 300
+      MemorySize: 256
+      Role: !GetAtt ExecutionRole.Arn
+      Environment:
+        Variables:
+          SLOT_MAP_PARAMETER: !Ref SlotMapParameter
+          DATA_ROLE_ARN: !GetAtt DataRole.Arn
+          PORTH_STACK_NAME: !Ref PorthStackName
+          PORTH_TENANTS_TABLE: !Ref PorthTenantsTable
+          PORTH_ROLES_TABLE: !Ref PorthRolesTable
+          PORTH_PERMISSIONS_TABLE: !Ref PorthPermissionsTable
+          PORTH_CLAIM_MAPPING_CONFIGS_TABLE: !Ref PorthClaimMappingConfigsTable
+          ADAPTER_VERSION: !Ref AdapterVersion
+
+  # The principal IS the restriction. No aws:SourceAccount condition: that key exists only when one
+  # AWS service calls another, so for a role invoking directly it is absent, the StringEquals is
+  # false, and every call is denied with an error that reads like a missing grant.
+  CallerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasCaller
+    Properties:
+      FunctionName: !Ref AdapterFunction
+      Action: lambda:InvokeFunction
+      Principal: !Ref CallerRoleArn
+
+Outputs:
+  AdapterFunctionArn:
+    Description: What the target register points at. One fixed ARN per target (R8).
+    Value: !GetAtt AdapterFunction.Arn
+  DataRoleArn:
+    Description: The ceiling role. Never assumed without a one-slot session policy.
+    Value: !GetAtt DataRole.Arn
+  SlotMapParameterName:
+    Description: The target's own list of its slots.
+    Value: !Ref SlotMapParameter
