@@ -270,6 +270,11 @@ Resources:
 
   SampleAppTable:
     Type: AWS::DynamoDB::Table
+    # PORTH-627 renames this table, and a rename is a replacement: without these,
+    # the deploy that lands the rename DELETES the old table and its data. Retained,
+    # the old table survives as an orphan to copy from, then delete by hand.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       TableName: !Sub ems-sample-app-${EnvironmentSlot}
       BillingMode: PAY_PER_REQUEST
@@ -895,6 +900,11 @@ Resources:
 
   FfugTable:
     Type: AWS::DynamoDB::Table
+    # PORTH-627 renames this table, and a rename is a replacement: without these,
+    # the deploy that lands the rename DELETES the old table and its data. Retained,
+    # the old table survives as an orphan to copy from, then delete by hand.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       TableName: !Sub ems-ffug-${EnvironmentSlot}
       BillingMode: PAY_PER_REQUEST
