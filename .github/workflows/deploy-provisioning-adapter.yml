@@ -191,12 +191,28 @@ jobs:
           esac
 
       # SlotMap is left at the template's single-slot default until PRF-19 publishes contract 1.1.0.
-      # CallerRoleArn is left empty: PRF-9 is proven in-account only, and PRF-10 sets it.
+      #
+      # CallerRoleArn comes from vars.PRAWF_CALLER_ROLE_ARN (PRF-10). Unset, no cross-account
+      # permission exists and the adapter is in-account only. Set, it must be EXACTLY a prawf-runner
+      # role: granting the canary would turn the canary's pass into a false one, and anything wider
+      # (an account root, a wildcard) would admit principals the harness cannot see.
       - name: SAM deploy
         env:
           CFN_EXECUTION_ROLE: ${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}
+          CALLER: ${{ vars.PRAWF_CALLER_ROLE_ARN }}
         run: |
           set -euo pipefail
+          CALLER_ARG=()
+          if [ -n "${CALLER:-}" ]; then
+            if ! [[ "$CALLER" =~ ^arn:aws:iam::[0-9]{12}:role/prawf-runner$ ]]; then
+              echo "::error::PRAWF_CALLER_ROLE_ARN must be exactly a prawf-runner role ARN, got: $CALLER"
+              exit 1
+            fi
+            CALLER_ARG=("CallerRoleArn=$CALLER")
+            echo "Cross-account invoke granted to $CALLER"
+          else
+            echo "PRAWF_CALLER_ROLE_ARN unset - in-account only"
+          fi
           sam deploy \
             --stack-name "$STACK_NAME" \
             --resolve-s3 \
@@ -211,7 +227,8 @@ jobs:
               "PorthRolesTable=${{ steps.porth.outputs.RolesTableName }}" \
               "PorthPermissionsTable=${{ steps.porth.outputs.PermissionsTableName }}" \
               "PorthClaimMappingConfigsTable=${{ steps.porth.outputs.ClaimMappingConfigsTableName }}" \
-              "AdapterVersion=${GITHUB_SHA::12}"
+              "AdapterVersion=${GITHUB_SHA::12}" \
+              "${CALLER_ARG[@]}"
 
       - name: pip from CodeArtifact (estyn-prawf-py)
         run: |
