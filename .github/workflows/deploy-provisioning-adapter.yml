@@ -45,6 +45,17 @@ jobs:
         with:
           python-version: '3.13'
 
+      # Without this, an unset role reads as "Could not load credentials from any providers" -
+      # an error that names the symptom and not the cause.
+      - name: Require the deploy role
+        env:
+          ROLE: ${{ vars.AWS_ROLE_ARN }}
+        run: |
+          if [ -z "${ROLE:-}" ]; then
+            echo "::error::vars.AWS_ROLE_ARN is not set in the prawf-adapter environment"
+            exit 1
+          fi
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -78,6 +89,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+
+      # Without this, an unset role reads as "Could not load credentials from any providers" -
+      # an error that names the symptom and not the cause.
+      - name: Require the deploy role
+        env:
+          ROLE: ${{ vars.AWS_ROLE_ARN }}
+        run: |
+          if [ -z "${ROLE:-}" ]; then
+            echo "::error::vars.AWS_ROLE_ARN is not set in the prawf-adapter environment"
+            exit 1
+          fi
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
