@@ -148,3 +148,11 @@ def test_everything_the_adapter_roles_use_is_inside_the_boundary(boot):
     outside = {a: role for a, role in used.items() if a not in boundary}
     assert not outside, f"granted but not inside prawf-adapter-boundary (denied at runtime): {outside}"
 
+
+def test_the_execution_role_can_expand_the_sam_transform(boot):
+    """template.yml uses AWS::Serverless-2016-10-31, and with --role-arn the execution role is the one
+    that expands it. Missing this, the very first change set fails before any resource exists."""
+    found = [st for st in statements(boot["ExecutionRole"])
+             if st["Effect"] == "Allow" and actions(st) == ["cloudformation:CreateChangeSet"]]
+    assert found, "no CreateChangeSet on the SAM transform"
+    assert all(r.endswith(":aws:transform/Serverless-2016-10-31") for st in found for r in resources(st))
