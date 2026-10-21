@@ -3,6 +3,15 @@ name: Deploy Admin UI
 on:
   push:
     branches: [main]
+    # Paths with their own pipelines never deploy the application. A push touching only these is
+    # skipped; one that also touches the app still deploys it. An ignore-list rather than an
+    # allow-list: missing an entry here costs an unneeded deploy, whereas an allow-list that missed
+    # one of the app's dependencies would silently stop deploying app changes.
+    paths-ignore:
+      - 'infra/provisioning-adapter/**'
+      - '.github/workflows/deploy-provisioning-adapter.yml'
+      - 'infra/qa-tools/**'
+      - '.github/workflows/deploy-qa-tools.yml'
   workflow_dispatch:
 
 # Serialise deploy runs per branch so concurrent runs don't race on the
