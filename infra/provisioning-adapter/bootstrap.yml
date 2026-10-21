@@ -221,6 +221,15 @@ Resources:
                 Resource:
                   - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:porth-provisioning-adapter
                   - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:porth-provisioning-adapter:*
+              # CloudFormation creates the Lambda as THIS role, and Lambda fetches the code from SAM's
+              # artifact bucket with this role's permissions. Without it the first deploy fails with
+              # "Error occurred while GetObject. S3 Error Code: AccessDenied". Read-only, objects only.
+              - Sid: ReadTheAdapterCode
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: arn:aws:s3:::aws-sam-cli-managed-default-samclisourcebucket-*/*
               - Sid: TheAdapterLogGroup
                 Effect: Allow
                 Action: logs:*

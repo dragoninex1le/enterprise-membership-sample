@@ -120,3 +120,14 @@ def test_the_deploy_role_has_no_iam_power_beyond_passing_the_execution_role(boot
     for st in statements(boot["DeployRole"]):
         if st["Effect"] == "Allow":
             assert [a for a in actions(st) if a.startswith("iam:")] in ([], ["iam:PassRole"]), st["Sid"]
+
+
+def test_the_execution_role_can_read_the_lambda_code_and_nothing_more_of_s3(boot):
+    """CloudFormation creates the function as the execution role, and Lambda reads the code from S3
+    with that role's permissions - so it needs read on SAM's artifacts, and only read."""
+    s3 = [st for st in statements(boot["ExecutionRole"]) if any(a.startswith("s3:") for a in actions(st))]
+    assert s3, "no S3 read: the first deploy would fail fetching the code"
+    for st in s3:
+        assert set(actions(st)) <= {"s3:GetObject", "s3:GetObjectVersion"}, st["Sid"]
+        assert all("samclisourcebucket-*/*" in r for r in resources(st)), st["Sid"]
+
