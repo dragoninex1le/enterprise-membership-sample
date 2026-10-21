@@ -131,3 +131,20 @@ def test_the_execution_role_can_read_the_lambda_code_and_nothing_more_of_s3(boot
         assert set(actions(st)) <= {"s3:GetObject", "s3:GetObjectVersion"}, st["Sid"]
         assert all("samclisourcebucket-*/*" in r for r in resources(st)), st["Sid"]
 
+
+def test_everything_the_adapter_roles_use_is_inside_the_boundary(boot):
+    """A permission a role holds but its boundary does not allow is silently denied at runtime. So
+    every action the adapter's roles are granted in template.yml must be one the boundary permits -
+    this is what fails first when a later slice adds a verb and forgets the bootstrap."""
+    boundary = {a for st in boot["PrawfAdapterBoundary"]["Properties"]["PolicyDocument"]["Statement"]
+                if st["Effect"] == "Allow" for a in actions(st)}
+    tpl = load("template.yml")["Resources"]
+    used = {}
+    for name in ("ExecutionRole", "DataRole", "ExecutionRoleMayAssumeDataRole"):
+        for st in statements(tpl[name]):
+            if st["Effect"] == "Allow" and "Principal" not in st:
+                for a in actions(st):
+                    used.setdefault(a, name)
+    outside = {a: role for a, role in used.items() if a not in boundary}
+    assert not outside, f"granted but not inside prawf-adapter-boundary (denied at runtime): {outside}"
+
