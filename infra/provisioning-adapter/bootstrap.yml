@@ -1,0 +1,251 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  One-time bootstrap for the provisioning-adapter pipeline (PRF-9). Deploy once, by hand, in the EMS
+  account. Creates the pipeline's deploy role, its CloudFormation execution role, and the permissions
+  boundary every adapter role must carry.
+
+# Same shape as Components' infra/prawf-runner/bootstrap.yml, for the same reason. The adapter
+# pipeline creates IAM roles, and a pipeline that creates IAM roles is an escalation path: whoever can
+# run it could mint a role with anything. So the execution role may create and change adapter roles
+# ONLY with prawf-adapter-boundary attached, and may never remove it. The boundary lives here, outside
+# the pipeline's reach.
+#
+# The boundary is wider than the runner's, because the adapter's job is data access. It still caps the
+# adapter at: its own log group, its own slot map, reading the Porth stack's version tag, assuming its
+# own data role, and Porth's four table FAMILIES by name - never porth-*, which on main also matches
+# the sample app's own table. Scan and PartiQL are denied outright: ForAllValues over the absent
+# LeadingKeys of a Scan evaluates true and would read every slot.
+
+Parameters:
+  GitHubRepo:
+    Type: String
+    Default: dragoninex1le/enterprise-membership-sample
+  DeployEnvironment:
+    Type: String
+    Default: prawf-adapter
+  PorthStackName:
+    Type: String
+    Default: serverlessrepo-porth-components
+  PrawfDomainOwner:
+    Type: String
+    Default: '084847995635'
+    Description: The Components account, which owns the estyn-prawf CodeArtifact domain.
+
+Resources:
+  PrawfAdapterBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: prawf-adapter-boundary
+      Description: The most any provisioning-adapter role can ever do.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: OwnLogGroup
+            Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/porth-provisioning-adapter:*
+          - Sid: OwnSlotMap
+            Effect: Allow
+            Action: ssm:GetParameter
+            Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/prawf/adapter/*
+          - Sid: PorthStackVersionTag
+            Effect: Allow
+            Action: cloudformation:DescribeStacks
+            Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${PorthStackName}/*
+          - Sid: AssumeOwnDataRole
+            Effect: Allow
+            Action: sts:AssumeRole
+            Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/porth-provisioning-adapter-*
+          - Sid: PorthTableFamilies
+            Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:BatchGetItem
+              - dynamodb:Query
+              - dynamodb:DescribeTable
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:BatchWriteItem
+            Resource:
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-tenants-*
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-roles-*
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-permissions-*
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-claim-mapping-configs-*
+          - Sid: NeverScan
+            Effect: Deny
+            Action:
+              - dynamodb:Scan
+              - dynamodb:PartiQLSelect
+              - dynamodb:ExecuteStatement
+              - dynamodb:BatchExecuteStatement
+              - dynamodb:ExecuteTransaction
+            Resource: '*'
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: prawf-adapter-deploy-role
+      Description: Deploys the provisioning-adapter stack and proves it in-account. Orchestrates only.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: GitHubActionsOneEnvironmentOnly
+            Effect: Allow
+            Principal:
+              Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepo}:environment:${DeployEnvironment}
+      Policies:
+        - PolicyName: deploy-the-adapter-stack
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: TheAdapterStackOnly
+                Effect: Allow
+                Action: cloudformation:*
+                Resource:
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/porth-provisioning-adapter/*
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/aws-sam-cli-managed-default/*
+              - Sid: ReadPorthStackOutputs
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${PorthStackName}/*
+              - Sid: ListStacksCannotBeScoped
+                Effect: Allow
+                Action: cloudformation:ListStacks
+                Resource: '*'
+              - Sid: PassOnlyTheExecutionRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt ExecutionRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
+              - Sid: SamArtifactsBucket
+                Effect: Allow
+                Action: s3:*
+                Resource:
+                  - arn:aws:s3:::aws-sam-cli-managed-default-samclisourcebucket-*
+                  - arn:aws:s3:::aws-sam-cli-managed-default-samclisourcebucket-*/*
+              - Sid: InAccountProofInvoke
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:porth-provisioning-adapter
+              # prawf-schemas, for the tests that gate the deploy. Cross-account: the estyn-prawf domain
+              # already grants read to the organisation; this is the identity half.
+              - Sid: ReadPrawfSchemas
+                Effect: Allow
+                Action:
+                  - codeartifact:GetAuthorizationToken
+                  - codeartifact:GetRepositoryEndpoint
+                  - codeartifact:ReadFromRepository
+                Resource:
+                  - !Sub arn:aws:codeartifact:${AWS::Region}:${PrawfDomainOwner}:domain/estyn-prawf
+                  - !Sub arn:aws:codeartifact:${AWS::Region}:${PrawfDomainOwner}:repository/estyn-prawf/estyn-prawf-py
+              - Sid: CodeArtifactBearerToken
+                Effect: Allow
+                Action: sts:GetServiceBearerToken
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    sts:AWSServiceName: codeartifact.amazonaws.com
+              - Sid: CallerIdentity
+                Effect: Allow
+                Action: sts:GetCallerIdentity
+                Resource: '*'
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: prawf-adapter-cfn-execution-role
+      Description: What CloudFormation acts as. Builds the adapter, always inside the boundary.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: the-adapter-inside-the-boundary
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: GrantOnlyWithTheBoundary
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:PutRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:PutRolePermissionsBoundary
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/porth-provisioning-adapter-*
+                Condition:
+                  StringEquals:
+                    iam:PermissionsBoundary: !Ref PrawfAdapterBoundary
+              - Sid: ManageTheAdapterRoles
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:DeleteRole
+                  - iam:UpdateRole
+                  - iam:UpdateRoleDescription
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:DetachRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/porth-provisioning-adapter-*
+              - Sid: PassTheFunctionRoleToLambda
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/porth-provisioning-adapter-*
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: lambda.amazonaws.com
+              - Sid: NeverRemoveTheBoundary
+                Effect: Deny
+                Action: iam:DeleteRolePermissionsBoundary
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/porth-provisioning-adapter-*
+              - Sid: TheAdapterFunction
+                Effect: Allow
+                Action: lambda:*
+                Resource:
+                  - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:porth-provisioning-adapter
+                  - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:porth-provisioning-adapter:*
+              - Sid: TheAdapterLogGroup
+                Effect: Allow
+                Action: logs:*
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/porth-provisioning-adapter
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/porth-provisioning-adapter:*
+              - Sid: TheSlotMap
+                Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:DeleteParameter
+                  - ssm:AddTagsToResource
+                  - ssm:RemoveTagsFromResource
+                  - ssm:ListTagsForResource
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/prawf/adapter/*
+
+Outputs:
+  DeployRoleArn:
+    Description: Set as AWS_ROLE_ARN in the prawf-adapter GitHub environment.
+    Value: !GetAtt DeployRole.Arn
+  ExecutionRoleArn:
+    Description: Set as AWS_CFN_EXECUTION_ROLE_ARN in the prawf-adapter GitHub environment.
+    Value: !GetAtt ExecutionRole.Arn
+  BoundaryArn:
+    Description: Carried by every provisioning-adapter role.
+    Value: !Ref PrawfAdapterBoundary

@@ -142,6 +142,25 @@ jobs:
             echo "$key: $value"
           done
 
+      # prawf-adapter-boundary admits Porth's table FAMILIES by name (porth-tenants-* and so on). A
+      # table named outside them would be silently denied on every call - so a name that does not fit
+      # its family fails here, at deploy, instead of later as an AccessDenied that looks like a bug.
+      - name: Porth's tables fit the boundary
+        env:
+          TENANTS: ${{ steps.porth.outputs.TenantsTableName }}
+          ROLES: ${{ steps.porth.outputs.RolesTableName }}
+          PERMISSIONS: ${{ steps.porth.outputs.PermissionsTableName }}
+          CLAIMS: ${{ steps.porth.outputs.ClaimMappingConfigsTableName }}
+        run: |
+          set -euo pipefail
+          bad=0
+          check() { [[ "$2" == $1* ]] || { echo "::error::$2 is outside prawf-adapter-boundary's $1* family"; bad=1; }; }
+          check porth-tenants- "$TENANTS"
+          check porth-roles- "$ROLES"
+          check porth-permissions- "$PERMISSIONS"
+          check porth-claim-mapping-configs- "$CLAIMS"
+          exit $bad
+
       - name: SAM build
         run: sam build --template-file infra/provisioning-adapter/template.yml
 

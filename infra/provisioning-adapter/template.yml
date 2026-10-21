@@ -57,6 +57,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       Description: prawf adapter runtime. No data access - it assumes DataRole narrowed to one slot.
+      PermissionsBoundary: !Sub arn:aws:iam::${AWS::AccountId}:policy/prawf-adapter-boundary
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -88,6 +89,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       Description: Ceiling for Porth data access. Always assumed with a one-slot session policy.
+      PermissionsBoundary: !Sub arn:aws:iam::${AWS::AccountId}:policy/prawf-adapter-boundary
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
