@@ -5,7 +5,7 @@ it. One section per claim. A claim with no run link and no way to recompute it
 is a note, not evidence, and belongs somewhere else.
 
 Install: `enterprise-membership-sample`, branch `dev`.
-Three environment axes, and they hold **different values** — every line below
+Three environment axes, and they held **different values** — every line below
 picks one, and picking the wrong one fails silently:
 
 | Axis | Value | What it names |
@@ -13,6 +13,36 @@ picks one, and picking the wrong one fails silently:
 | `PorthBranch` | `dev` | which configuration documents are read |
 | `PorthEnvironment` | `dev` | which table and function names are used |
 | `PorthEnvSlot` | `prod` | the ADR-Z8 data slot in every partition key |
+
+> **Renamed since, 2026-09-01 (PORTH-627).** Every resource name recorded below
+> is what those runs actually addressed, and is left as observed — evidence that
+> is edited to match today's stack stops being evidence. To reproduce any of it
+> on the current install, translate:
+>
+> | then | now |
+> |---|---|
+> | `porth-sample-app-dev` | `ems-sample-app-porth-sample` |
+> | `porth-sample-app-callback-dev` | `ems-sample-app-callback-porth-sample` |
+> | `porth-ffug-dev` | `ems-ffug-porth-sample` |
+> | `porth-ffug-worker-dev` | `ems-ffug-worker-porth-sample` |
+>
+> The three axes are two. `PorthEnvironment` is gone — it suffixed names with a
+> value that was not the environment — and `PorthEnvSlot` is `EnvironmentSlot`,
+> now `porth-sample` rather than `prod`, so the slot in a partition key is the
+> same word as the label in the host a tenant types. `PorthBranch` is unchanged
+> and still addresses `/porth/dev/…`.
+>
+> Two things below are NOT renames and a table cannot translate them:
+>
+> - **`endpoints.default` is now `endpoints.request`**, and its target is the
+>   literal `ems-ffug-${environment}`, substituted per call from the Director's
+>   verified claim. Both environments share one `services/ffug` document, so a
+>   fixed name there would send one environment's requests to the other's
+>   function.
+> - **`porth-common >= 0.0.17`**, not `0.0.16` — that substitution is what the
+>   bump is for.
+>
+> The runs recorded below predate both. They are still the runs that happened.
 
 ---
 
@@ -183,9 +213,16 @@ environment=dev document=/porth/dev/services/ffug` on first invocation, and
 deliberately not behind DEBUG, because a post-deploy check that needs a redeploy
 to switch on is only available to someone who already suspects a problem.
 
-`environment=prod` appears on `ffug.served` beside `branch=dev`, and both are
-correct: different axes. `PORTH_BRANCH` selects the configuration path,
-`PorthEnvSlot` fixes this install's data environment.
+`environment=prod` appears on `ffug.served` beside `branch=dev`, and both were
+correct: different axes. `PORTH_BRANCH` selects the configuration path, and the
+data environment was fixed at `prod` by the install's `FixedEnvironment`.
+
+That is the half PORTH-627 changed, and it is worth being exact about because
+the line above still reads the same way. `FixedEnvironment` is now EMPTY, which
+IS multi-environment mode: nothing pins the slot, and `environment=` on that
+line is whatever the Director resolved from the signed envelope — `porth-sample`
+here, `porth-dau` on the other deployment. The two axes are still two; one of
+them simply stopped being a deployment constant and became a per-request claim.
 
 ### An earlier run, kept because its accident proved something
 

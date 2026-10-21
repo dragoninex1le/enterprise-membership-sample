@@ -177,9 +177,18 @@ locals {
   # What a callback still takes from here is the KEY — ffug signs a completion
   # with its response key, below — and the requester's status. The address is
   # the only part that left.
+  # `$${environment}` is written LITERALLY into the document; porth-common
+  # substitutes it at resolve time from the Director's verified environment
+  # claim (porth-common 0.0.17, EndpointDefinition.for_environment).
+  #
+  # It has to be the placeholder rather than a value. EMS now deploys one stack
+  # per environment and both declare PORTH_SERVICE_ID: ffug, so they share this
+  # one services/ffug document — a literal name here would send porth-dau's
+  # requests to porth-sample's function. This module runs once and cannot know
+  # which environment is calling; the caller does (PORTH-627).
   endpoints = {
     ffug = {
-      request = "porth-ffug-${var.porth_environment}"
+      request = "ems-ffug-$${environment}"
     }
   }
 
@@ -282,7 +291,9 @@ resource "aws_ssm_parameter" "service_signing_key_arn" {
 resource "aws_iam_role_policy" "deploy_role_async_work" {
   count = var.deploy_role_name == "" ? 0 : 1
 
-  name = "porth-async-work"
+  # ems-, not porth-: this policy is EMS's, on EMS's deploy role. The prefix is
+  # the demarcation — porth- is what Porth deploys (PORTH-627).
+  name = "ems-async-work"
   role = var.deploy_role_name
 
   policy = jsonencode({
@@ -309,10 +320,20 @@ resource "aws_iam_role_policy" "deploy_role_async_work" {
           "sqs:TagQueue",
           "sqs:UntagQueue",
         ]
-        # `porth-*`, not the stack prefix. These queues follow the FUNCTION
-        # naming convention in this stack — porth-ffug-work-dev beside
-        # porth-ffug-dev — so enterprise-membership-sample-* would match nothing.
-        Resource = "arn:aws:sqs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:porth-*"
+        # NOT the stack prefix. These queues follow the FUNCTION naming
+        # convention in this stack — ems-ffug-work-{env} beside ems-ffug-{env} —
+        # so enterprise-membership-sample-* would match nothing.
+        #
+        # BOTH prefixes, and the old one is not dead yet (PORTH-627). Renaming a
+        # queue is a REPLACEMENT: CloudFormation creates ems-ffug-work-{env} and
+        # then deletes porth-ffug-work-dev, so a grant covering only the new name
+        # strands the stack in DELETE_FAILED on the way past — the same failure
+        # mode the DeleteQueue action above was added for. Drop the porth-* entry
+        # once no queue answers to it.
+        Resource = [
+          "arn:aws:sqs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:ems-*",
+          "arn:aws:sqs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:porth-*",
+        ]
       },
       {
         # A SAM `Type: SQS` event compiles to an AWS::Lambda::EventSourceMapping,
@@ -379,9 +400,37 @@ resource "aws_iam_role_policy" "deploy_role_async_work" {
         Effect = "Allow"
         Action = "iam:UpdateAssumeRolePolicy"
         Resource = [
-          "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/porth-sample-app-tenant-*",
+          "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/ems-sample-app-tenant-*",
           "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/enterprise-membership-sample-*",
         ]
+      },
+      {
+        # PORTH-627 — one stack per environment, and the vendor's grant names
+        # exactly one stack.
+        #
+        # Porth's receiving-account template (Components,
+        # infra/receiving-account-templates/sample-app-deploy-role.yaml) grants
+        # cloudformation:* on stack/enterprise-membership-sample/* — the bare
+        # name, nothing after it. porth-sample deploys as that stack and matches;
+        # porth-dau deploys as enterprise-membership-sample-porth-dau and matches
+        # nothing.
+        #
+        # CONFIRMED by run 35014793418: SAM deploy denied cloudformation:
+        # DescribeStacks on stack/enterprise-membership-sample-porth-dau/*, after
+        # every earlier step had passed. Step 22 queried the same stack first and
+        # was denied too, but reads with `2>/dev/null || echo "NONE"`, so it
+        # reported "no stack" and passed — the denial surfaced one step later
+        # than it happened.
+        #
+        # Here rather than in the vendor template: that file is Porth's product,
+        # and EMS works within the grant it ships, adding to it on its own role.
+        # The pattern is the suffix, not porth-dau by name, so a further
+        # environment needs no new grant. The unsuffixed stack stays covered by
+        # the vendor statement.
+        Sid      = "CloudFormationPerEnvironmentStacks"
+        Effect   = "Allow"
+        Action   = "cloudformation:*"
+        Resource = "arn:aws:cloudformation:${var.aws_region}:${data.aws_caller_identity.current.account_id}:stack/enterprise-membership-sample-*/*"
       },
     ]
   })

@@ -3,20 +3,11 @@ import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { usePorthContext } from '../context/PorthContext'
 import { useHasRole } from '../hooks/useRoles'
-import { PLATFORM_ADMIN } from '../constants'
+import { PLATFORM_ADMIN, DEFAULT_CLAIM_MAPPING } from '../constants'
 import { claimConfigsApi } from '../api/claimConfigs'
 import type { ClaimMappingConfig } from '../api/types'
 
-const DEFAULT_MAPPING_SOURCE = {
-  schema_version: '1',
-  fields: {
-    roles: {
-      claim_key: 'https://porth.io/roles',
-      ops: [{ op: 'resolve_roles' }],
-    },
-  },
-  default_roles: [] as string[],
-}
+const DEFAULT_MAPPING_SOURCE = DEFAULT_CLAIM_MAPPING
 
 interface EvalResult {
   matchedRoles: string[]
@@ -34,21 +25,27 @@ function evaluateClaims(
     return { result: null, error: 'Invalid JSON — check the claims input.' }
   }
 
-  const fields = (mappingSource.fields ?? {}) as Record<
-    string,
-    { claim_key?: string; ops?: Array<{ op: string }> }
-  >
+  // Porth's schema 2.0 lists fields as an array naming the claim in `source`; the
+  // older shape keyed an object by field name with `claim_key`. Read both. Read
+  // only the old one and a real 2.0 config — all Porth now stores — evaluates to
+  // no roles on this page while resolving roles correctly on the server.
+  type FieldConfig = { source?: string; claim_key?: string; ops?: Array<{ op: string }> }
+  const rawFields = mappingSource.fields ?? []
+  const fields: FieldConfig[] = Array.isArray(rawFields)
+    ? (rawFields as FieldConfig[])
+    : Object.values(rawFields as Record<string, FieldConfig>)
 
-  // Collect all claim_keys referenced by resolve_roles fields
+  // Collect all claim keys referenced by resolve_roles fields
   const referencedKeys = new Set<string>()
   const matchedRoles: string[] = []
 
-  for (const fieldConfig of Object.values(fields)) {
+  for (const fieldConfig of fields) {
+    const claimKey = fieldConfig.source ?? fieldConfig.claim_key
     const hasResolveRoles = (fieldConfig.ops ?? []).some(o => o.op === 'resolve_roles')
-    if (!hasResolveRoles || !fieldConfig.claim_key) continue
+    if (!hasResolveRoles || !claimKey) continue
 
-    referencedKeys.add(fieldConfig.claim_key)
-    const claimValue = claims[fieldConfig.claim_key]
+    referencedKeys.add(claimKey)
+    const claimValue = claims[claimKey]
     if (Array.isArray(claimValue)) {
       for (const v of claimValue) {
         if (typeof v === 'string') matchedRoles.push(v)
