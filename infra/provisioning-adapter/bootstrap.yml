@@ -177,6 +177,13 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
+              # template.yml uses the SAM transform, and with --role-arn it is THIS role that expands
+              # it. Without this the change set fails before any resource exists: "not authorized to
+              # perform: cloudformation:CreateChangeSet on ...:aws:transform/Serverless-2016-10-31".
+              - Sid: ExpandTheSamTransform
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31
               - Sid: GrantOnlyWithTheBoundary
                 Effect: Allow
                 Action:
