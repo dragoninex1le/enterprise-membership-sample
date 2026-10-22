@@ -48,18 +48,10 @@ Parameters:
     Description: >
       prawf-runner in the Components account. Empty in PRF-9, which is proven in-account only;
       PRF-10 sets it and the cross-account permission appears.
-  CallerBinding:
-    Type: String
-    Default: a
-    AllowedValues: [a, b]
-    Description: >
-      Which of the two identical caller permissions exists. The deploy flips it every time, so the
-      permission is re-granted on every deploy.
 
 Conditions:
-  HasCaller: !Not [!Equals [!Ref CallerRoleArn, '']]
-  CallerOnA: !And [!Condition HasCaller, !Equals [!Ref CallerBinding, a]]
-  CallerOnB: !And [!Condition HasCaller, !Equals [!Ref CallerBinding, b]]
+  # 'none' is the deploy's first pass: it releases the grant without unsetting the variable.
+  HasCaller: !Not [!Or [!Equals [!Ref CallerRoleArn, ''], !Equals [!Ref CallerRoleArn, none]]]
 
 Resources:
   ExecutionRole:
@@ -194,23 +186,15 @@ Resources:
   # The principal IS the restriction. No aws:SourceAccount condition: that key exists only when one
   # AWS service calls another, so for a role invoking directly it is absent, the StringEquals is
   # false, and every call is denied with an error that reads like a missing grant.
-  # Why two. A resource policy that names a role binds to that role's unique id, not its name. When
-  # the caller's role is deleted and recreated - as prawf-runner was when prawf became one solution
-  # stack (2026-10-22) - the old grant names a role that no longer exists and every call is denied,
-  # though nothing in this template changed. Flipping CallerBinding on every deploy replaces the
-  # permission (CloudFormation creates the new one before deleting the old), so a deploy always
-  # re-grants the CURRENT role behind the ARN. No window without a grant.
-  CallerInvokePermissionA:
+  # A resource policy that names a role binds to that role's unique id, not its name. When the
+  # caller's role is deleted and recreated - as prawf-runner was when prawf became one solution stack
+  # (2026-10-22) - this grant names a role that no longer exists: every call is denied, and Lambda then
+  # rejects ANY change to the function's policy as "The provided principal was invalid" until the
+  # stale statement is gone. So the deploy releases this grant before re-granting it - see the
+  # workflow's SAM deploy step. Removing first is the only order that works.
+  CallerInvokePermission:
     Type: AWS::Lambda::Permission
-    Condition: CallerOnA
-    Properties:
-      FunctionName: !Ref AdapterFunction
-      Action: lambda:InvokeFunction
-      Principal: !Ref CallerRoleArn
-
-  CallerInvokePermissionB:
-    Type: AWS::Lambda::Permission
-    Condition: CallerOnB
+    Condition: HasCaller
     Properties:
       FunctionName: !Ref AdapterFunction
       Action: lambda:InvokeFunction
