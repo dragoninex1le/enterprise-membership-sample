@@ -216,8 +216,10 @@ jobs:
       # role: granting the canary would turn the canary's pass into a false one, and anything wider
       # (an account root, a wildcard) would admit principals the harness cannot see.
       #
-      # CallerBinding flips on every deploy, so the caller's permission is re-granted each time. A grant
-      # binds to the role's unique id; if prawf-runner is recreated, re-granting is the only fix.
+      # Two passes when a caller is named. A grant binds to the role's unique id, so if prawf-runner is
+      # recreated the old grant is stale - and Lambda then refuses every policy change, including adding
+      # a fresh grant, until the stale one is removed. Pass 1 deploys with CallerRoleArn=none (releases
+      # the grant); pass 2 grants the current role. Calls are refused for the few seconds between them.
       - name: SAM deploy
         env:
           CFN_EXECUTION_ROLE: ${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}
@@ -235,27 +237,30 @@ jobs:
           else
             echo "PRAWF_CALLER_ROLE_ARN unset - in-account only"
           fi
-          CURRENT=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" \
-            --query "Stacks[0].Parameters[?ParameterKey=='CallerBinding'].ParameterValue" --output text 2>/dev/null || true)
-          if [ "$CURRENT" = a ]; then BINDING=b; else BINDING=a; fi
-          echo "CallerBinding: ${CURRENT:-none} -> $BINDING"
-          sam deploy \
-            --stack-name "$STACK_NAME" \
-            --resolve-s3 \
-            --capabilities CAPABILITY_IAM \
-            --role-arn "$CFN_EXECUTION_ROLE" \
-            --no-confirm-changeset \
-            --no-fail-on-empty-changeset \
-            --region "$AWS_REGION" \
-            --parameter-overrides \
-              "PorthStackName=$PORTH_STACK_NAME" \
-              "PorthTenantsTable=${{ steps.porth.outputs.TenantsTableName }}" \
-              "PorthRolesTable=${{ steps.porth.outputs.RolesTableName }}" \
-              "PorthPermissionsTable=${{ steps.porth.outputs.PermissionsTableName }}" \
-              "PorthClaimMappingConfigsTable=${{ steps.porth.outputs.ClaimMappingConfigsTableName }}" \
-              "AdapterVersion=${GITHUB_SHA::12}" \
-              "CallerBinding=$BINDING" \
-              "${CALLER_ARG[@]}"
+          deploy() {
+            sam deploy \
+              --stack-name "$STACK_NAME" \
+              --resolve-s3 \
+              --capabilities CAPABILITY_IAM \
+              --role-arn "$CFN_EXECUTION_ROLE" \
+              --no-confirm-changeset \
+              --no-fail-on-empty-changeset \
+              --region "$AWS_REGION" \
+              --parameter-overrides \
+                "PorthStackName=$PORTH_STACK_NAME" \
+                "PorthTenantsTable=${{ steps.porth.outputs.TenantsTableName }}" \
+                "PorthRolesTable=${{ steps.porth.outputs.RolesTableName }}" \
+                "PorthPermissionsTable=${{ steps.porth.outputs.PermissionsTableName }}" \
+                "PorthClaimMappingConfigsTable=${{ steps.porth.outputs.ClaimMappingConfigsTableName }}" \
+                "AdapterVersion=${GITHUB_SHA::12}" \
+                "$@"
+          }
+          if [ ${#CALLER_ARG[@]} -gt 0 ]; then
+            echo "Pass 1: release the caller grant"
+            deploy "CallerRoleArn=none"
+            echo "Pass 2: grant $CALLER"
+          fi
+          deploy "${CALLER_ARG[@]}"
 
       - name: pip from CodeArtifact (estyn-prawf-py)
         run: |
