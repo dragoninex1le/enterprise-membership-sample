@@ -98,3 +98,13 @@ python -m pytest infra/provisioning-adapter/tests -q
 Offline, with in-memory fakes, and every response is validated against the real schemas from the
 `prawf-schemas` package (CodeArtifact `estyn-prawf-py`). A canary proves the validator can fail. The
 C1 test is behavioural: anything the adapter declares must not answer `unsupported`.
+
+## Checking the deployed adapter
+
+`scripts/permutations.py` runs the live function through 99 cases with `aws lambda invoke`: malformed envelopes, version negotiation, slot resolution, the order the checks run in, and every verb against every catalogue entity. Each answer is checked against the outcome and reason code it should get, against the §9 invariants, and against the response schema if `prawf_schemas` is installed. It is read-only, so it is safe against a live slot. Run it with EMS credentials:
+
+```bash
+python3 infra/provisioning-adapter/scripts/permutations.py --profile <ems-profile> --report permutations.json
+```
+
+`--only version` (or `envelope`, `slot`, `order`, `verb:seed`, …) runs a subset. `tests/test_permutations.py` sends every case through the real handler offline, so the script's expectations cannot drift from the code.
