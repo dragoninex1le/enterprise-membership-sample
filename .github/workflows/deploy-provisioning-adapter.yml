@@ -215,6 +215,9 @@ jobs:
       # permission exists and the adapter is in-account only. Set, it must be EXACTLY a prawf-runner
       # role: granting the canary would turn the canary's pass into a false one, and anything wider
       # (an account root, a wildcard) would admit principals the harness cannot see.
+      #
+      # CallerBinding flips on every deploy, so the caller's permission is re-granted each time. A grant
+      # binds to the role's unique id; if prawf-runner is recreated, re-granting is the only fix.
       - name: SAM deploy
         env:
           CFN_EXECUTION_ROLE: ${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}
@@ -232,6 +235,10 @@ jobs:
           else
             echo "PRAWF_CALLER_ROLE_ARN unset - in-account only"
           fi
+          CURRENT=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" \
+            --query "Stacks[0].Parameters[?ParameterKey=='CallerBinding'].ParameterValue" --output text 2>/dev/null || true)
+          if [ "$CURRENT" = a ]; then BINDING=b; else BINDING=a; fi
+          echo "CallerBinding: ${CURRENT:-none} -> $BINDING"
           sam deploy \
             --stack-name "$STACK_NAME" \
             --resolve-s3 \
@@ -247,6 +254,7 @@ jobs:
               "PorthPermissionsTable=${{ steps.porth.outputs.PermissionsTableName }}" \
               "PorthClaimMappingConfigsTable=${{ steps.porth.outputs.ClaimMappingConfigsTableName }}" \
               "AdapterVersion=${GITHUB_SHA::12}" \
+              "CallerBinding=$BINDING" \
               "${CALLER_ARG[@]}"
 
       - name: pip from CodeArtifact (estyn-prawf-py)

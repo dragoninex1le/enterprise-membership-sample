@@ -98,10 +98,27 @@ def test_porth_tables_are_named_never_wildcarded(raw):
 
 
 def test_the_cross_account_permission_is_off_unless_a_caller_is_named(tpl):
-    perm = tpl["Resources"]["CallerInvokePermission"]
-    assert perm["Condition"] == "HasCaller"
-    assert perm["Properties"]["Principal"] == {"Ref": "CallerRoleArn"}
     assert tpl["Parameters"]["CallerRoleArn"]["Default"] == ""
+    for name, condition in (("CallerInvokePermissionA", "CallerOnA"), ("CallerInvokePermissionB", "CallerOnB")):
+        perm = tpl["Resources"][name]
+        assert perm["Condition"] == condition
+        assert perm["Properties"]["Principal"] == {"Ref": "CallerRoleArn"}
+        assert {"Condition": "HasCaller"} in tpl["Conditions"][condition]["And"]
+
+
+def test_the_two_caller_permissions_are_identical_and_exactly_one_exists(tpl):
+    a, b = tpl["Resources"]["CallerInvokePermissionA"], tpl["Resources"]["CallerInvokePermissionB"]
+    assert a["Properties"] == b["Properties"]
+    assert tpl["Parameters"]["CallerBinding"]["AllowedValues"] == ["a", "b"]
+    on = {c: next(x for x in tpl["Conditions"][c]["And"] if "Equals" in x)["Equals"][1]
+          for c in ("CallerOnA", "CallerOnB")}
+    assert on == {"CallerOnA": "a", "CallerOnB": "b"}
+
+
+def test_every_deploy_flips_the_caller_binding():
+    wf = (TEMPLATE.parents[2] / ".github/workflows/deploy-provisioning-adapter.yml").read_text("utf-8")
+    assert '"CallerBinding=$BINDING"' in wf
+    assert 'if [ "$CURRENT" = a ]; then BINDING=b; else BINDING=a; fi' in wf
 
 
 def test_the_default_slot_map_is_single_slot_until_prf_19(tpl):
