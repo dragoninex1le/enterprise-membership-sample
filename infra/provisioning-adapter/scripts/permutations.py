@@ -7,16 +7,17 @@ Run locally, with credentials for the EMS account, against the live function:
 
 Each case is one `aws lambda invoke`, so this exercises the deployed adapter exactly as a caller
 would, including requests prawf itself would refuse to build (a malformed envelope, a foreign major
-version). Read-only: `capabilities` reads the slot map and one tenants row; every other verb is
-refused or unsupported before it touches data. Safe against a live slot.
+version). Read-only: `capabilities` reads the slot map and one tenants row; every other case is
+refused or unsupported before it writes - the `seed` cases are dry runs that fail validation, so
+nothing is ever written. Safe against a live slot.
 
 What each case asserts:
   * the outcome and reason code the adapter's check order produces (handler.py):
       envelope -> contract version -> slot -> entity -> verb
   * the §9 invariants on every response: ok carries no reason code; a non-ok carries one from the
     closed list, no results, and a message saying why
-  * on `capabilities`, the declaration itself: the served slot, contract 1.0.0, the one implemented
-    verb, the eight catalogue entities with no verbs yet (C1)
+  * on `capabilities`, the declaration itself: the served slot, contract 1.0.0, the implemented
+    verbs, the eight catalogue entities, and `seed`/`teardown` on porth-tenant alone (C1)
   * if `prawf_schemas` is importable, every response against the canonical response schema
 
 Exit status is 0 only when every case passes. --report writes each request and response as JSON.
@@ -24,6 +25,7 @@ Exit status is 0 only when every case passes. --report writes each request and r
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -42,6 +44,10 @@ REASON_CODES = {
     "unknown_entity", "limit_exceeded", "not_implemented", "upstream_error", "timeout",
 }
 CONTRACT = "1.0.0"
+#: Implemented cells of the verb x entity matrix (C1). Everything else is unsupported.
+IMPLEMENTED = {("seed", "porth-tenant"), ("teardown", "porth-tenant")}
+#: §3.4, C17: verbs whose payload is entity-specific, so omitting the entity is refused.
+NEEDS_ENTITY = ("bootstrap", "seed", "ensure", "absent")
 UNKNOWN_ENTITY = "porth-tables"  # the contract's own example entity; EMS never declares it
 OTHER_SLOT = "porth-sample"      # a real Porth slot this adapter does not serve
 
@@ -78,13 +84,16 @@ def declares_the_target(slot: str):
             problems.append(f"environment.slot is {env.get('slot')!r}, expected {slot!r}")
         if body.get("contract_versions") != [CONTRACT]:
             problems.append(f"contract_versions is {body.get('contract_versions')!r}")
-        if body.get("verbs") != ["capabilities"]:
-            problems.append(f"verbs is {body.get('verbs')!r}, expected ['capabilities']")
+        if body.get("verbs") != ["capabilities", "seed", "teardown"]:
+            problems.append(f"verbs is {body.get('verbs')!r}, expected ['capabilities', 'seed', 'teardown']")
         ids = [e.get("id") for e in body.get("entities", [])]
         if sorted(ids) != sorted(ENTITIES):
             problems.append(f"entities are {ids!r}")
-        if any(e.get("verbs") for e in body.get("entities", [])):
-            problems.append("an entity declares verbs, but none are implemented (C1)")
+        declared = {(v, e.get("id")) for e in body.get("entities", []) for v in e.get("verbs", [])}
+        if declared != IMPLEMENTED:
+            problems.append(f"entities declare {sorted(declared)}, expected {sorted(IMPLEMENTED)} (C1)")
+        if body.get("dataset_forms") != ["enumerated"]:
+            problems.append(f"dataset_forms is {body.get('dataset_forms')!r}, expected ['enumerated']")
         if body.get("environment_class") not in ("disposable", "protected"):
             problems.append(f"environment_class is {body.get('environment_class')!r}")
         return problems
@@ -140,15 +149,66 @@ def cases(slot: str) -> list[Case]:
              envelope("seed", UNKNOWN_ENTITY), "refused", "unknown_entity"),
     ]
 
-    # 5. Every verb against every entity. Nothing beyond capabilities is implemented yet, so a known
-    #    entity is `unsupported` (prawf skips it), an unknown one is `refused`.
+    # 5. Every verb against every entity, with no payload. An unimplemented cell is `unsupported`
+    #    (prawf skips it); an implemented one refuses the missing payload before touching data; an
+    #    omitted entity on a verb that writes to one is refused (C17); an unknown entity is refused.
     for verb in VERBS + ("frobnicate",):
-        out.append(Case(f"verb:{verb}", "no entity", envelope(verb), "unsupported", "not_implemented"))
+        if verb in NEEDS_ENTITY:
+            out.append(Case(f"verb:{verb}", "no entity", envelope(verb), "refused", "unknown_entity"))
+        elif verb == "teardown":
+            out.append(Case(f"verb:{verb}", "no entity, no run_id", envelope(verb), "refused", "scope_violation"))
+        else:
+            out.append(Case(f"verb:{verb}", "no entity", envelope(verb), "unsupported", "not_implemented"))
         for entity in ENTITIES:
-            out.append(Case(f"verb:{verb}", entity, envelope(verb, entity), "unsupported", "not_implemented"))
+            if (verb, entity) == ("seed", "porth-tenant"):
+                out.append(Case(f"verb:{verb}", f"{entity}, no dataset", envelope(verb, entity), "refused", "dataset_conflict"))
+            elif (verb, entity) == ("teardown", "porth-tenant"):
+                out.append(Case(f"verb:{verb}", f"{entity}, no run_id", envelope(verb, entity), "refused", "scope_violation"))
+            else:
+                out.append(Case(f"verb:{verb}", entity, envelope(verb, entity), "unsupported", "not_implemented"))
         out.append(Case(f"verb:{verb}", f"{UNKNOWN_ENTITY} (unknown)", envelope(verb, UNKNOWN_ENTITY),
                         "refused", "unknown_entity"))
+
+    # 6. seed on porth-tenant: every way a dataset is turned away. All dry runs, all rejected before
+    #    the adapter reads or writes a row - so these are safe against a live slot.
+    def seed(dataset: dict) -> dict:
+        return envelope("seed", "porth-tenant", payload={"dataset": dataset})
+
+    good = tenant_dataset()
+    out += [
+        Case("seed", "by reference is not implemented", seed({k: good[k] for k in ("id", "version", "digest")}),
+             "unsupported", "not_implemented"),
+        Case("seed", "the generated form is not implemented",
+             seed(signed({"id": "ems.load", "version": "1.0.0", "form": "generated", "generator": "tenants.uniform",
+                          "count": 5, "seed_value": 1})), "unsupported", "not_implemented"),
+        Case("seed", "a digest that does not match the content", seed({**good, "digest": "sha256:" + "0" * 64}),
+             "refused", "dataset_conflict"),
+        Case("seed", "a tenant tier Porth would reject", seed(tenant_dataset(tenant_tier="standard")),
+             "refused", "dataset_conflict"),
+        Case("seed", "IdP settings belong to porth-idp-config", seed(tenant_dataset(provider_org_id="org_x")),
+             "refused", "dataset_conflict"),
+        Case("seed", "a resource type not implemented",
+             seed(signed({**good, "resources": [{"type": "user", "alias": "u"}]})), "unsupported", "not_implemented"),
+    ]
     return out
+
+
+def signed(dataset: dict) -> dict:
+    """The dataset with its digest (prawf-dataset-digest/1 - see the adapter's datasets.py)."""
+    body = {k: v for k, v in dataset.items() if k != "digest"}
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return {**body, "digest": "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()}
+
+
+def tenant_dataset(**attributes) -> dict:
+    """A well-formed porth-tenant dataset for a tenant nobody creates: every case using it fails
+    validation, so `permutations-probe` never lands in the slot."""
+    attrs = {"tenant_tier": "development", "org": "ems", "admin_role_source_key": "tenant-admin", **attributes}
+    return signed({
+        "id": "prawf.permutations-probe", "version": "1.0.0", "form": "enumerated",
+        "resources": [{"type": "tenant", "alias": "permutations-probe",
+                       "spec": {"display_name": "Permutations probe", "attributes": attrs}}],
+    })
 
 
 def invoke(function: str, request: object, aws: list[str]) -> tuple[dict | None, str | None]:

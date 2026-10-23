@@ -40,7 +40,7 @@ def test_the_script_covers_every_verb_and_entity_in_the_catalogue():
 
     assert set(permutations.ENTITIES) == set(catalogue.IDS)
     assert set(permutations.VERBS) | {"capabilities"} == set(envelope.VERBS)
-    covered = {(c.group, c.name) for c in CASES}
+    covered = {(c.group, c.name.split(",")[0]) for c in CASES}
     for verb in permutations.VERBS:
         for entity in permutations.ENTITIES:
             assert (f"verb:{verb}", entity) in covered

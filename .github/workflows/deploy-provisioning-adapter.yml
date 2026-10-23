@@ -31,6 +31,8 @@ env:
   PORTH_STACK_NAME: serverlessrepo-porth-components
   PRAWF_DOMAIN: estyn-prawf
   PRAWF_DOMAIN_OWNER: '084847995635'
+  # porth-common, which the adapter writes Porth's rows with (PRF-12). Same owner as estyn-prawf.
+  PORTH_DOMAIN: porth
 
 jobs:
   test:
@@ -70,8 +72,24 @@ jobs:
             --domain "$PRAWF_DOMAIN" --domain-owner "$PRAWF_DOMAIN_OWNER" \
             --repository estyn-prawf-py
 
+      # An extra index, not a second login: `codeartifact login` rewrites pip's one index-url.
+      - name: pip from CodeArtifact (porth-py, extra index)
+        run: |
+          set -euo pipefail
+          token=$(aws codeartifact get-authorization-token --domain "$PORTH_DOMAIN" \
+            --domain-owner "$PRAWF_DOMAIN_OWNER" --region "$AWS_REGION" --query authorizationToken --output text)
+          echo "::add-mask::$token"
+          url=$(aws codeartifact get-repository-endpoint --domain "$PORTH_DOMAIN" --domain-owner "$PRAWF_DOMAIN_OWNER" \
+            --repository porth-py --format pypi --region "$AWS_REGION" --query repositoryEndpoint --output text)
+          echo "PIP_EXTRA_INDEX_URL=${url/https:\/\//https://aws:$token@}simple/" >> "$GITHUB_ENV"
+
+      # porth-common is pinned in src/adapter/requirements.txt; moto runs the real porth-common
+      # against an in-memory AWS, which is how the tests know the rows are Porth's own.
       - name: Install test dependencies
-        run: python -m pip install --quiet 'prawf-schemas>=1.0.0,<2' pytest boto3 pyyaml
+        run: |
+          python -m pip install --quiet 'prawf-schemas>=1.0.0,<2' pytest boto3 pyyaml \
+            -r infra/provisioning-adapter/src/adapter/requirements.txt 'moto[dynamodb,events,sqs,ssm]'
+
 
       - name: Test the adapter
         run: python -m pytest infra/provisioning-adapter/tests -q
@@ -132,7 +150,7 @@ jobs:
             aws cloudformation describe-stacks --stack-name "$PORTH_STACK_NAME" --region "$AWS_REGION" \
               --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text
           }
-          for key in TenantsTableName RolesTableName PermissionsTableName ClaimMappingConfigsTableName; do
+          for key in TenantsTableName RolesTableName PermissionsTableName ClaimMappingConfigsTableName EventBusName; do
             value=$(out "$key")
             if [ -z "$value" ] || [ "$value" = "None" ]; then
               echo "::error::$PORTH_STACK_NAME has no $key output"
@@ -151,6 +169,7 @@ jobs:
           ROLES: ${{ steps.porth.outputs.RolesTableName }}
           PERMISSIONS: ${{ steps.porth.outputs.PermissionsTableName }}
           CLAIMS: ${{ steps.porth.outputs.ClaimMappingConfigsTableName }}
+          BUS: ${{ steps.porth.outputs.EventBusName }}
         run: |
           set -euo pipefail
           bad=0
@@ -159,7 +178,19 @@ jobs:
           check porth-roles- "$ROLES"
           check porth-permissions- "$PERMISSIONS"
           check porth-claim-mapping-configs- "$CLAIMS"
+          check porth-events- "$BUS"
           exit $bad
+
+      # sam build pip-installs src/adapter/requirements.txt (porth-common) into the function.
+      - name: pip from CodeArtifact (porth-py, extra index for the build)
+        run: |
+          set -euo pipefail
+          token=$(aws codeartifact get-authorization-token --domain "$PORTH_DOMAIN" \
+            --domain-owner "$PRAWF_DOMAIN_OWNER" --region "$AWS_REGION" --query authorizationToken --output text)
+          echo "::add-mask::$token"
+          url=$(aws codeartifact get-repository-endpoint --domain "$PORTH_DOMAIN" --domain-owner "$PRAWF_DOMAIN_OWNER" \
+            --repository porth-py --format pypi --region "$AWS_REGION" --query repositoryEndpoint --output text)
+          echo "PIP_EXTRA_INDEX_URL=${url/https:\/\//https://aws:$token@}simple/" >> "$GITHUB_ENV"
 
       - name: SAM build
         run: sam build --template-file infra/provisioning-adapter/template.yml
@@ -252,6 +283,7 @@ jobs:
                 "PorthRolesTable=${{ steps.porth.outputs.RolesTableName }}" \
                 "PorthPermissionsTable=${{ steps.porth.outputs.PermissionsTableName }}" \
                 "PorthClaimMappingConfigsTable=${{ steps.porth.outputs.ClaimMappingConfigsTableName }}" \
+                "PorthEventBus=${{ steps.porth.outputs.EventBusName }}" \
                 "AdapterVersion=${GITHUB_SHA::12}" \
                 "$@"
           }
@@ -269,8 +301,10 @@ jobs:
             --repository estyn-prawf-py
           python -m pip install --quiet 'prawf-schemas>=1.0.0,<2'
 
-      # The PRF-9 proof: invoked from inside the account, the adapter answers capabilities in a form
-      # the real schemas accept, and answers what it does not implement honestly.
+      # The proof, from inside the account: capabilities in a form the real schemas accept, what is
+      # not implemented answered honestly - and a DRY-RUN seed of a probe tenant, which proves
+      # porth-common loads in the Lambda and can read Porth's tables on the one-slot session while
+      # writing nothing. It may be refused (no `ems` org in the slot, say); it must not fail.
       - name: Prove it in-account
         run: |
           set -euo pipefail
@@ -279,8 +313,20 @@ jobs:
               --cli-binary-format raw-in-base64-out --payload "$1" "$2" > /dev/null
           }
           invoke '{"contract_version":"1.0.0","verb":"capabilities"}' caps.json
-          invoke '{"contract_version":"1.0.0","verb":"seed","run":{"run_id":"prf-9-proof"},"entity":"porth-tenant"}' unsupported.json
-          invoke '{"contract_version":"1.0.0","verb":"seed","run":{"run_id":"prf-9-proof"},"entity":"porth-tables"}' unknown.json
+          invoke '{"contract_version":"1.0.0","verb":"seed","run":{"run_id":"deploy-proof"},"entity":"porth-role"}' unsupported.json
+          invoke '{"contract_version":"1.0.0","verb":"seed","run":{"run_id":"deploy-proof"},"entity":"porth-tables"}' unknown.json
+          python - <<'PY' > dryrun-request.json
+          import hashlib, json
+          body = {"id": "prawf.deploy-probe", "version": "1.0.0", "form": "enumerated", "resources": [
+              {"type": "tenant", "alias": "prawf-deploy-probe", "spec": {"display_name": "Deploy probe", "attributes":
+                  {"tenant_tier": "sandbox", "org": "ems", "admin_role_source_key": "tenant-admin"}}}]}
+          digest = "sha256:" + hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"),
+                                                         ensure_ascii=False).encode()).hexdigest()
+          print(json.dumps({"contract_version": "1.0.0", "verb": "seed", "entity": "porth-tenant",
+                            "run": {"run_id": "deploy-proof", "dry_run": True},
+                            "payload": {"dataset": {**body, "digest": digest}}}))
+          PY
+          invoke "$(cat dryrun-request.json)" dryrun.json
 
           python - <<'PY'
           import json, os
@@ -297,7 +343,9 @@ jobs:
           result = validate_capabilities(caps["results"][0])
           assert result.valid, [str(e) for e in result.errors]
           body = caps["results"][0]
-          assert body["verbs"] == ["capabilities"], body["verbs"]
+          assert body["verbs"] == ["capabilities", "seed", "teardown"], body["verbs"]
+          declared = {e["id"]: e["verbs"] for e in body["entities"]}
+          assert declared["porth-tenant"] == ["seed", "teardown"], declared
           assert body["environment"].get("slot"), "environment.slot must be populated"
 
           unsupported = load("unsupported.json")
@@ -305,6 +353,10 @@ jobs:
 
           unknown = load("unknown.json")
           assert (unknown["outcome"], unknown["reason_code"]) == ("refused", "unknown_entity"), unknown
+
+          dryrun = load("dryrun.json")
+          assert dryrun["outcome"] in ("ok", "refused"), dryrun
+          dry_note = dryrun["outcome"] + (f" / {dryrun['reason_code']}" if dryrun.get("reason_code") else "")
 
           env = body["environment"]
           lines = [
@@ -315,8 +367,9 @@ jobs:
               f"- **adapter**: `{body['adapter_version']}`, contract {', '.join(body['contract_versions'])}",
               f"- **verbs**: {', '.join(body['verbs'])}",
               f"- **entities**: {', '.join(e['id'] for e in body['entities'])}",
-              "- `seed porth-tenant` -> `unsupported / not_implemented`",
+              "- `seed porth-role` -> `unsupported / not_implemented`",
               "- `seed porth-tables` -> `refused / unknown_entity`",
+              f"- dry-run `seed porth-tenant` (probe, nothing written) -> `{dry_note}`: {'; '.join(dryrun['diagnostics']['messages'])}",
           ]
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
               f.write("\n".join(lines) + "\n")

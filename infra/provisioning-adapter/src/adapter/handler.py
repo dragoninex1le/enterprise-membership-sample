@@ -4,9 +4,9 @@ Invoked directly by ARN (PROVISIONING-CONTRACT §1.1). There is no HTTP surface:
 request envelope, and the return value IS the response envelope. No API-Gateway wrapping in either
 direction — one shape, so no caller ever has to double-decode.
 
-This slice implements `capabilities` and nothing else. Every other verb answers `unsupported` with
-`not_implemented`, which prawf reads as "skip", not "fail" (D3). That is the honest answer, and C1
-forbids any other.
+Implemented: `capabilities` (PRF-9), and `seed` and `teardown` on `porth-tenant` (PRF-12, PRF-15).
+Every other verb x entity answers `unsupported` with `not_implemented`, which prawf reads as "skip",
+not "fail" (D3). That is the honest answer, and C1 forbids any other.
 
 Order of checks, each the stronger failure first:
   1. the request is an envelope, in a contract version we share      -> refused
@@ -21,6 +21,7 @@ import time
 
 import capabilities
 import catalogue
+import porth_tenant
 import slots
 from envelope import CONTRACT_VERSIONS, VERBS, ContractError, negotiate, not_ok, ok
 
@@ -46,6 +47,40 @@ def _log(request: object, response: dict) -> None:
         "reason_code": response.get("reason_code"),
         "duration_ms": response["diagnostics"]["duration_ms"],
     }))
+
+
+#: §3.4, C17: these carry entity-specific data, so omitting the entity is refused - there is nothing
+#: to infer a destination from. Only teardown and reset may omit it.
+NEEDS_ENTITY = ("bootstrap", "seed", "ensure", "absent")
+
+
+def _dispatch(verb: str, entity: str | None, request: dict, env_scope: str) -> tuple[list, list[str]]:
+    """One implemented cell of the verb x entity matrix, or `unsupported` (C1, C2)."""
+    if entity is None and verb in NEEDS_ENTITY:
+        raise ContractError("refused", "unknown_entity", f"{verb} must name the entity it writes to (§3.4)")
+    run = request.get("run") if isinstance(request.get("run"), dict) else {}
+    run_id = run.get("run_id")
+    payload = request.get("payload")
+    if verb == "seed" and entity == porth_tenant.ENTITY:
+        return porth_tenant.seed(env_scope, _run_id(run_id), bool(run.get("dry_run")), payload)
+    # §3.4: teardown may omit the entity, meaning every entity that supports it.
+    if verb == "teardown" and entity in (None, porth_tenant.ENTITY):
+        target = payload.get("run_id") if isinstance(payload, dict) else None
+        if not isinstance(target, str) or not target:
+            raise ContractError("refused", "scope_violation", "teardown needs payload.run_id: the run whose writes to remove")
+        return porth_tenant.teardown(env_scope, _run_id(run_id), target)
+    raise ContractError(
+        "unsupported", "not_implemented",
+        f"verb {verb!r} is not implemented by this adapter at this version"
+        + (f" for entity {entity!r}" if entity else ""),
+    )
+
+
+def _run_id(value: object) -> str:
+    # D6: everything written is labelled with the run. Without one there is no label to write.
+    if not isinstance(value, str) or not value:
+        raise ContractError("refused", "scope_violation", "a mutating call needs run.run_id (§2.1)")
+    return value
 
 
 def handler(event, context):  # noqa: ARG001 - Lambda signature
@@ -74,10 +109,20 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
                     "refused", "unknown_entity",
                     f"entity {entity!r} is not in this target's catalogue",
                 )
-            raise ContractError(
-                "unsupported", "not_implemented",
-                f"verb {verb!r} is not implemented by this adapter at this version",
-            )
+            try:
+                results, notes = _dispatch(verb, entity, request, slot_cfg["env_scope"])
+            except ContractError:
+                raise
+            except Exception as e:  # noqa: BLE001 - silence is never an outcome (§9)
+                # Porth's code raised part way. The ledger was written ahead of every write, so the
+                # run can still be torn down; say so, and say what failed - never a credential, which
+                # boto's messages do not carry.
+                raise ContractError(
+                    "failed", "upstream_error",
+                    f"{verb} on {entity or 'every entity'} failed part way: {type(e).__name__}: {str(e)[:300]}. "
+                    "Anything written is labelled with the run; tear it down to remove it.",
+                ) from e
+            response = ok(version, results, started, notes)
     except ContractError as e:
         response = not_ok(version, e, started)
 
