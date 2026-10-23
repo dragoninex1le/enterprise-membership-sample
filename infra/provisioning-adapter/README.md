@@ -20,9 +20,29 @@ reinventing what porth-common sometimes provides, and every write it makes is pr
 
 ## The entity catalogue
 
-Every entity declares `verbs: []` in this slice — C1 forbids declaring what is not implemented. The
-install-level list is `["capabilities"]`, because the schema forbids an empty one. Each later slice
-flips one cell of the verb × entity matrix. `{s}` is the slot's env_scope; `{tid}` a tenant id.
+An entity declares only the verbs it implements — C1 forbids declaring anything else. Each slice flips
+one cell of the verb × entity matrix: so far `porth-tenant`'s `seed` and `teardown` (PRF-12, PRF-15);
+every other entity declares `verbs: []`. `{s}` is the slot's env_scope; `{tid}` a tenant id.
+
+## `porth-tenant`: seed and teardown
+
+`seed` takes an inline, enumerated dataset (contract §4.3, §8) and writes exactly what **Porth 0.3.1**
+— the version EMS runs — writes for `PUT /tenants/`, with **Porth's own code**: porth-common 0.0.9
+(pinned in `src/adapter/requirements.txt`) for the tenant row, the tenant-admin role, the tenant
+permissions and the role's grants, and their events on Porth's bus. The orchestration of the last
+three is Porth 0.3.1's `provision_tenant_admin_role`, which is not in the wheel.
+
+- The dataset's digest is recomputed and a mismatch refused (rule in `datasets.py`).
+- Each tenant is validated with Porth 0.3.1's own request model before anything is written: one bad
+  row empties Porth's tenant directory and stops every login in the slot.
+- The org must exist and the tenant must not — nothing is created around it, nothing overwritten.
+- The same dataset again is `unchanged`; a different one is refused until the first is torn down.
+- A ledger beside Porth's rows (keys Porth never reads) records every write *before* it is made, so
+  `teardown` — by run id — removes a half-finished seed as surely as a finished one.
+
+IdP settings and claim mappings are other entities (`porth-idp-config`, `porth-claim-mapping`), and
+nothing here writes to the identity provider. When EMS moves to a newer Porth, the porth-common pin
+moves with it.
 
 | Entity | Destructive | Porth resources | Planned | Ruled out |
 |---|---|---|---|---|
@@ -96,12 +116,14 @@ python -m pytest infra/provisioning-adapter/tests -q
 ```
 
 Offline, with in-memory fakes, and every response is validated against the real schemas from the
-`prawf-schemas` package (CodeArtifact `estyn-prawf-py`). A canary proves the validator can fail. The
+`prawf-schemas` package (CodeArtifact `estyn-prawf-py`). `tests/test_porth_tenant.py` runs the real
+porth-common 0.0.9 (CodeArtifact `porth/porth-py`) against an in-memory AWS (moto) and reads every
+seeded row back through Porth's own repositories and its tenant directory scan. A canary proves the validator can fail. The
 C1 test is behavioural: anything the adapter declares must not answer `unsupported`.
 
 ## Checking the deployed adapter
 
-`scripts/permutations.py` runs the live function through 99 cases with `aws lambda invoke`: malformed envelopes, version negotiation, slot resolution, the order the checks run in, and every verb against every catalogue entity. Each answer is checked against the outcome and reason code it should get, against the §9 invariants, and against the response schema if `prawf_schemas` is installed. It is read-only, so it is safe against a live slot. Run it with EMS credentials:
+`scripts/permutations.py` runs the live function through every case with `aws lambda invoke`: malformed envelopes, version negotiation, slot resolution, the order the checks run in, and every verb against every catalogue entity. Each answer is checked against the outcome and reason code it should get, against the §9 invariants, and against the response schema if `prawf_schemas` is installed. It is read-only, so it is safe against a live slot. Run it with EMS credentials:
 
 ```bash
 python3 infra/provisioning-adapter/scripts/permutations.py --profile <ems-profile> --report permutations.json

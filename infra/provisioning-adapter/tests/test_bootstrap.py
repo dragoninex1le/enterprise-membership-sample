@@ -156,3 +156,20 @@ def test_the_execution_role_can_expand_the_sam_transform(boot):
              if st["Effect"] == "Allow" and actions(st) == ["cloudformation:CreateChangeSet"]]
     assert found, "no CreateChangeSet on the SAM transform"
     assert all(r.endswith(":aws:transform/Serverless-2016-10-31") for st in found for r in resources(st))
+
+
+def test_the_boundary_publishes_on_porths_bus_family_only(boot):
+    """PRF-12: Porth's repositories raise if they cannot publish, so writing Porth's rows with Porth's
+    code needs PutEvents - on Porth's buses (porth-events-{env}) and nowhere else."""
+    stmts = boot["PrawfAdapterBoundary"]["Properties"]["PolicyDocument"]["Statement"]
+    events = [st for st in stmts if any(a.startswith("events:") for a in actions(st))]
+    (st,) = events
+    assert actions(st) == ["events:PutEvents"]
+    assert [_value(r) for r in resources(st)] == ["arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/porth-events-*"]
+
+
+def test_the_deploy_role_reads_porth_common_and_nothing_else_of_codeartifact(boot):
+    reads = [st for st in statements(boot["DeployRole"]) if "codeartifact:ReadFromRepository" in actions(st)]
+    repos = {str(_value(r)).rsplit(":", 1)[-1] for st in reads for r in resources(st)}
+    assert repos == {"domain/estyn-prawf", "repository/estyn-prawf/estyn-prawf-py", "domain/porth", "repository/porth/porth-py"}
+    assert not any("Publish" in a or "Delete" in a for st in reads for a in actions(st)), "read, never publish"

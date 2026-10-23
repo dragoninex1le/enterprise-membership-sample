@@ -84,12 +84,30 @@ def test_nothing_ever_allows_scan(tpl):
             assert not {"dynamodb:Scan", "dynamodb:*", "*"} & set(_actions(st)), st
 
 
-def test_the_data_role_is_read_only_and_denies_scan(tpl):
+def test_the_data_role_reads_porth_writes_single_items_and_denies_scan(tpl):
     stmts = [st for n, st in _statements(tpl) if n == "DataRole" and "Service" not in str(st.get("Principal", ""))]
     allowed = {a for st in stmts if st["Effect"] == "Allow" for a in _actions(st) if a.startswith("dynamodb:")}
     denied = {a for st in stmts if st["Effect"] == "Deny" for a in _actions(st)}
-    assert allowed == {"dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:Query", "dynamodb:DescribeTable"}
+    assert allowed == {"dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:Query", "dynamodb:DescribeTable",
+                       "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"}
+    assert not any(a.startswith(("dynamodb:BatchWrite", "dynamodb:Transact")) for a in allowed)
     assert "dynamodb:Scan" in denied
+
+
+def test_the_data_role_writes_only_the_tables_porth_tenant_writes(tpl):
+    (writes,) = [st for n, st in _statements(tpl) if n == "DataRole" and st.get("Sid") == "WriteTenantRolesAndPermissions"]
+    tables = {str(r) for r in writes["Resource"]}
+    assert len(tables) == 3
+    assert not any("ClaimMapping" in t for t in tables), "claim mappings are another entity's, not yet written"
+    assert not any("index" in t for t in tables), "writes go to tables; indexes are read"
+
+
+def test_the_data_role_publishes_on_porths_bus_and_no_other(tpl):
+    (events,) = [st for n, st in _statements(tpl) if n == "DataRole" and st.get("Sid") == "PorthEventsOnly"]
+    assert _actions(events) == ["events:PutEvents"]
+    assert "event-bus/${PorthEventBus}" in str(events["Resource"])
+    fn = tpl["Resources"]["AdapterFunction"]["Properties"]["Environment"]["Variables"]
+    assert fn["PORTH_EVENT_BUS"] == {"Ref": "PorthEventBus"}, "porth-common's default bus is not Porth's"
 
 
 def test_porth_tables_are_named_never_wildcarded(raw):

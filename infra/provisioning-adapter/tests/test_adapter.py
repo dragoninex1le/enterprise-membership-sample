@@ -51,6 +51,8 @@ AGREED_ENTITIES = {
     "porth-app-permission", "porth-role-grant", "porth-role", "porth-idp",
 }
 OTHER_VERBS = ["bootstrap", "seed", "reset", "ensure", "absent", "teardown", "status"]
+#: An entity none of the verbs is implemented for, so every one of them is unsupported against it.
+UNIMPLEMENTED_ENTITY = "porth-role"
 
 
 # ---------------------------------------------------------------- fakes
@@ -159,10 +161,14 @@ def test_capabilities_validates_against_the_real_schemas(world):
     assert caps["adapter_version"] == "test-build"
 
 
-def test_install_verbs_are_capabilities_only_and_every_entity_declares_none(world):
+def test_only_porth_tenant_seed_and_teardown_are_declared_beyond_capabilities(world):
     caps = assert_valid_capabilities(capabilities())
-    assert caps["verbs"] == ["capabilities"]
-    assert all(e["verbs"] == [] for e in caps["entities"])
+    assert caps["verbs"] == ["capabilities", "seed", "teardown"]
+    declared = {e["id"]: e["verbs"] for e in caps["entities"]}
+    assert declared.pop("porth-tenant") == ["seed", "teardown"]
+    assert all(v == [] for v in declared.values()), declared
+    assert caps["dataset_forms"] == ["enumerated"]
+    assert caps["resource_types"] == ["tenant"]
 
 
 def test_c1_every_declared_verb_is_actually_implemented(world):
@@ -298,7 +304,7 @@ def test_data_calls_run_on_a_one_slot_session(world):
 
 def test_the_session_policy_admits_one_slot_and_not_its_prefix_extension():
     policy = json.loads(slots.session_policy("porth-dau"))
-    (allow,) = [s for s in policy["Statement"] if s["Effect"] == "Allow"]
+    (allow,) = [s for s in policy["Statement"] if s["Sid"] == "OneSlotOnly"]
     (pattern,) = allow["Condition"]["ForAllValues:StringLike"]["dynamodb:LeadingKeys"]
     assert iam_string_like(pattern, "ENV#porth-dau#TENANT#platform")
     assert not iam_string_like(pattern, "ENV#porth-sample#TENANT#platform")
@@ -306,12 +312,15 @@ def test_the_session_policy_admits_one_slot_and_not_its_prefix_extension():
     assert not iam_string_like(pattern, "TENANT#platform"), "an unscoped key is another slot's, not ours"
 
 
-def test_the_session_policy_is_read_only_and_denies_scan():
+def test_the_session_policy_writes_single_items_in_one_slot_and_denies_scan():
     policy = json.loads(slots.session_policy("porth-dau"))
+    (one_slot,) = [s for s in policy["Statement"] if s["Sid"] == "OneSlotOnly"]
+    assert set(one_slot["Action"]) == set(slots.READ_ACTIONS + slots.WRITE_ACTIONS)
+    assert "dynamodb:LeadingKeys" in one_slot["Condition"]["ForAllValues:StringLike"], "every write is held to the slot"
     allowed = {a for s in policy["Statement"] if s["Effect"] == "Allow" for a in s["Action"]}
     denied = {a for s in policy["Statement"] if s["Effect"] == "Deny" for a in s["Action"]}
-    assert allowed == set(slots.READ_ACTIONS)
-    assert not any(a.startswith(("dynamodb:Put", "dynamodb:Update", "dynamodb:Delete", "dynamodb:BatchWrite")) for a in allowed)
+    assert allowed == set(slots.READ_ACTIONS + slots.WRITE_ACTIONS + slots.EVENT_ACTIONS)
+    assert not any(a.startswith(("dynamodb:BatchWrite", "dynamodb:Transact")) for a in allowed)
     assert {"dynamodb:Scan", "dynamodb:PartiQLSelect", "dynamodb:ExecuteStatement"} <= denied
     assert "dynamodb:Scan" not in allowed
 
@@ -333,9 +342,16 @@ def test_credentials_never_reach_a_response(world):
 
 @pytest.mark.parametrize("verb", OTHER_VERBS)
 def test_every_unimplemented_verb_is_unsupported_not_failed(world, verb):
-    response = call(contract_version="1.0.0", verb=verb, run={"run_id": "run-x"}, entity="porth-tenant")
+    response = call(contract_version="1.0.0", verb=verb, run={"run_id": "run-x"}, entity=UNIMPLEMENTED_ENTITY)
     assert_speaks_the_contract(response)
     assert (response["outcome"], response["reason_code"]) == ("unsupported", "not_implemented")
+
+
+@pytest.mark.parametrize("verb", ["bootstrap", "seed", "ensure", "absent"])
+def test_c17_omitting_the_entity_on_a_verb_that_writes_to_one_is_refused(world, verb):
+    response = call(contract_version="1.0.0", verb=verb, run={"run_id": "run-x"})
+    assert_speaks_the_contract(response)
+    assert (response["outcome"], response["reason_code"]) == ("refused", "unknown_entity")
 
 
 def test_an_unknown_verb_is_unsupported(world):

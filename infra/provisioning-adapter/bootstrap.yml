@@ -74,6 +74,13 @@ Resources:
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-roles-*
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-permissions-*
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-claim-mapping-configs-*
+          # PRF-12. Porth's repositories publish an event for every write and raise if they cannot,
+          # so writing Porth's rows with Porth's code means publishing on Porth's bus. The family,
+          # like the tables: Porth names it porth-events-{env}.
+          - Sid: PorthEventBusFamily
+            Effect: Allow
+            Action: events:PutEvents
+            Resource: !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/porth-events-*
           - Sid: NeverScan
             Effect: Deny
             Action:
@@ -148,6 +155,17 @@ Resources:
                 Resource:
                   - !Sub arn:aws:codeartifact:${AWS::Region}:${PrawfDomainOwner}:domain/estyn-prawf
                   - !Sub arn:aws:codeartifact:${AWS::Region}:${PrawfDomainOwner}:repository/estyn-prawf/estyn-prawf-py
+              # PRF-12: porth-common, which the adapter writes Porth's rows with. Same account as
+              # estyn-prawf; the sample app's pipeline already reads this repository from EMS.
+              - Sid: ReadPorthCommon
+                Effect: Allow
+                Action:
+                  - codeartifact:GetAuthorizationToken
+                  - codeartifact:GetRepositoryEndpoint
+                  - codeartifact:ReadFromRepository
+                Resource:
+                  - !Sub arn:aws:codeartifact:${AWS::Region}:${PrawfDomainOwner}:domain/porth
+                  - !Sub arn:aws:codeartifact:${AWS::Region}:${PrawfDomainOwner}:repository/porth/porth-py
               - Sid: CodeArtifactBearerToken
                 Effect: Allow
                 Action: sts:GetServiceBearerToken

@@ -5,10 +5,10 @@ only the four fields the schema allows (`id`, `description`, `verbs`, `destructi
 here so the mapping lives next to the code that will one day act on it, not in a document that
 drifts from it.
 
-**Every entity declares `verbs: []` in this slice.** Conformance C1: whatever is declared must be
-genuinely implemented. The install-level verb list cannot be empty (the schema's `minItems: 1`),
-so it is `["capabilities"]`; a per-entity list can, and saying so is the honest answer. Each later
-slice flips one cell of the verb x entity matrix from `[]` to implemented. `planned` records which
+**An entity declares only the verbs it implements.** Conformance C1: whatever is declared must be
+genuinely implemented. PRF-9 declared `verbs: []` everywhere, with `["capabilities"]` the honest
+install list (the schema's `minItems: 1`). Each slice flips one cell of the verb x entity matrix
+from `[]` to implemented - PRF-12 and PRF-15 flipped `porth-tenant`'s `seed` and `teardown`. `planned` records which
 slice, and `ruled_out` records every verb that will never apply, with its reason — a verb ruled out
 with a reason is a finding; a verb ruled out silently is a gap.
 
@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 #: Install-level verbs actually implemented. Grows one verb at a time, with the slice that adds it.
-INSTALL_VERBS: tuple[str, ...] = ("capabilities",)
+INSTALL_VERBS: tuple[str, ...] = ("capabilities", "seed", "teardown")
 
 
 @dataclass(frozen=True)
@@ -72,11 +72,8 @@ ENTITIES: tuple[Entity, ...] = (
             "tenants: PK=ENV#{s}#TENANT#{tid} SK=METADATA",
             "tenants: PK=ENV#{s}#ORG#{uuid} SK=METADATA (org, pending the porth-org ruling)",
         ),
-        planned={
-            "seed": "PRF-12",
-            "reset": "PRF-14",
-            "teardown": "PRF-15",
-        },
+        planned={"reset": "PRF-14"},
+        verbs=("seed", "teardown"),
     ),
     Entity(
         id="porth-idp-config",
