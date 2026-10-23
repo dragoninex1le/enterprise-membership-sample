@@ -17,7 +17,7 @@ What each case asserts:
   * the §9 invariants on every response: ok carries no reason code; a non-ok carries one from the
     closed list, no results, and a message saying why
   * on `capabilities`, the declaration itself: the served slot, contract 1.0.0, the implemented
-    verbs, the eight catalogue entities, and `seed`/`teardown` on porth-tenant alone (C1)
+    verbs, the nine catalogue entities, and `seed`/`teardown` on porth-org and porth-tenant alone (C1)
   * if `prawf_schemas` is importable, every response against the canonical response schema
 
 Exit status is 0 only when every case passes. --report writes each request and response as JSON.
@@ -35,7 +35,7 @@ from pathlib import Path
 
 VERBS = ("bootstrap", "seed", "reset", "ensure", "absent", "teardown", "status")
 ENTITIES = (
-    "porth-platform", "porth-tenant", "porth-idp-config", "porth-claim-mapping",
+    "porth-platform", "porth-org", "porth-tenant", "porth-idp-config", "porth-claim-mapping",
     "porth-app-permission", "porth-role-grant", "porth-role", "porth-idp",
 )
 #: common.schema.json $defs/reasonCode - the closed list (§9).
@@ -45,7 +45,7 @@ REASON_CODES = {
 }
 CONTRACT = "1.0.0"
 #: Implemented cells of the verb x entity matrix (C1). Everything else is unsupported.
-IMPLEMENTED = {("seed", "porth-tenant"), ("teardown", "porth-tenant")}
+IMPLEMENTED = {("seed", "porth-org"), ("teardown", "porth-org"), ("seed", "porth-tenant"), ("teardown", "porth-tenant")}
 #: §3.4, C17: verbs whose payload is entity-specific, so omitting the entity is refused.
 NEEDS_ENTITY = ("bootstrap", "seed", "ensure", "absent")
 UNKNOWN_ENTITY = "porth-tables"  # the contract's own example entity; EMS never declares it
@@ -84,6 +84,8 @@ def declares_the_target(slot: str):
             problems.append(f"environment.slot is {env.get('slot')!r}, expected {slot!r}")
         if body.get("contract_versions") != [CONTRACT]:
             problems.append(f"contract_versions is {body.get('contract_versions')!r}")
+        if body.get("extension_types") != ["porth.org"]:
+            problems.append(f"extension_types is {body.get('extension_types')!r}, expected ['porth.org']")
         if body.get("verbs") != ["capabilities", "seed", "teardown"]:
             problems.append(f"verbs is {body.get('verbs')!r}, expected ['capabilities', 'seed', 'teardown']")
         ids = [e.get("id") for e in body.get("entities", [])]
@@ -160,16 +162,16 @@ def cases(slot: str) -> list[Case]:
         else:
             out.append(Case(f"verb:{verb}", "no entity", envelope(verb), "unsupported", "not_implemented"))
         for entity in ENTITIES:
-            if (verb, entity) == ("seed", "porth-tenant"):
+            if (verb, entity) in IMPLEMENTED and verb == "seed":
                 out.append(Case(f"verb:{verb}", f"{entity}, no dataset", envelope(verb, entity), "refused", "dataset_conflict"))
-            elif (verb, entity) == ("teardown", "porth-tenant"):
+            elif (verb, entity) in IMPLEMENTED and verb == "teardown":
                 out.append(Case(f"verb:{verb}", f"{entity}, no run_id", envelope(verb, entity), "refused", "scope_violation"))
             else:
                 out.append(Case(f"verb:{verb}", entity, envelope(verb, entity), "unsupported", "not_implemented"))
         out.append(Case(f"verb:{verb}", f"{UNKNOWN_ENTITY} (unknown)", envelope(verb, UNKNOWN_ENTITY),
                         "refused", "unknown_entity"))
 
-    # 6. seed on porth-tenant: every way a dataset is turned away. All dry runs, all rejected before
+    # 6. seed: every way a dataset is turned away. All dry runs, all rejected before
     #    the adapter reads or writes a row - so these are safe against a live slot.
     def seed(dataset: dict) -> dict:
         return envelope("seed", "porth-tenant", payload={"dataset": dataset})
@@ -189,6 +191,11 @@ def cases(slot: str) -> list[Case]:
              "refused", "dataset_conflict"),
         Case("seed", "a resource type not implemented",
              seed(signed({**good, "resources": [{"type": "user", "alias": "u"}]})), "unsupported", "not_implemented"),
+        Case("seed", "an organisation slug Porth's keys cannot carry",
+             envelope("seed", "porth-org", payload={"dataset": signed({
+                 "id": "prawf.permutations-org", "version": "1.0.0", "form": "enumerated",
+                 "resources": [{"type": "porth.org", "alias": "Not A Slug", "spec": {"name": "x"}}]})}),
+             "refused", "dataset_conflict"),
     ]
     return out
 

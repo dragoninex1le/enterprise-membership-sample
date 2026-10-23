@@ -15,8 +15,8 @@ with a reason is a finding; a verb ruled out silently is a gap.
 Key shapes: `{s}` is the slot's env_scope (ADR-Z8), `{tid}` a tenant id. Partition keys carry the
 scope; sort keys never do. Attribute case differs by table and is part of the shape.
 
-**Not declared: `porth-org`.** Whether an org is its own entity (Option A) or an attribute of the
-tenant (Option B) is deferred to the live-data extraction. Declaring it now would pre-empt that.
+**`porth-org` is its own entity** - the porth-org ruling, Option A (Richard, 2026-10-23). An
+organisation is seeded before the tenants that belong to it, and torn down after them.
 """
 from __future__ import annotations
 
@@ -69,10 +69,18 @@ ENTITIES: tuple[Entity, ...] = (
         description="A tenant beyond the install's own template, as a test fixture.",
         destructive=True,
         resources=(
-            "tenants: PK=ENV#{s}#TENANT#{tid} SK=METADATA",
-            "tenants: PK=ENV#{s}#ORG#{uuid} SK=METADATA (org, pending the porth-org ruling)",
+            "tenants: PK=ENV#{s}#TENANT#{tid} SK=METADATA (in an existing porth-org)",
+            "roles: pk=ENV#{s}#TENANT#{tid} sk=ROLE#{uuid} (tenant-admin) + pk=...#ROLE#{uuid} sk=PERM#{key}",
+            "permissions: pk=ENV#{s}#TENANT#{tid}#NS#porth-tenant sk=PERM#{key}",
         ),
         planned={"reset": "PRF-14"},
+        verbs=("seed", "teardown"),
+    ),
+    Entity(
+        id="porth-org",
+        description="An organisation for fixture tenants. Seeded before them, torn down after them.",
+        destructive=True,
+        resources=("tenants: PK=ENV#{s}#ORG#{uuid} SK=METADATA, gsi1pk=ENV#{s}#ORG_SLUG#{slug}",),
         verbs=("seed", "teardown"),
     ),
     Entity(

@@ -73,6 +73,7 @@ def answer(slot_name: str, slot_cfg: dict) -> tuple[dict, list[str]]:
         "verbs": list(catalogue.INSTALL_VERBS),
         "entities": catalogue.declared(),
         "resource_types": ["tenant"],
+        "extension_types": ["porth.org"],
         "dataset_forms": list(datasets.FORMS),
         "async": False,
     }
