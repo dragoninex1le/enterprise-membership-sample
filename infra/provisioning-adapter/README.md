@@ -21,8 +21,18 @@ reinventing what porth-common sometimes provides, and every write it makes is pr
 ## The entity catalogue
 
 An entity declares only the verbs it implements — C1 forbids declaring anything else. Each slice flips
-one cell of the verb × entity matrix: so far `porth-tenant`'s `seed` and `teardown` (PRF-12, PRF-15);
-every other entity declares `verbs: []`. `{s}` is the slot's env_scope; `{tid}` a tenant id.
+one cell of the verb × entity matrix: so far `seed` and `teardown` on `porth-org` and `porth-tenant`
+(PRF-12, PRF-15); every other entity declares `verbs: []`. `{s}` is the slot's env_scope; `{tid}` a tenant id.
+
+## `porth-org`: seed and teardown
+
+The porth-org ruling, Option A (2026-10-23): an organisation is its own entity, seeded before its
+tenants and torn down after them. A seeded organisation is the org half of Porth 0.3.1's
+`POST /organizations/` — the org row (slug in `gsi1`) by conditional put, and `Organization.created` —
+field for field, since porth-common 0.0.9 has no organisation-only create. An existing slug is never
+overwritten; an organisation that still has tenants is not torn down on its own. `teardown` with no
+entity removes tenants first. Resource type `porth.org` (an extension type), e.g.
+`{"type": "porth.org", "alias": "ems", "spec": {"name": "EMS"}}`.
 
 ## `porth-tenant`: seed and teardown
 
@@ -35,7 +45,8 @@ three is Porth 0.3.1's `provision_tenant_admin_role`, which is not in the wheel.
 - The dataset's digest is recomputed and a mismatch refused (rule in `datasets.py`).
 - Each tenant is validated with Porth 0.3.1's own request model before anything is written: one bad
   row empties Porth's tenant directory and stops every login in the slot.
-- The org must exist and the tenant must not — nothing is created around it, nothing overwritten.
+- The org must exist — seed it as `porth-org` first — and the tenant must not. Nothing is
+  overwritten.
 - The same dataset again is `unchanged`; a different one is refused until the first is torn down.
 - A ledger beside Porth's rows (keys Porth never reads) records every write *before* it is made, so
   `teardown` — by run id — removes a half-finished seed as surely as a finished one.

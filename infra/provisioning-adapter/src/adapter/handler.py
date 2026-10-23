@@ -4,7 +4,8 @@ Invoked directly by ARN (PROVISIONING-CONTRACT §1.1). There is no HTTP surface:
 request envelope, and the return value IS the response envelope. No API-Gateway wrapping in either
 direction — one shape, so no caller ever has to double-decode.
 
-Implemented: `capabilities` (PRF-9), and `seed` and `teardown` on `porth-tenant` (PRF-12, PRF-15).
+Implemented: `capabilities` (PRF-9), and `seed` and `teardown` on `porth-org` and `porth-tenant`
+(PRF-12, PRF-15).
 Every other verb x entity answers `unsupported` with `not_implemented`, which prawf reads as "skip",
 not "fail" (D3). That is the honest answer, and C1 forbids any other.
 
@@ -21,6 +22,7 @@ import time
 
 import capabilities
 import catalogue
+import porth_org
 import porth_tenant
 import slots
 from envelope import CONTRACT_VERSIONS, VERBS, ContractError, negotiate, not_ok, ok
@@ -49,6 +51,10 @@ def _log(request: object, response: dict) -> None:
     }))
 
 
+SEEDS = {porth_org.ENTITY: porth_org.seed, porth_tenant.ENTITY: porth_tenant.seed}
+#: Ordered: an organisation cannot be removed while tenants belong to it.
+TEARDOWNS = {porth_tenant.ENTITY: porth_tenant.teardown, porth_org.ENTITY: porth_org.teardown}
+
 #: §3.4, C17: these carry entity-specific data, so omitting the entity is refused - there is nothing
 #: to infer a destination from. Only teardown and reset may omit it.
 NEEDS_ENTITY = ("bootstrap", "seed", "ensure", "absent")
@@ -61,14 +67,21 @@ def _dispatch(verb: str, entity: str | None, request: dict, env_scope: str) -> t
     run = request.get("run") if isinstance(request.get("run"), dict) else {}
     run_id = run.get("run_id")
     payload = request.get("payload")
-    if verb == "seed" and entity == porth_tenant.ENTITY:
-        return porth_tenant.seed(env_scope, _run_id(run_id), bool(run.get("dry_run")), payload)
-    # §3.4: teardown may omit the entity, meaning every entity that supports it.
-    if verb == "teardown" and entity in (None, porth_tenant.ENTITY):
+    if verb == "seed" and entity in SEEDS:
+        return SEEDS[entity](env_scope, _run_id(run_id), bool(run.get("dry_run")), payload)
+    # §3.4: teardown may omit the entity, meaning every entity that supports it - in TEARDOWN order,
+    # tenants before the organisations they belong to.
+    if verb == "teardown" and (entity is None or entity in TEARDOWNS):
         target = payload.get("run_id") if isinstance(payload, dict) else None
         if not isinstance(target, str) or not target:
             raise ContractError("refused", "scope_violation", "teardown needs payload.run_id: the run whose writes to remove")
-        return porth_tenant.teardown(env_scope, _run_id(run_id), target)
+        results, notes = [], []
+        for name, fn in TEARDOWNS.items():
+            if entity in (None, name):
+                r, n = fn(env_scope, _run_id(run_id), target)
+                results += r
+                notes += n
+        return results, notes
     raise ContractError(
         "unsupported", "not_implemented",
         f"verb {verb!r} is not implemented by this adapter at this version"

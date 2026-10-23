@@ -44,7 +44,7 @@ def _tables() -> tuple[str, str, str]:
     return os.environ["PORTH_TENANTS_TABLE"], os.environ["PORTH_ROLES_TABLE"], os.environ["PORTH_PERMISSIONS_TABLE"]
 
 
-class _Porth:
+class Porth:
     """porth-common's repositories, bound to one slot, on the one-slot session's credentials."""
 
     def __init__(self, env_scope: str, run_id: str):
@@ -120,7 +120,7 @@ def seed(env_scope: str, run_id: str, dry_run: bool, payload: object) -> tuple[l
     dataset = datasets.accept(payload)
     wanted = [_tenant(r) for r in dataset["resources"]]
     label = f"dataset {dataset['id']} {dataset['version']} ({dataset['digest']})"
-    porth = _Porth(env_scope, run_id)
+    porth = Porth(env_scope, run_id)
 
     # §8.4: the same dataset again converges; a different one is refused until the entity is reset.
     current = ledger.marker(porth.db, env_scope, ENTITY)
@@ -190,7 +190,7 @@ def seed(env_scope: str, run_id: str, dry_run: bool, payload: object) -> tuple[l
 
 def teardown(env_scope: str, run_id: str, target_run: str) -> tuple[list[dict], list[str]]:
     """Remove everything `target_run` wrote to this entity. Idempotent: nothing left is `ok`, quietly."""
-    porth = _Porth(env_scope, run_id)
+    porth = Porth(env_scope, run_id)
     entries = [writes for entity, writes in ledger.runs(porth.db, env_scope, target_run) if entity == ENTITY]
     if not entries:
         return [], [f"nothing in {ENTITY} is labelled with run {target_run}"]
@@ -215,7 +215,7 @@ def teardown(env_scope: str, run_id: str, target_run: str) -> tuple[list[dict], 
     return [], [f"run {target_run}: removed tenant(s) {', '.join(removed) or '(none left)'} and everything under them"]
 
 
-def _sweep_tenant(porth: _Porth, env_scope: str, tenant_id: str) -> None:
+def _sweep_tenant(porth: Porth, env_scope: str, tenant_id: str) -> None:
     """Every role, grant and permission row under a tenant this run created."""
     _, roles_table, permissions_table = _tables()
     base = f"ENV#{env_scope}#TENANT#{tenant_id}"

@@ -47,7 +47,7 @@ TWO_SLOTS = {"slots": {
 }}
 
 AGREED_ENTITIES = {
-    "porth-platform", "porth-tenant", "porth-idp-config", "porth-claim-mapping",
+    "porth-platform", "porth-org", "porth-tenant", "porth-idp-config", "porth-claim-mapping",
     "porth-app-permission", "porth-role-grant", "porth-role", "porth-idp",
 }
 OTHER_VERBS = ["bootstrap", "seed", "reset", "ensure", "absent", "teardown", "status"]
@@ -161,11 +161,13 @@ def test_capabilities_validates_against_the_real_schemas(world):
     assert caps["adapter_version"] == "test-build"
 
 
-def test_only_porth_tenant_seed_and_teardown_are_declared_beyond_capabilities(world):
+def test_only_org_and_tenant_seed_and_teardown_are_declared_beyond_capabilities(world):
     caps = assert_valid_capabilities(capabilities())
     assert caps["verbs"] == ["capabilities", "seed", "teardown"]
     declared = {e["id"]: e["verbs"] for e in caps["entities"]}
     assert declared.pop("porth-tenant") == ["seed", "teardown"]
+    assert declared.pop("porth-org") == ["seed", "teardown"]
+    assert caps["extension_types"] == ["porth.org"]
     assert all(v == [] for v in declared.values()), declared
     assert caps["dataset_forms"] == ["enumerated"]
     assert caps["resource_types"] == ["tenant"]
