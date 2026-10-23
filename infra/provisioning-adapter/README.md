@@ -140,4 +140,9 @@ C1 test is behavioural: anything the adapter declares must not answer `unsupport
 python3 infra/provisioning-adapter/scripts/permutations.py --profile <ems-profile> --report permutations.json
 ```
 
-`--only version` (or `envelope`, `slot`, `order`, `verb:seed`, …) runs a subset. `tests/test_permutations.py` sends every case through the real handler offline, so the script's expectations cannot drift from the code.
+`--only version` (or `envelope`, `slot`, `order`, `verb:seed`, …) runs a subset.
+
+After prawf seeds, `scripts/verify_seed.py --profile <ems-profile> --tenant ems-test --org ems` checks the
+rows in place — organisation, tenant as Porth 0.3.1 writes it, tenant-admin role and grants, the
+dataset markers — and that every row Porth's tenant directory loads is one Porth can read. Read-only;
+`--components-profile` also compares against the seeded datasets in prawf's bucket. `tests/test_permutations.py` sends every case through the real handler offline, so the script's expectations cannot drift from the code.
