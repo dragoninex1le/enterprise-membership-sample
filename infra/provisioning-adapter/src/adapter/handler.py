@@ -4,8 +4,9 @@ Invoked directly by ARN (PROVISIONING-CONTRACT §1.1). There is no HTTP surface:
 request envelope, and the return value IS the response envelope. No API-Gateway wrapping in either
 direction — one shape, so no caller ever has to double-decode.
 
-Implemented: `capabilities` (PRF-9), and `seed` and `teardown` on `porth-org` and `porth-tenant`
-(PRF-12, PRF-15).
+Implemented: `capabilities` (PRF-9); `seed` and `teardown` on `porth-org` and `porth-tenant`
+(PRF-12, PRF-15); `bootstrap` on `porth-platform` (PRF-11); and `reset` on `porth-claim-mapping`,
+`porth-tenant` and `porth-org` (PRF-14).
 Every other verb x entity answers `unsupported` with `not_implemented`, which prawf reads as "skip",
 not "fail" (D3). That is the honest answer, and C1 forbids any other.
 
@@ -23,7 +24,9 @@ import time
 import capabilities
 import catalogue
 import porth_org
+import porth_platform
 import porth_tenant
+import reset
 import slots
 from envelope import CONTRACT_VERSIONS, VERBS, ContractError, negotiate, not_ok, ok
 
@@ -60,13 +63,19 @@ TEARDOWNS = {porth_tenant.ENTITY: porth_tenant.teardown, porth_org.ENTITY: porth
 NEEDS_ENTITY = ("bootstrap", "seed", "ensure", "absent")
 
 
-def _dispatch(verb: str, entity: str | None, request: dict, env_scope: str) -> tuple[list, list[str]]:
+def _dispatch(verb: str, entity: str | None, request: dict, slot_cfg: dict) -> tuple[list, list[str]]:
     """One implemented cell of the verb x entity matrix, or `unsupported` (C1, C2)."""
     if entity is None and verb in NEEDS_ENTITY:
         raise ContractError("refused", "unknown_entity", f"{verb} must name the entity it writes to (§3.4)")
+    env_scope = slot_cfg["env_scope"]
     run = request.get("run") if isinstance(request.get("run"), dict) else {}
     run_id = run.get("run_id")
     payload = request.get("payload")
+    if verb == "bootstrap" and entity == porth_platform.ENTITY:
+        return porth_platform.bootstrap(env_scope, _run_id(run_id), bool(run.get("dry_run")), payload)
+    # §3.4: reset may omit the entity too - every resettable entity, in reset.ORDER.
+    if verb == "reset" and (entity is None or entity in reset.RESETS):
+        return reset.reset(entity, slot_cfg, _run_id(run_id), bool(run.get("dry_run")), payload)
     if verb == "seed" and entity in SEEDS:
         return SEEDS[entity](env_scope, _run_id(run_id), bool(run.get("dry_run")), payload)
     # §3.4: teardown may omit the entity, meaning every entity that supports it - in TEARDOWN order,
@@ -123,7 +132,7 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
                     f"entity {entity!r} is not in this target's catalogue",
                 )
             try:
-                results, notes = _dispatch(verb, entity, request, slot_cfg["env_scope"])
+                results, notes = _dispatch(verb, entity, request, slot_cfg)
             except ContractError:
                 raise
             except Exception as e:  # noqa: BLE001 - silence is never an outcome (§9)

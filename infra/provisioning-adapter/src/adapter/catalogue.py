@@ -8,7 +8,8 @@ drifts from it.
 **An entity declares only the verbs it implements.** Conformance C1: whatever is declared must be
 genuinely implemented. PRF-9 declared `verbs: []` everywhere, with `["capabilities"]` the honest
 install list (the schema's `minItems: 1`). Each slice flips one cell of the verb x entity matrix
-from `[]` to implemented - PRF-12 and PRF-15 flipped `porth-tenant`'s `seed` and `teardown`. `planned` records which
+from `[]` to implemented - PRF-12 and PRF-15 flipped `porth-tenant`'s `seed` and `teardown`, PRF-11
+`porth-platform`'s `bootstrap`, and PRF-14 `reset` on the three entities that can return to it. `planned` records which
 slice, and `ruled_out` records every verb that will never apply, with its reason — a verb ruled out
 with a reason is a finding; a verb ruled out silently is a gap.
 
@@ -23,7 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 #: Install-level verbs actually implemented. Grows one verb at a time, with the slice that adds it.
-INSTALL_VERBS: tuple[str, ...] = ("capabilities", "seed", "teardown")
+INSTALL_VERBS: tuple[str, ...] = ("capabilities", "bootstrap", "seed", "reset", "teardown")
 
 
 @dataclass(frozen=True)
@@ -48,7 +49,7 @@ class Entity:
 ENTITIES: tuple[Entity, ...] = (
     Entity(
         id="porth-platform",
-        description="Porth-installed platform state. Verified, never written.",
+        description="Porth's platform baseline. Checked, and completed from Porth's own install definition.",
         destructive=False,
         resources=(
             "tenants: PK=ENV#{s}#ORG#{uuid} SK=METADATA (platform org)",
@@ -56,13 +57,14 @@ ENTITIES: tuple[Entity, ...] = (
             "permissions: pk=ENV#{s}#TENANT#platform#NS#porth-platform sk=PERM#{key}",
             "roles: pk=ENV#{s}#TENANT#platform sk=ROLE#{uuid} (platform-admin)",
             "roles: pk=ENV#{s}#TENANT#platform#ROLE#{uuid} sk=PERM#{key} (grants)",
+            "claim-mapping-configs: PK=ENV#{s}#TENANT#platform SK=VERSION#{n:06d}",
         ),
-        planned={"bootstrap": "PRF-11 - dry_run only: verify the install, write nothing"},
         ruled_out={
             "reset": "resetting the platform tenant breaks every subsequent sign-in, including the one that would report it",
-            "seed": "porth-install owns this data; the adapter verifies it",
-            "teardown": "nothing here is created by a run",
+            "seed": "the baseline is the target's to define (D7); bootstrap writes it",
+            "teardown": "the baseline is no run's fixture; nothing here is labelled with a run",
         },
+        verbs=("bootstrap",),
     ),
     Entity(
         id="porth-tenant",
@@ -73,15 +75,14 @@ ENTITIES: tuple[Entity, ...] = (
             "roles: pk=ENV#{s}#TENANT#{tid} sk=ROLE#{uuid} (tenant-admin) + pk=...#ROLE#{uuid} sk=PERM#{key}",
             "permissions: pk=ENV#{s}#TENANT#{tid}#NS#porth-tenant sk=PERM#{key}",
         ),
-        planned={"reset": "PRF-14"},
-        verbs=("seed", "teardown"),
+        verbs=("seed", "reset", "teardown"),
     ),
     Entity(
         id="porth-org",
         description="An organisation for fixture tenants. Seeded before them, torn down after them.",
         destructive=True,
         resources=("tenants: PK=ENV#{s}#ORG#{uuid} SK=METADATA, gsi1pk=ENV#{s}#ORG_SLUG#{slug}",),
-        verbs=("seed", "teardown"),
+        verbs=("seed", "reset", "teardown"),
     ),
     Entity(
         id="porth-idp-config",
@@ -101,7 +102,8 @@ ENTITIES: tuple[Entity, ...] = (
         resources=(
             "claim-mapping-configs: PK=ENV#{s}#TENANT#{tid} SK=VERSION#{n:06d} (compiled_hash computed, never supplied)",
         ),
-        planned={"seed": "PRF-13", "reset": "PRF-14"},
+        planned={"seed": "PRF-13"},
+        verbs=("reset",),
     ),
     Entity(
         id="porth-app-permission",

@@ -2,8 +2,8 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
   prawf provisioning adapter for EMS (PRF-9). One adapter per target; the slot is chosen per call.
-  Invoked directly by ARN, with no HTTP surface. Answers capabilities, and seed and teardown on
-  porth-tenant (PRF-12, PRF-15).
+  Invoked directly by ARN, with no HTTP surface. Answers capabilities; seed and teardown on
+  porth-org and porth-tenant (PRF-12, PRF-15); bootstrap on porth-platform (PRF-11); and reset (PRF-14).
 
 # A standalone stack, like infra/qa-tools and for the same reasons: it writes Porth's tables, which
 # the sample-app stack does not own, and it is prawf's backdoor rather than part of the application.
@@ -13,9 +13,9 @@ Description: >
 # call assumes DataRole with an inline session policy that admits only partition keys under
 # ENV#{slot}#, so a request routed to the wrong slot is denied by AWS rather than avoided by code.
 # DataRole's policy is the ceiling: the four Porth tables named explicitly (never porth-*, which on
-# main also matches the sample app's own table), single-item writes on the three porth-tenant writes
-# to, and Scan denied outright - ForAllValues over the absent LeadingKeys of a Scan evaluates true and
-# would read every slot. Porth's own repositories publish an event for every write and raise if they
+# main also matches the sample app's own table), single-item writes, and Scan on the tenants table
+# alone - ForAllValues over the absent LeadingKeys of a Scan evaluates true, so a Scan reads every
+# slot's rows there; reset needs it (PRF-14) and the code filters to the slot. Porth's own repositories publish an event for every write and raise if they
 # cannot, so DataRole may also put events on Porth's bus - that bus and no other.
 
 Parameters:
@@ -91,6 +91,12 @@ Resources:
                 Effect: Allow
                 Action: cloudformation:DescribeStacks
                 Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${PorthStackName}/*
+              # PRF-11: the platform baseline's IdP config and roles-claim namespace are the install's
+              # own record of its IdP. Read, never written.
+              - Sid: ReadPorthAuth
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/auth
 
   DataRole:
     Type: AWS::IAM::Role
@@ -126,8 +132,9 @@ Resources:
                   - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthClaimMappingConfigsTable}
                   - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthClaimMappingConfigsTable}/index/*
               # PRF-12: porth-tenant writes the tenant row, its role and grants, and its permissions.
+              # PRF-11 and PRF-14: bootstrap writes the platform claim mapping; reset removes the others.
               # Single items only - no BatchWrite, no transactions; Porth's create path uses neither.
-              - Sid: WriteTenantRolesAndPermissions
+              - Sid: WritePorthTables
                 Effect: Allow
                 Action:
                   - dynamodb:PutItem
@@ -137,14 +144,26 @@ Resources:
                   - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthTenantsTable}
                   - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthRolesTable}
                   - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthPermissionsTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthClaimMappingConfigsTable}
+              # PRF-14 (Richard, 2026-10-24): reset finds every tenant as Porth's tenant directory does,
+              # by scanning the tenants table. That table only, never an index or another table. IAM
+              # cannot hold a Scan to one slot - it may READ other slots' rows there, never write them -
+              # and the adapter filters to the slot before it acts on a row.
+              - Sid: ScanTheTenantsTable
+                Effect: Allow
+                Action: dynamodb:Scan
+                Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthTenantsTable}
               - Sid: PorthEventsOnly
                 Effect: Allow
                 Action: events:PutEvents
                 Resource: !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/${PorthEventBus}
-              - Sid: NeverScan
+              - Sid: ScanNothingElse
+                Effect: Deny
+                Action: dynamodb:Scan
+                NotResource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthTenantsTable}
+              - Sid: NeverPartiQL
                 Effect: Deny
                 Action:
-                  - dynamodb:Scan
                   - dynamodb:PartiQLSelect
                   - dynamodb:ExecuteStatement
                   - dynamodb:BatchExecuteStatement

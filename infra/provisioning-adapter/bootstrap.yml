@@ -11,10 +11,12 @@ Description: >
 # the pipeline's reach.
 #
 # The boundary is wider than the runner's, because the adapter's job is data access. It still caps the
-# adapter at: its own log group, its own slot map, reading the Porth stack's version tag, assuming its
-# own data role, and Porth's four table FAMILIES by name - never porth-*, which on main also matches
-# the sample app's own table. Scan and PartiQL are denied outright: ForAllValues over the absent
-# LeadingKeys of a Scan evaluates true and would read every slot.
+# adapter at: its own log group, its own slot map, reading the Porth stack's version tag and the
+# install's /porth/auth record, assuming its own data role, and Porth's four table FAMILIES by name -
+# never porth-*, which on main also matches the sample app's own table. PartiQL is denied outright.
+# Scan is allowed on the tenants family alone, for reset (PRF-14): ForAllValues over the absent
+# LeadingKeys of a Scan evaluates true, so it reads every slot's rows there - read only, and the
+# adapter filters to the slot. A Scan of any other table is denied.
 
 Parameters:
   GitHubRepo:
@@ -50,6 +52,11 @@ Resources:
             Effect: Allow
             Action: ssm:GetParameter
             Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/prawf/adapter/*
+          # PRF-11: bootstrap reads the install's own record of its IdP, to check the platform baseline.
+          - Sid: PorthAuthRecord
+            Effect: Allow
+            Action: ssm:GetParameter
+            Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/auth
           - Sid: PorthStackVersionTag
             Effect: Allow
             Action: cloudformation:DescribeStacks
@@ -81,10 +88,19 @@ Resources:
             Effect: Allow
             Action: events:PutEvents
             Resource: !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/porth-events-*
-          - Sid: NeverScan
+          # PRF-14 (Richard, 2026-10-24): reset finds every tenant as Porth's own directory does, by
+          # scanning the tenants table. That family only; a Scan anywhere else is denied.
+          - Sid: ScanPorthTenants
+            Effect: Allow
+            Action: dynamodb:Scan
+            Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-tenants-*
+          - Sid: ScanNothingElse
+            Effect: Deny
+            Action: dynamodb:Scan
+            NotResource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-tenants-*
+          - Sid: NeverPartiQL
             Effect: Deny
             Action:
-              - dynamodb:Scan
               - dynamodb:PartiQLSelect
               - dynamodb:ExecuteStatement
               - dynamodb:BatchExecuteStatement

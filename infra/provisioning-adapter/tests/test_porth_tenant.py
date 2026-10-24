@@ -19,8 +19,12 @@ from prawf_schemas import validate_contract_response
 from test_adapter import aws, handler  # noqa: F401 - the adapter's modules, on the path
 
 SLOT = "porth-dau"
-TABLES = {"tenants": "porth-tenants-dev", "roles": "porth-roles-dev", "permissions": "porth-permissions-dev"}
+TABLES = {"tenants": "porth-tenants-dev", "roles": "porth-roles-dev", "permissions": "porth-permissions-dev",
+          "claims": "porth-claim-mapping-configs-dev"}
 ORG_ID = "0b7d3e52-9a51-4bd4-8a1e-3f0c2d1e9a77"
+#: The install's /porth/auth blob, as build_auth_blob.py writes it - synthetic values.
+AUTH = {"issuer": "https://idp.synthetic.test/", "jwks_uri": "https://idp.synthetic.test/.well-known/jwks.json",
+        "interactive_client_id": "synthetic-client", "audience": "https://api.synthetic.test", "protocol": "oidc"}
 
 
 def signed(dataset: dict) -> dict:
@@ -62,6 +66,7 @@ def porth(monkeypatch):
         _table(ddb, TABLES["tenants"], "PK", "SK", [("gsi1", "gsi1pk", "gsi1sk"), ("gsi2", "gsi2pk", "gsi2sk")])
         _table(ddb, TABLES["roles"], "pk", "sk", [("gsi1", "gsi1pk", "gsi1sk")])
         _table(ddb, TABLES["permissions"], "pk", "sk", [("gsi1", "gsi1pk", "gsi1sk")])
+        _table(ddb, TABLES["claims"], "PK", "SK", [("gsi1", "gsi1pk", "gsi1sk")])
         events = boto3.client("events")
         events.create_event_bus(Name="porth-events")
         sqs = boto3.client("sqs")
@@ -71,6 +76,7 @@ def porth(monkeypatch):
         events.put_targets(Rule="tap", EventBusName="porth-events", Targets=[{"Id": "q", "Arn": queue_arn}])
         boto3.client("ssm").put_parameter(Name="/prawf/adapter/slot-map", Type="String", Value=json.dumps(
             {"slots": {SLOT: {"environment_id": "ems-porth-dau", "environment_class": "disposable"}}}))
+        boto3.client("ssm").put_parameter(Name="/porth/auth", Type="String", Value=json.dumps(AUTH))
 
         tenants = boto3.resource("dynamodb").Table(TABLES["tenants"])
         now = "2026-09-15T19:40:00+00:00"
@@ -89,6 +95,7 @@ def porth(monkeypatch):
         monkeypatch.setenv("PORTH_TENANTS_TABLE", TABLES["tenants"])
         monkeypatch.setenv("PORTH_ROLES_TABLE", TABLES["roles"])
         monkeypatch.setenv("PORTH_PERMISSIONS_TABLE", TABLES["permissions"])
+        monkeypatch.setenv("PORTH_CLAIM_MAPPING_CONFIGS_TABLE", TABLES["claims"])
         monkeypatch.setenv("PORTH_STACK_NAME", "serverlessrepo-porth-components")
         monkeypatch.setenv("ADAPTER_VERSION", "test-build")
 

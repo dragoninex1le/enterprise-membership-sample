@@ -5,7 +5,8 @@ role whose job is data access:
 * every adapter role carries prawf-adapter-boundary (checked against template.yml);
 * the execution role creates or grants to adapter roles ONLY with that boundary, never removes it;
 * the boundary reaches Porth's four table families by name - never porth-*, which on main matches the
-  sample app's own table - and denies Scan, which would read every slot.
+  sample app's own table - and allows Scan on the tenants family alone (reset, PRF-14), denying it on
+  everything else; a Scan cannot be held to one slot.
 """
 import re
 from pathlib import Path
@@ -102,18 +103,32 @@ def test_role_passing_is_scoped_to_its_service(boot):
 
 def test_the_boundary_names_porth_tables_and_never_the_apps(boot):
     stmts = boot["PrawfAdapterBoundary"]["Properties"]["PolicyDocument"]["Statement"]
-    tables = [r for st in stmts if st["Effect"] == "Allow" for r in resources(st) if ":table/" in r]
+    tables = [r for st in stmts if st["Effect"] == "Allow" and st["Sid"] != "ScanPorthTenants"
+              for r in resources(st) if ":table/" in r]
     families = sorted(r.rsplit(":table/", 1)[1] for r in tables)
     assert families == ["porth-claim-mapping-configs-*", "porth-permissions-*", "porth-roles-*", "porth-tenants-*"]
     assert not any(f in ("porth-*", "*") for f in families)
 
 
-def test_the_boundary_denies_scan_and_holds_no_iam(boot):
+def test_the_boundary_scans_only_porth_tenants_and_holds_no_iam(boot):
     stmts = boot["PrawfAdapterBoundary"]["Properties"]["PolicyDocument"]["Statement"]
     allowed = {a for st in stmts if st["Effect"] == "Allow" for a in actions(st)}
     denied = {a for st in stmts if st["Effect"] == "Deny" for a in actions(st)}
-    assert "dynamodb:Scan" not in allowed and "dynamodb:Scan" in denied
+    scans = [st for st in stmts if st["Effect"] == "Allow" and "dynamodb:Scan" in actions(st)]
+    assert [st["Sid"] for st in scans] == ["ScanPorthTenants"]
+    assert actions(scans[0]) == ["dynamodb:Scan"] and resources(scans[0])[0].endswith(":table/porth-tenants-*")
+    (deny,) = [st for st in stmts if st["Effect"] == "Deny" and "dynamodb:Scan" in actions(st)]
+    assert str(_value(deny["NotResource"])).endswith(":table/porth-tenants-*")
+    assert {"dynamodb:PartiQLSelect", "dynamodb:ExecuteStatement"} <= denied
     assert not any(a.startswith("iam:") for a in allowed)
+
+
+def test_the_boundary_reads_the_install_auth_record_and_no_other_parameter_outside_its_own(boot):
+    stmts = boot["PrawfAdapterBoundary"]["Properties"]["PolicyDocument"]["Statement"]
+    params = sorted(r.rsplit(":parameter", 1)[1] for st in stmts if st["Effect"] == "Allow"
+                    for r in resources(st) if ":parameter" in r)
+    assert params == ["/porth/auth", "/prawf/adapter/*"]
+    assert not any(a.startswith(("ssm:Put", "ssm:Delete")) for st in stmts for a in actions(st))
 
 
 def test_the_deploy_role_has_no_iam_power_beyond_passing_the_execution_role(boot):

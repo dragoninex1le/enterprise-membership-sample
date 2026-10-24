@@ -73,7 +73,8 @@ def answer(slot_name: str, slot_cfg: dict) -> tuple[dict, list[str]]:
         "verbs": list(catalogue.INSTALL_VERBS),
         "entities": catalogue.declared(),
         "resource_types": ["tenant"],
-        "extension_types": ["porth.org"],
+        # porth.org is seeded; the rest name the pieces of the platform baseline bootstrap reports.
+        "extension_types": ["porth.org", "porth.permission", "porth.role", "porth.role-grant", "porth.claim-mapping"],
         "dataset_forms": list(datasets.FORMS),
         "async": False,
     }

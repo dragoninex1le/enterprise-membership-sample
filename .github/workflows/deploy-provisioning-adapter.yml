@@ -302,9 +302,14 @@ jobs:
           python -m pip install --quiet 'prawf-schemas>=1.0.0,<2'
 
       # The proof, from inside the account: capabilities in a form the real schemas accept, what is
-      # not implemented answered honestly - and a DRY-RUN seed of a probe tenant, which proves
-      # porth-common loads in the Lambda and can read Porth's tables on the one-slot session while
-      # writing nothing. It may be refused (no `ems` org in the slot, say); it must not fail.
+      # not implemented answered honestly - and three DRY RUNS, each writing nothing:
+      #   * seed of a probe tenant: porth-common loads and reads Porth's tables on the one-slot
+      #     session. It may be refused (no `ems` org in the slot, say); it must not fail.
+      #   * bootstrap porth-platform: reads /porth/auth and every platform table, the claim mapping's
+      #     included - the grants PRF-11 added. Must be ok.
+      #   * reset of every entity: the one Scan of the tenants table - PRF-14's grant, through the
+      #     session policy. Must be ok. Only its outcome is reported: its messages name the slot's
+      #     tenants, and this repository is public.
       - name: Prove it in-account
         run: |
           set -euo pipefail
@@ -327,6 +332,8 @@ jobs:
                             "payload": {"dataset": {**body, "digest": digest}}}))
           PY
           invoke "$(cat dryrun-request.json)" dryrun.json
+          invoke '{"contract_version":"1.0.0","verb":"bootstrap","entity":"porth-platform","run":{"run_id":"deploy-proof","dry_run":true}}' bootstrap.json
+          invoke '{"contract_version":"1.0.0","verb":"reset","run":{"run_id":"deploy-proof","dry_run":true},"payload":{"confirm_environment_class":"disposable"}}' reset.json
 
           python - <<'PY'
           import json, os
@@ -343,9 +350,10 @@ jobs:
           result = validate_capabilities(caps["results"][0])
           assert result.valid, [str(e) for e in result.errors]
           body = caps["results"][0]
-          assert body["verbs"] == ["capabilities", "seed", "teardown"], body["verbs"]
+          assert body["verbs"] == ["capabilities", "bootstrap", "seed", "reset", "teardown"], body["verbs"]
           declared = {e["id"]: e["verbs"] for e in body["entities"]}
-          assert declared["porth-tenant"] == ["seed", "teardown"], declared
+          assert declared["porth-tenant"] == ["seed", "reset", "teardown"], declared
+          assert declared["porth-platform"] == ["bootstrap"], declared
           assert body["environment"].get("slot"), "environment.slot must be populated"
 
           unsupported = load("unsupported.json")
@@ -357,6 +365,13 @@ jobs:
           dryrun = load("dryrun.json")
           assert dryrun["outcome"] in ("ok", "refused"), dryrun
           dry_note = dryrun["outcome"] + (f" / {dryrun['reason_code']}" if dryrun.get("reason_code") else "")
+
+          bootstrap = load("bootstrap.json")
+          assert bootstrap["outcome"] == "ok", (bootstrap.get("reason_code"), bootstrap["diagnostics"]["messages"])
+          baseline = ", ".join(f"{h['type']} {h['outcome']}" for h in bootstrap["results"])
+
+          reset = load("reset.json")
+          assert reset["outcome"] == "ok", reset.get("reason_code")
 
           env = body["environment"]
           lines = [
@@ -370,6 +385,8 @@ jobs:
               "- `seed porth-role` -> `unsupported / not_implemented`",
               "- `seed porth-tables` -> `refused / unknown_entity`",
               f"- dry-run `seed porth-tenant` (probe, nothing written) -> `{dry_note}`: {'; '.join(dryrun['diagnostics']['messages'])}",
+              f"- dry-run `bootstrap porth-platform` (nothing written) -> `ok`: {baseline}",
+              "- dry-run `reset` (every entity, nothing removed) -> `ok`",
           ]
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
               f.write("\n".join(lines) + "\n")
