@@ -160,3 +160,19 @@ def test_every_sid_is_alphanumeric(tpl):
     for _, st in _statements(tpl):
         if "Sid" in st:
             assert re.fullmatch(r"[A-Za-z0-9]+", st["Sid"]), st["Sid"]
+
+
+def test_prawfs_bookkeeping_has_its_own_table_kept_out_of_porths(tpl):
+    """Richard, 2026-10-25: a test tool's rows do not belong in the application's tables."""
+    table = tpl["Resources"]["AuditTable"]
+    assert table["Type"] == "AWS::DynamoDB::Table"
+    assert table["DeletionPolicy"] == "RetainExceptOnCreate" and table["UpdateReplacePolicy"] == "Retain", "the record of what prawf did"
+    props = table["Properties"]
+    assert props["TableName"] == "prawf-adapter-audit"
+    assert [k["AttributeName"] for k in props["KeySchema"]] == ["PK", "SK"]
+    assert "GlobalSecondaryIndexes" not in props
+    fn = tpl["Resources"]["AdapterFunction"]["Properties"]["Environment"]["Variables"]
+    assert fn["PRAWF_AUDIT_TABLE"] == {"Ref": "AuditTable"}
+    (grant,) = [st for n, st in _statements(tpl) if n == "DataRole" and st.get("Sid") == "PrawfAuditTable"]
+    assert grant["Resource"] == {"GetAtt": "AuditTable.Arn"}
+    assert "dynamodb:Scan" not in _actions(grant)

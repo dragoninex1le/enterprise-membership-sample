@@ -14,8 +14,9 @@ Description: >
 # and the scope the pipeline may grant (prawf-adapter-boundary). What the adapter may DO at runtime
 # lives in template.yml and changes through the pipeline, never by hand: the boundary names services
 # and resource families - the adapter's log group and roles, Porth's and the adapter's parameters
-# (read), Porth's stack (read), the data plane of Porth's four table families, Porth's event buses -
-# and nothing in IAM. A runtime change that stays inside that scope needs no bootstrap deploy; one
+# (read), Porth's stack (read), the data plane of Porth's four table families and of prawf's own
+# prawf-adapter-* tables, Porth's event buses - and nothing in IAM. The execution role may create
+# prawf-adapter-* tables, and never a Porth one. A runtime change that stays inside that scope needs no bootstrap deploy; one
 # that does not fails tests/test_bootstrap.py in the PR, before it can be deployed.
 
 Parameters:
@@ -90,6 +91,20 @@ Resources:
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-roles-*
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-permissions-*
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-claim-mapping-configs-*
+          # prawf's own bookkeeping: which run wrote what (the audit table, template.yml).
+          - Sid: PrawfAdapterTables
+            Effect: Allow
+            Action:
+              - dynamodb:DescribeTable
+              - dynamodb:GetItem
+              - dynamodb:BatchGetItem
+              - dynamodb:Query
+              - dynamodb:ConditionCheckItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:BatchWriteItem
+            Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/prawf-adapter-*
           - Sid: PorthEventBuses
             Effect: Allow
             Action: events:PutEvents
@@ -265,6 +280,14 @@ Resources:
                 Resource:
                   - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/porth-provisioning-adapter
                   - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/porth-provisioning-adapter:*
+              # prawf's own tables (the audit table, template.yml): created, changed and removed with
+              # the stack. Never Porth's - the pipeline never creates or alters an application table.
+              - Sid: TheAdapterTables
+                Effect: Allow
+                Action: dynamodb:*
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/prawf-adapter-*
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/prawf-adapter-*/*
               - Sid: TheSlotMap
                 Effect: Allow
                 Action:

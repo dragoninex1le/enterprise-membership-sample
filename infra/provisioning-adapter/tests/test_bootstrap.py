@@ -110,8 +110,22 @@ def _boundary(boot):
 def test_the_boundary_names_porth_tables_and_never_the_apps(boot):
     tables = [r for st in _boundary(boot) if st["Effect"] == "Allow" for r in resources(st) if ":table/" in r]
     families = sorted(r.rsplit(":table/", 1)[1] for r in tables)
-    assert families == ["porth-claim-mapping-configs-*", "porth-permissions-*", "porth-roles-*", "porth-tenants-*"]
-    assert not any(f in ("porth-*", "*") for f in families)
+    assert families == ["porth-claim-mapping-configs-*", "porth-permissions-*", "porth-roles-*", "porth-tenants-*",
+                        "prawf-adapter-*"]
+    assert not any(f in ("porth-*", "prawf-*", "*") for f in families)
+
+
+def test_the_pipeline_creates_prawfs_tables_and_never_porths(boot):
+    """The audit table is prawf's (template.yml), so the stack creates it. A Porth table is the
+    application's: the execution role can neither create nor alter one."""
+    tables = [st for st in statements(boot["ExecutionRole"]) if any(a.startswith("dynamodb:") for a in actions(st))]
+    (st,) = tables
+    assert st["Sid"] == "TheAdapterTables"
+    assert sorted(resources(st)) == sorted([
+        "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/prawf-adapter-*",
+        "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/prawf-adapter-*/*"])
+    scan = [st for st in _boundary(boot) if "dynamodb:Scan" in actions(st)]
+    assert all(not any("prawf-adapter" in r for r in resources(st)) for st in scan), "prawf's table is never scanned"
 
 
 #: The services the scope may name, and of each the actions: data and reads, never administration.
@@ -173,6 +187,8 @@ _RESOLVED = {"AWS::Region": "us-east-1", "AWS::AccountId": "195950944420", "Port
 def _arn(x) -> str:
     """A template resource as the ARN it deploys to: !Sub resolved, !GetAtt DataRole.Arn as the role SAM names."""
     if isinstance(x, dict) and "GetAtt" in x:
+        if x["GetAtt"] == "AuditTable.Arn":
+            return "arn:aws:dynamodb:us-east-1:195950944420:table/prawf-adapter-audit"
         assert x["GetAtt"] in ("DataRole.Arn", "RunnerLogs.Arn"), x
         return "arn:aws:iam::195950944420:role/porth-provisioning-adapter-DataRole-ABC123"
     if isinstance(x, dict) and "Ref" in x:

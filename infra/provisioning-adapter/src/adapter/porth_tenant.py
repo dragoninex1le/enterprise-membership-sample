@@ -191,26 +191,25 @@ def seed(env_scope: str, run_id: str, dry_run: bool, payload: object) -> tuple[l
 def teardown(env_scope: str, run_id: str, target_run: str) -> tuple[list[dict], list[str]]:
     """Remove everything `target_run` wrote to this entity. Idempotent: nothing left is `ok`, quietly."""
     porth = Porth(env_scope, run_id)
-    entries = [writes for entity, writes in ledger.runs(porth.db, env_scope, target_run) if entity == ENTITY]
-    if not entries:
+    writes = ledger.writes(porth.db, env_scope, target_run, ENTITY)
+    if writes is None:
         return [], [f"nothing in {ENTITY} is labelled with run {target_run}"]
 
     removed = []
-    for writes in entries:
-        for entry in reversed(writes):
-            if entry["kind"] == "tenant":
-                _sweep_tenant(porth, env_scope, entry["tenant_id"])
-            else:
-                key = entry["key"]
-                porth.db.delete_item(TableName=entry["table"], Key={k: {"S": v} for k, v in key.items()})
-                if key.get("SK") == "METADATA" and "#TENANT#" in key.get("PK", ""):
-                    # The tenant row itself. Porth 0.3.1 has no hard delete to call, so the row goes
-                    # directly - and the events its consumers would expect go with it.
-                    tid = key["PK"].split("#TENANT#", 1)[1]
-                    porth.publisher.publish(entity_type="Tenant", action="deleted", entity_id=tid,
-                                            metadata={"tenant_id": tid})
-                    porth.publisher.publish_tenant_lifecycle(action="deleted", tenant_id=tid)
-                    removed.append(tid)
+    for entry in reversed(writes):
+        if entry["kind"] == "tenant":
+            _sweep_tenant(porth, env_scope, entry["tenant_id"])
+        else:
+            key = entry["key"]
+            porth.db.delete_item(TableName=entry["table"], Key={k: {"S": v} for k, v in key.items()})
+            if key.get("SK") == "METADATA" and "#TENANT#" in key.get("PK", ""):
+                # The tenant row itself. Porth 0.3.1 has no hard delete to call, so the row goes
+                # directly - and the events its consumers would expect go with it.
+                tid = key["PK"].split("#TENANT#", 1)[1]
+                porth.publisher.publish(entity_type="Tenant", action="deleted", entity_id=tid,
+                                        metadata={"tenant_id": tid})
+                porth.publisher.publish_tenant_lifecycle(action="deleted", tenant_id=tid)
+                removed.append(tid)
     ledger.forget(porth.db, env_scope, target_run, ENTITY)
     return [], [f"run {target_run}: removed tenant(s) {', '.join(removed) or '(none left)'} and everything under them"]
 

@@ -157,6 +157,17 @@ Resources:
                 Effect: Allow
                 Action: events:PutEvents
                 Resource: !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/${PorthEventBus}
+              # prawf's own bookkeeping - which run wrote what, which dataset each entity carries - in
+              # prawf's own table, never Porth's (Richard, 2026-10-25). Same one-slot session.
+              - Sid: PrawfAuditTable
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource: !GetAtt AuditTable.Arn
               - Sid: ScanNothingElse
                 Effect: Deny
                 Action: dynamodb:Scan
@@ -169,6 +180,31 @@ Resources:
                   - dynamodb:BatchExecuteStatement
                   - dynamodb:ExecuteTransaction
                 Resource: '*'
+
+  # What prawf wrote, by run and entity, and which dataset each entity carries (ledger.py). A test
+  # tool's bookkeeping does not belong in the application's tables, so it lives here: one partition
+  # per slot and entity, ENV#{slot}#ENTITY#{entity}, under the same one-slot session as Porth's rows.
+  # Retained: it is the record of what prawf did to a slot - except when the deploy that created it
+  # rolls back, which would otherwise strand a fixed-name table and fail the next deploy.
+  AuditTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: prawf-adapter-audit
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
 
   # A separate policy, not an inline statement on ExecutionRole: DataRole's trust names
   # ExecutionRole, so granting AssumeRole inline would make each role depend on the other.
@@ -225,6 +261,7 @@ Resources:
           # porth-common reads it at import (config.EVENT_BUS_NAME). Its default, porth-events, is
           # not the bus Porth deploys - left unset, every seed would write a row and then fail.
           PORTH_EVENT_BUS: !Ref PorthEventBus
+          PRAWF_AUDIT_TABLE: !Ref AuditTable
           ADAPTER_VERSION: !Ref AdapterVersion
 
   # The principal IS the restriction. No aws:SourceAccount condition: that key exists only when one
@@ -254,3 +291,6 @@ Outputs:
   SlotMapParameterName:
     Description: The target's own list of its slots.
     Value: !Ref SlotMapParameter
+  AuditTableName:
+    Description: prawf's record of what each run wrote, and which dataset each entity carries.
+    Value: !Ref AuditTable
