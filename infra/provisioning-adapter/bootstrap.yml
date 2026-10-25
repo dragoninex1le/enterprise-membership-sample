@@ -43,7 +43,7 @@ Resources:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: prawf-adapter-boundary
-      Description: The most the adapter pipeline may ever grant an adapter role.
+      Description: The most any provisioning-adapter role can ever do.
       PolicyDocument:
         Version: '2012-10-17'
         Statement:

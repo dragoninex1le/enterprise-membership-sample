@@ -233,3 +233,13 @@ def test_the_deploy_role_reads_porth_common_and_nothing_else_of_codeartifact(boo
     repos = {str(_value(r)).rsplit(":", 1)[-1] for st in reads for r in resources(st)}
     assert repos == {"domain/estyn-prawf", "repository/estyn-prawf/estyn-prawf-py", "domain/porth", "repository/porth/porth-py"}
     assert not any("Publish" in a or "Delete" in a for st in reads for a in actions(st)), "read, never publish"
+
+
+def test_the_boundary_updates_in_place(boot):
+    """An AWS::IAM::ManagedPolicy is REPLACED when its name, path or description changes - and with a
+    fixed ManagedPolicyName the replacement collides with the policy it replaces ("already exists",
+    2026-10-24). Its document changes in place. So these three are frozen; change only the document."""
+    props = boot["PrawfAdapterBoundary"]["Properties"]
+    assert props["ManagedPolicyName"] == "prawf-adapter-boundary"
+    assert props["Description"] == "The most any provisioning-adapter role can ever do."
+    assert "Path" not in props
