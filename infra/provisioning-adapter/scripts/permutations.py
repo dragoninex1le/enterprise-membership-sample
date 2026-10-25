@@ -8,8 +8,9 @@ Run locally, with credentials for the EMS account, against the live function:
 Each case is one `aws lambda invoke`, so this exercises the deployed adapter exactly as a caller
 would, including requests prawf itself would refuse to build (a malformed envelope, a foreign major
 version). Read-only: `capabilities` reads the slot map and one tenants row; every other case is
-refused or unsupported before it writes - the `seed` cases are dry runs that fail validation, so
-nothing is ever written. Safe against a live slot.
+refused or unsupported before it reads Porth's data - the `seed` cases are dry runs that fail
+validation, `bootstrap` is sent a payload it refuses, and `reset` lacks or contradicts the slot's
+class - so nothing is ever written. Safe against a live slot.
 
 What each case asserts:
   * the outcome and reason code the adapter's check order produces (handler.py):
@@ -17,7 +18,9 @@ What each case asserts:
   * the §9 invariants on every response: ok carries no reason code; a non-ok carries one from the
     closed list, no results, and a message saying why
   * on `capabilities`, the declaration itself: the served slot, contract 1.0.0, the implemented
-    verbs, the nine catalogue entities, and `seed`/`teardown` on porth-org and porth-tenant alone (C1)
+    verbs, the nine catalogue entities, and exactly the implemented cells (C1): `bootstrap` on
+    porth-platform; `seed`, `reset` and `teardown` on porth-org and porth-tenant; `reset` on
+    porth-claim-mapping
   * if `prawf_schemas` is importable, every response against the canonical response schema
 
 Exit status is 0 only when every case passes. --report writes each request and response as JSON.
@@ -45,7 +48,14 @@ REASON_CODES = {
 }
 CONTRACT = "1.0.0"
 #: Implemented cells of the verb x entity matrix (C1). Everything else is unsupported.
-IMPLEMENTED = {("seed", "porth-org"), ("teardown", "porth-org"), ("seed", "porth-tenant"), ("teardown", "porth-tenant")}
+IMPLEMENTED = {
+    ("bootstrap", "porth-platform"),
+    ("seed", "porth-org"), ("reset", "porth-org"), ("teardown", "porth-org"),
+    ("seed", "porth-tenant"), ("reset", "porth-tenant"), ("teardown", "porth-tenant"),
+    ("reset", "porth-claim-mapping"),
+}
+INSTALL_VERBS = ["capabilities", "bootstrap", "seed", "reset", "teardown"]
+EXTENSION_TYPES = ["porth.org", "porth.permission", "porth.role", "porth.role-grant", "porth.claim-mapping"]
 #: §3.4, C17: verbs whose payload is entity-specific, so omitting the entity is refused.
 NEEDS_ENTITY = ("bootstrap", "seed", "ensure", "absent")
 UNKNOWN_ENTITY = "porth-tables"  # the contract's own example entity; EMS never declares it
@@ -84,10 +94,10 @@ def declares_the_target(slot: str):
             problems.append(f"environment.slot is {env.get('slot')!r}, expected {slot!r}")
         if body.get("contract_versions") != [CONTRACT]:
             problems.append(f"contract_versions is {body.get('contract_versions')!r}")
-        if body.get("extension_types") != ["porth.org"]:
-            problems.append(f"extension_types is {body.get('extension_types')!r}, expected ['porth.org']")
-        if body.get("verbs") != ["capabilities", "seed", "teardown"]:
-            problems.append(f"verbs is {body.get('verbs')!r}, expected ['capabilities', 'seed', 'teardown']")
+        if body.get("extension_types") != EXTENSION_TYPES:
+            problems.append(f"extension_types is {body.get('extension_types')!r}, expected {EXTENSION_TYPES!r}")
+        if body.get("verbs") != INSTALL_VERBS:
+            problems.append(f"verbs is {body.get('verbs')!r}, expected {INSTALL_VERBS!r}")
         ids = [e.get("id") for e in body.get("entities", [])]
         if sorted(ids) != sorted(ENTITIES):
             problems.append(f"entities are {ids!r}")
@@ -159,6 +169,8 @@ def cases(slot: str) -> list[Case]:
             out.append(Case(f"verb:{verb}", "no entity", envelope(verb), "refused", "unknown_entity"))
         elif verb == "teardown":
             out.append(Case(f"verb:{verb}", "no entity, no run_id", envelope(verb), "refused", "scope_violation"))
+        elif verb == "reset":
+            out.append(Case(f"verb:{verb}", "no entity, no confirmation", envelope(verb), "refused", "scope_violation"))
         else:
             out.append(Case(f"verb:{verb}", "no entity", envelope(verb), "unsupported", "not_implemented"))
         for entity in ENTITIES:
@@ -166,12 +178,24 @@ def cases(slot: str) -> list[Case]:
                 out.append(Case(f"verb:{verb}", f"{entity}, no dataset", envelope(verb, entity), "refused", "dataset_conflict"))
             elif (verb, entity) in IMPLEMENTED and verb == "teardown":
                 out.append(Case(f"verb:{verb}", f"{entity}, no run_id", envelope(verb, entity), "refused", "scope_violation"))
+            elif (verb, entity) in IMPLEMENTED and verb == "reset":
+                out.append(Case(f"verb:{verb}", f"{entity}, no confirmation", envelope(verb, entity), "refused", "scope_violation"))
+            elif (verb, entity) in IMPLEMENTED and verb == "bootstrap":
+                # bootstrap takes no payload (D7); one is refused before anything is read.
+                out.append(Case(f"verb:{verb}", f"{entity}, with a payload", envelope(verb, entity, payload={"x": 1}),
+                                "refused", "dataset_conflict"))
             else:
                 out.append(Case(f"verb:{verb}", entity, envelope(verb, entity), "unsupported", "not_implemented"))
         out.append(Case(f"verb:{verb}", f"{UNKNOWN_ENTITY} (unknown)", envelope(verb, UNKNOWN_ENTITY),
                         "refused", "unknown_entity"))
 
-    # 6. seed: every way a dataset is turned away. All dry runs, all rejected before
+    # 6. reset: the caller's belief about the slot is checked before anything is read. The served slot
+    #    is disposable; a caller who believes otherwise is refused, and nothing is reset.
+    out.append(Case("reset", "a caller who believes the slot protected",
+                    envelope("reset", "porth-tenant", payload={"confirm_environment_class": "protected"}),
+                    "refused", "scope_violation"))
+
+    # 7. seed: every way a dataset is turned away. All dry runs, all rejected before
     #    the adapter reads or writes a row - so these are safe against a live slot.
     def seed(dataset: dict) -> dict:
         return envelope("seed", "porth-tenant", payload={"dataset": dataset})

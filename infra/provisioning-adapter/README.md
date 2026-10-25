@@ -15,14 +15,39 @@ reinventing what porth-common sometimes provides, and every write it makes is pr
   map entry. An adapter per slot would couple prawf to the target's deployment topology.
 - **No HTTP surface.** Invoked directly by ARN (§1.1). The event is the request envelope; the return
   value is the response envelope. No API-Gateway wrapping either way.
-- **This slice answers `capabilities` only.** Every other verb returns `unsupported` /
+- **It answers what it implements, and nothing else.** Every other verb returns `unsupported` /
   `not_implemented`, which prawf reads as *skip*.
 
 ## The entity catalogue
 
 An entity declares only the verbs it implements — C1 forbids declaring anything else. Each slice flips
 one cell of the verb × entity matrix: so far `seed` and `teardown` on `porth-org` and `porth-tenant`
-(PRF-12, PRF-15); every other entity declares `verbs: []`. `{s}` is the slot's env_scope; `{tid}` a tenant id.
+(PRF-12, PRF-15), `bootstrap` on `porth-platform` (PRF-11), and `reset` on `porth-claim-mapping`,
+`porth-tenant` and `porth-org` (PRF-14); every other entity declares `verbs: []`. `{s}` is the slot's
+env_scope; `{tid}` a tenant id.
+
+## `porth-platform`: bootstrap
+
+The baseline is what EMS's Porth install writes — `scripts/bootstrap_platform_tenant.py`, then the
+IdP step of `porth-bootstrap.yml`: the platform organisation and tenant (`role_type =
+platform-admin`), the ten `porth-platform` permissions, the `platform-admin` role and its grants of
+them, the platform claim mapping (roles claim namespaced by the install's audience), and the platform
+tenant's `idp_config_override` read back from `/porth/auth`. `bootstrap` reads each piece and writes
+only what is missing or differs, so a slot the install bootstrapped answers `unchanged` throughout.
+`tests/test_porth_platform.py` runs the install script itself on moto and holds the adapter to it,
+row for row. A grant from another namespace on `platform-admin` is the app's (PORTH-609) and is never
+removed. The baseline is no run's fixture: teardown never removes it, reset never touches it.
+
+## `reset`: back to the baseline
+
+What §8.4 sends a caller to when a seed meets data it did not write. Reset returns an entity to its
+bootstrapped state — whoever wrote what is there — and leaves the platform baseline untouched (C12,
+C16): `porth-claim-mapping` loses every tenant's claim mappings but the platform's; `porth-tenant`
+every tenant but the platform, with its roles, grants (both key shapes) and permissions;
+`porth-org` every organisation but the platform's, refused while tenants still belong to one. With
+no entity, all three in that order. A `protected` slot refuses it outright (C8); on a disposable one
+the caller must confirm `confirm_environment_class` and is refused on a mismatch. Users, org-units
+and sessions are outside the adapter's grant and are named in the response, not passed over.
 
 ## `porth-org`: seed and teardown
 
@@ -57,10 +82,10 @@ moves with it.
 
 | Entity | Destructive | Porth resources | Planned | Ruled out |
 |---|---|---|---|---|
-| `porth-platform` | no | tenants `ENV#{s}#ORG#{uuid}` and `ENV#{s}#TENANT#platform` / `METADATA`; permissions `ENV#{s}#TENANT#platform#NS#porth-platform`; roles `platform-admin` and its grants | `bootstrap` — PRF-11, **dry_run only**: verify the install, write nothing | `reset` (breaks every sign-in); `seed` (porth-install owns it); `teardown` (nothing here is run-created) |
-| `porth-tenant` | yes | tenants `ENV#{s}#TENANT#{tid}` / `METADATA`; the org row pending the porth-org ruling | `seed` PRF-12, `reset` PRF-14, `teardown` PRF-15 | |
+| `porth-platform` | no | tenants `ENV#{s}#ORG#{uuid}` and `ENV#{s}#TENANT#platform` / `METADATA`; permissions `ENV#{s}#TENANT#platform#NS#porth-platform`; roles `platform-admin` and its grants; its claim mapping | `bootstrap` — PRF-11, implemented | `reset` (breaks every sign-in); `seed` (the baseline is the target's, D7); `teardown` (nothing here is run-created) |
+| `porth-tenant` | yes | tenants `ENV#{s}#TENANT#{tid}` / `METADATA`; its roles, grants and permissions | `seed` PRF-12, `reset` PRF-14, `teardown` PRF-15 — implemented | |
 | `porth-idp-config` | yes | tenants `ENV#{s}#TENANT#{tid}` / `METADATA`, attribute `idp_config_override` | `seed`, `reset` | |
-| `porth-claim-mapping` | yes | claim-mapping-configs `ENV#{s}#TENANT#{tid}` / `VERSION#{n:06d}` | `seed` PRF-13, `reset` PRF-14 | |
+| `porth-claim-mapping` | yes | claim-mapping-configs `ENV#{s}#TENANT#{tid}` / `VERSION#{n:06d}` | `reset` PRF-14 — implemented; `seed` PRF-13 | |
 | `porth-app-permission` | yes | permissions `ENV#{s}#TENANT#{tid}#NS#{app}` / `PERM#{key}` | `seed`, `absent` | |
 | `porth-role-grant` | yes | roles `ENV#{s}#TENANT#{tid}#ROLE#{uuid}` / `PERM#{key}` — unioned, never replaced (PORTH-609) | `ensure`, `absent` | |
 | `porth-role` | yes | roles `ENV#{s}#TENANT#{tid}` / `ROLE#{uuid}` | `ensure`, `absent` — PRF-18 | |
@@ -88,10 +113,14 @@ roles use `pk`/`sk`.
 - Every data call assumes `DataRole` with an inline session policy admitting only partition keys under
   `ENV#{slot}#` (`dynamodb:LeadingKeys`, `ForAllValues:StringLike`). A request routed to the wrong slot
   is denied by AWS, not avoided by code. This is the pattern Porth's own Director uses.
-- `DataRole` is the ceiling: **read-only in this slice**, the four Porth tables named explicitly.
-- **Scan and PartiQL are denied outright.** `ForAllValues` over an absent key evaluates *true*, and a
-  Scan carries no LeadingKeys — so a Scan would pass the condition and read every slot. The qa-tools
-  seeder's `_find_or_create_org` falls back to a Scan; that fallback must never be ported here.
+- `DataRole` is the ceiling: the four Porth tables named explicitly, single-item writes only.
+- **PartiQL is denied outright; Scan is allowed on the tenants table alone** (PRF-14, Richard
+  2026-10-24). `ForAllValues` over an absent key evaluates *true*, and a Scan carries no LeadingKeys —
+  so a Scan reads every slot's rows in that table. Reset needs it: Porth's own tenant directory finds
+  tenants by scanning, and a tenant written without Porth's list index (the old qa-tools seeder never
+  wrote gsi2) is still one every login loads. Read only, the tenants table only — never an index or
+  another table, denied everywhere else at every layer — and `reset.scan_slot` filters to the slot
+  before anything acts on a row. Writes stay held to the slot by LeadingKeys.
 - **Tables are named, never `porth-*`.** On main the sample app's own table is
   `porth-sample-app-${PorthEnvironment}`, which matches.
 - **Slot names are looked up, never interpolated,** and must match `^[a-z][a-z0-9-]*$` — the session
@@ -115,8 +144,14 @@ Porth SAR stack's `serverlessrepo:semanticVersion` tag.
 ## Deploying
 
 `.github/workflows/deploy-provisioning-adapter.yml`, dispatch only, GitHub environment
-`prawf-adapter`. The deploy and CloudFormation execution roles are created by hand, outside this repo, from
-drafted policy documents; the stack creates only its own runtime roles. The cross-account permission is off until PRF-10 sets
+`prawf-adapter`. `bootstrap.yml`, deployed by hand once, holds only what **deploys** the adapter: the
+deploy role, the CloudFormation execution role, and `prawf-adapter-boundary` - the scope the pipeline may
+grant, by service and resource family (Porth's four table families' data plane, Porth's and the adapter's
+parameters read-only, Porth's stack read, Porth's event buses, the adapter's own logs and roles; nothing
+in IAM). What the adapter may **do** at runtime is `template.yml`'s, and changes through the pipeline:
+which actions, the one-slot session, Scan on the tenants table alone, the denials. A runtime change that
+stays inside the scope needs no bootstrap deploy; one that does not fails `tests/test_bootstrap.py` in
+its PR. The stack creates only its own runtime roles. The cross-account permission is off until PRF-10 sets
 `CallerRoleArn`; it deliberately carries **no `aws:SourceAccount` condition** — that key is absent when
 a role invokes directly, so the condition would deny every call.
 
