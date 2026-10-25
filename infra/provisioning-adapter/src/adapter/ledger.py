@@ -1,40 +1,48 @@
 """What this adapter wrote, by run - the label that makes `teardown` work (D6, §4.7).
 
-Porth's rows have nowhere to carry a run id, so the label lives beside them: a ledger, in the slot's
-own tenants table, under keys Porth never reads.
+Porth's rows have nowhere to carry a run id, so the label lives beside them - in **prawf's own
+audit table** (`prawf-adapter-audit`, template.yml), never in Porth's. A test tool's bookkeeping in
+the application's tables is state the application never agreed to hold, read by code that never
+expected it (Richard, 2026-10-25). Nothing here is ever written to a Porth table.
 
-* `PK = ENV#{s}#PRAWF#RUN#{run_id}`, `SK = LEDGER#{entity}` - what a run wrote for an entity,
-  appended **before** the write it records, so a seed that fails half way leaves a ledger that
-  still covers everything it might have written. Teardown removes what is listed and tolerates
-  what is already gone. An entry is either an exact `item` (table and key), or a `tenant` scope -
-  every row under a tenant the run itself created, for writes whose keys Porth generates (a role's
-  id) and so cannot be noted in advance.
-* `PK = ENV#{s}#PRAWF#DATASET#{entity}`, `SK = CURRENT` - which dataset the entity carries, so the
-  same id and version seeded again is `unchanged` and a different one is refused (§8.4).
+One partition per slot and entity, `PK = ENV#{s}#ENTITY#{entity}`:
 
-**Why these keys are safe in Porth's table.** Porth's tenant directory scans the tenants table for
-`SK = METADATA AND contains(PK, "TENANT#")` (porth-common `list_all_with_environment`) - a row that
-matched and failed validation would empty the directory and stop every login in the slot. Neither
-key here can match: no `TENANT#` in the partition key, never `METADATA` as the sort key. Neither
-carries a `gsi1pk` or `gsi2pk`, so no Porth index lists them either. Every partition key starts
-`ENV#{s}#`, so the one-slot session reaches them and nothing else.
+* `SK = RUN#{run_id}` - what a run wrote to the entity, appended **before** the write it records, so
+  a seed that fails half way leaves a ledger that still covers everything it might have written.
+  Teardown removes what is listed and tolerates what is already gone. An entry is either an exact
+  `item` (table and key), or a `tenant` scope - every row under a tenant the run itself created, for
+  writes whose keys Porth generates (a role's id) and so cannot be noted in advance.
+* `SK = DATASET` - which dataset the entity carries, so the same id and version seeded again is
+  `unchanged` and a different one is refused (§8.4).
+
+Every partition key starts `ENV#{s}#`, so the one-slot session reaches this slot's rows and no
+other's, here as in Porth's tables.
 """
 from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 
 
 def _table() -> str:
-    return os.environ["PORTH_TENANTS_TABLE"]
+    return os.environ["PRAWF_AUDIT_TABLE"]
+
+
+def _pk(env_scope: str, entity: str) -> dict:
+    return {"S": f"ENV#{env_scope}#ENTITY#{entity}"}
 
 
 def run_key(env_scope: str, run_id: str, entity: str) -> dict:
-    return {"PK": {"S": f"ENV#{env_scope}#PRAWF#RUN#{run_id}"}, "SK": {"S": f"LEDGER#{entity}"}}
+    return {"PK": _pk(env_scope, entity), "SK": {"S": f"RUN#{run_id}"}}
 
 
 def marker_key(env_scope: str, entity: str) -> dict:
-    return {"PK": {"S": f"ENV#{env_scope}#PRAWF#DATASET#{entity}"}, "SK": {"S": "CURRENT"}}
+    return {"PK": _pk(env_scope, entity), "SK": {"S": "DATASET"}}
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def marker(db, env_scope: str, entity: str) -> dict | None:
@@ -52,6 +60,7 @@ def set_marker(db, env_scope: str, entity: str, dataset: dict, run_id: str, hand
         "digest": {"S": dataset["digest"]},
         "run_id": {"S": run_id},
         "handles": {"S": json.dumps(handles, separators=(",", ":"))},
+        "applied_at": {"S": _now()},
     })
 
 
@@ -70,28 +79,23 @@ def record(db, env_scope: str, run_id: str, entity: str, entry: dict) -> None:
     db.update_item(
         TableName=_table(),
         Key=run_key(env_scope, run_id, entity),
-        UpdateExpression="SET writes = list_append(if_not_exists(writes, :empty), :w)",
+        UpdateExpression="SET writes = list_append(if_not_exists(writes, :empty), :w), "
+                         "run_id = :run, started_at = if_not_exists(started_at, :now)",
         ExpressionAttributeValues={
             ":w": {"L": [{"S": json.dumps(entry, sort_keys=True)}]},
             ":empty": {"L": []},
+            ":run": {"S": run_id},
+            ":now": {"S": _now()},
         },
     )
 
 
-def runs(db, env_scope: str, run_id: str) -> list[tuple[str, list[dict]]]:
-    """Every entity this run wrote to, with its entries in the order they were recorded."""
-    items = db.query(
-        TableName=_table(),
-        KeyConditionExpression="PK = :pk AND begins_with(SK, :sk)",
-        ExpressionAttributeValues={":pk": {"S": f"ENV#{env_scope}#PRAWF#RUN#{run_id}"}, ":sk": {"S": "LEDGER#"}},
-        ConsistentRead=True,
-    ).get("Items", [])
-    out = []
-    for item in items:
-        entity = item["SK"]["S"].removeprefix("LEDGER#")
-        writes = [json.loads(w["S"]) for w in item.get("writes", {}).get("L", [])]
-        out.append((entity, writes))
-    return out
+def writes(db, env_scope: str, run_id: str, entity: str) -> list[dict] | None:
+    """What a run wrote to an entity, in the order recorded - or None if it wrote nothing there."""
+    found = db.get_item(TableName=_table(), Key=run_key(env_scope, run_id, entity), ConsistentRead=True).get("Item")
+    if not found:
+        return None
+    return [json.loads(w["S"]) for w in found.get("writes", {}).get("L", [])]
 
 
 def forget(db, env_scope: str, run_id: str, entity: str) -> None:
@@ -100,3 +104,20 @@ def forget(db, env_scope: str, run_id: str, entity: str) -> None:
     if current and current.get("run_id") == run_id:
         db.delete_item(TableName=_table(), Key=marker_key(env_scope, entity))
     db.delete_item(TableName=_table(), Key=run_key(env_scope, run_id, entity))
+
+
+def forget_entity(db, env_scope: str, entity: str) -> int:
+    """Reset: every run's ledger for the entity, and its marker - its rows are gone, whoever wrote them."""
+    kwargs = {"TableName": _table(), "KeyConditionExpression": "PK = :pk",
+              "ExpressionAttributeValues": {":pk": _pk(env_scope, entity)}, "ConsistentRead": True}
+    removed, start = 0, None
+    while True:
+        if start:
+            kwargs["ExclusiveStartKey"] = start
+        page = db.query(**kwargs)
+        for row in page.get("Items", []):
+            db.delete_item(TableName=_table(), Key={"PK": row["PK"], "SK": row["SK"]})
+            removed += 1
+        start = page.get("LastEvaluatedKey")
+        if not start:
+            return removed

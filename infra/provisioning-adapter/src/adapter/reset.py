@@ -91,18 +91,18 @@ class Slot:
         self.prefix = f"ENV#{env_scope}#"
         self.tenants: dict[str, list[dict]] = defaultdict(list)
         self.orgs: dict[str, list[dict]] = defaultdict(list)
-        self.ledgers: dict[str, list[dict]] = defaultdict(list)
-        self.markers: dict[str, dict] = {}
+        #: prawf bookkeeping an earlier adapter wrote into Porth's table (PRF-12 to PRF-14), before it
+        #: had its own audit table. Reset removes it: it was never Porth's, and nothing writes it now.
+        self.strays: list[dict] = []
+        self.env_scope = env_scope
         for item in scan_slot(porth.db, env_scope):
             rest = item["PK"]["S"][len(self.prefix):]
             if rest.startswith("TENANT#"):
                 self.tenants[rest[len("TENANT#"):].split("#", 1)[0]].append(item)
             elif rest.startswith("ORG#"):
                 self.orgs[rest[len("ORG#"):].split("#", 1)[0]].append(item)
-            elif rest.startswith("PRAWF#RUN#") and item["SK"]["S"].startswith("LEDGER#"):
-                self.ledgers[item["SK"]["S"].removeprefix("LEDGER#")].append(item)
-            elif rest.startswith("PRAWF#DATASET#"):
-                self.markers[rest.removeprefix("PRAWF#DATASET#")] = item
+            elif rest.startswith("PRAWF#"):
+                self.strays.append(item)
 
     def metadata(self, rows: list[dict]) -> dict | None:
         return next((r for r in rows if r["SK"]["S"] == "METADATA"), None)
@@ -131,11 +131,18 @@ class Slot:
 
     def forget(self, entity: str) -> int:
         """The entity's prawf bookkeeping goes with its rows: every run's ledger for it, and its marker."""
+        return ledger.forget_entity(self.porth.db, self.env_scope, entity)
+
+    def clear_strays(self, dry_run: bool) -> str | None:
+        if not self.strays:
+            return None
+        if dry_run:
+            return f"would remove {len(self.strays)} prawf row(s) an earlier adapter left in Porth's tenants table"
         table = os.environ["PORTH_TENANTS_TABLE"]
-        rows = self.ledgers.pop(entity, []) + ([self.markers.pop(entity)] if entity in self.markers else [])
-        for row in rows:
+        for row in self.strays:
             self.porth.db.delete_item(TableName=table, Key={"PK": row["PK"], "SK": row["SK"]})
-        return len(rows)
+        count, self.strays = len(self.strays), []
+        return f"removed {count} prawf row(s) an earlier adapter left in Porth's tenants table"
 
 
 def _query(db, table: str, attr: str, value: str, index: str | None = None) -> list[dict]:
@@ -239,7 +246,10 @@ def reset(entity: str | None, slot_cfg: dict, run_id: str, dry_run: bool, payloa
             if name == porth_tenant.ENTITY:
                 for t in slot.fixture_tenants():
                     slot.tenants.pop(t)
-        return [], ["dry run: nothing removed", *notes, UNREACHABLE]
+        stray = slot.clear_strays(True) if entity is None else None
+        return [], ["dry run: nothing removed", *notes, *([stray] if stray else []), UNREACHABLE]
     for name in ORDER if entity is None else (entity,):
         notes.append(RESETS[name](slot, env_scope, False))
-    return [], [*notes, "the platform baseline is untouched", UNREACHABLE]
+    # Only a full reset clears them: they are every entity's, and a scoped reset leaves the others be.
+    stray = slot.clear_strays(False) if entity is None else None
+    return [], [*notes, *([stray] if stray else []), "the platform baseline is untouched", UNREACHABLE]

@@ -113,11 +113,11 @@ def seed(env_scope: str, run_id: str, dry_run: bool, payload: object) -> tuple[l
 
 def teardown(env_scope: str, run_id: str, target_run: str) -> tuple[list[dict], list[str]]:
     porth = Porth(env_scope, run_id)
-    entries = [writes for entity, writes in ledger.runs(porth.db, env_scope, target_run) if entity == ENTITY]
-    if not entries:
+    writes = ledger.writes(porth.db, env_scope, target_run, ENTITY)
+    if writes is None:
         return [], [f"nothing in {ENTITY} is labelled with run {target_run}"]
 
-    orgs = [e["key"] for writes in entries for e in writes if e["kind"] == "item"]
+    orgs = [e["key"] for e in writes if e["kind"] == "item"]
     for key in orgs:
         org_id = key["PK"].split("#ORG#", 1)[1]
         if porth.tenants.list_by_org(org_id):

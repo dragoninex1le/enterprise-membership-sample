@@ -73,8 +73,10 @@ three is Porth 0.3.1's `provision_tenant_admin_role`, which is not in the wheel.
 - The org must exist — seed it as `porth-org` first — and the tenant must not. Nothing is
   overwritten.
 - The same dataset again is `unchanged`; a different one is refused until the first is torn down.
-- A ledger beside Porth's rows (keys Porth never reads) records every write *before* it is made, so
-  `teardown` — by run id — removes a half-finished seed as surely as a finished one.
+- A ledger in **prawf's own audit table** (`prawf-adapter-audit`, never one of Porth's) records every
+  write *before* it is made, so `teardown` — by run id — removes a half-finished seed as surely as a
+  finished one. It also records which dataset each entity carries. A test tool's bookkeeping does not
+  belong in the application's tables (2026-10-25); a full reset removes any an earlier adapter left there.
 
 IdP settings and claim mappings are other entities (`porth-idp-config`, `porth-claim-mapping`), and
 nothing here writes to the identity provider. When EMS moves to a newer Porth, the porth-common pin

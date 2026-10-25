@@ -15,7 +15,9 @@ What it checks, each as its own line:
     belonging to that organisation by id and name, with the dataset's display name and tier
   * the tenant-admin role exists, answers to the dataset's claim value, is a system role, and holds
     exactly the tenant permissions registered under the tenant
-  * the adapter's dataset markers say which dataset version (and digest) each entity carries
+  * the adapter's dataset markers - in prawf's own audit table - say which dataset version (and
+    digest) each entity carries
+  * **Porth's tenants table holds no prawf rows** - prawf's bookkeeping lives in its own table
   * **every row Porth's tenant directory loads is one Porth can read** - the directory reads them all
     (`SK = METADATA AND contains(PK, "TENANT#")`), and a single row it cannot read empties it and stops
     every login in the slot. This is the check that says the seed broke nothing around it.
@@ -31,6 +33,7 @@ import subprocess
 import sys
 
 PORTH_STACK = "serverlessrepo-porth-components"
+AUDIT_TABLE = "prawf-adapter-audit"
 TIERS = re.compile(r"^(production|staging|development|sandbox)$")
 STATUSES = re.compile(r"^(active|suspended|decommissioning|deleted)$")
 ROLE_TYPE = re.compile(r"^[a-z0-9-]{1,32}$")
@@ -152,6 +155,13 @@ class Ems:
             args += ["--index-name", index]
         return [item(i) for i in self.call(*args).get("Items", [])]
 
+    def prawf_rows(self, table: str, slot: str) -> list[dict]:
+        """Any prawf bookkeeping in a Porth table - there should be none."""
+        out = self.call("dynamodb", "scan", "--table-name", table, "--projection-expression", "PK, SK",
+                        "--filter-expression", "begins_with(PK, :p)",
+                        "--expression-attribute-values", json.dumps({":p": {"S": f"ENV#{slot}#PRAWF#"}}))
+        return [item(i) for i in out.get("Items", [])]
+
     def directory(self, table: str) -> list[dict]:
         """The exact rows Porth's tenant directory loads."""
         out = self.call("dynamodb", "scan", "--table-name", table,
@@ -206,14 +216,16 @@ def main() -> int:
     grants = [g["permission_key"] for g in ems.query(roles_t, "pk", f"ENV#{s}#TENANT#{args.tenant}#ROLE#{admin['id']}")] if admin else []
     registered = [p["key"] for p in ems.query(perms_t, "gsi1pk", f"ENV#{s}#TENANT#{args.tenant}", index="gsi1")
                   if p.get("app_namespace") != "porth-platform"]
-    markers = {e: ems.get(tenants, {"PK": f"ENV#{s}#PRAWF#DATASET#{e}", "SK": "CURRENT"}) for e in ("porth-org", "porth-tenant")}
+    markers = {e: ems.get(AUDIT_TABLE, {"PK": f"ENV#{s}#ENTITY#{e}", "SK": "DATASET"}) for e in ("porth-org", "porth-tenant")}
+    strays = ems.prawf_rows(tenants, s)
 
     checks = [
         (f"organisation {args.org!r} in {s}", check_org(org, args.org, org_expected)),
         (f"tenant {args.tenant!r} as Porth 0.3.1 writes it", check_tenant(tenant, s, args.tenant, org, tenant_expected)),
         ("tenant-admin role, claim value and grants", check_admin_role(
             roles, grants, registered, tenant_expected["admin_role_source_key"] if tenant_expected else None)),
-        ("the adapter's dataset markers", [f"no dataset marker for {e}" for e, m in markers.items() if not m]),
+        ("the adapter's dataset markers, in prawf's audit table", [f"no dataset marker for {e}" for e, m in markers.items() if not m]),
+        ("Porth's tenants table holds no prawf rows", [f"{r['PK']} / {r['SK']}" for r in strays]),
         ("every row Porth's tenant directory loads is readable", check_directory(ems.directory(tenants))),
     ]
     failed = 0
