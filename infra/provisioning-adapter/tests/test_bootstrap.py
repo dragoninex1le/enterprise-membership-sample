@@ -4,9 +4,11 @@ The same properties as Components' infra/prawf-runner, for the same reason, plus
 role whose job is data access:
 * every adapter role carries prawf-adapter-boundary (checked against template.yml);
 * the execution role creates or grants to adapter roles ONLY with that boundary, never removes it;
-* the boundary reaches Porth's four table families by name - never porth-*, which on main matches the
-  sample app's own table - and allows Scan on the tenants family alone (reset, PRF-14), denying it on
-  everything else; a Scan cannot be held to one slot.
+* the boundary is a deploy-time SCOPE, not the adapter's runtime policy (Richard, 2026-10-24): it names
+  services and resource families - Porth's four table families by name, never porth-*, which on main
+  matches the sample app's own table - data plane only, read-only parameters, nothing in IAM;
+* everything template.yml grants the adapter's roles - action AND resource - is inside that scope, so a
+  runtime change that would need a hand bootstrap deploy fails here, in its PR.
 """
 import re
 from pathlib import Path
@@ -101,34 +103,48 @@ def test_role_passing_is_scoped_to_its_service(boot):
                     "lambda.amazonaws.com", "cloudformation.amazonaws.com"), (role, st["Sid"])
 
 
+def _boundary(boot):
+    return boot["PrawfAdapterBoundary"]["Properties"]["PolicyDocument"]["Statement"]
+
+
 def test_the_boundary_names_porth_tables_and_never_the_apps(boot):
-    stmts = boot["PrawfAdapterBoundary"]["Properties"]["PolicyDocument"]["Statement"]
-    tables = [r for st in stmts if st["Effect"] == "Allow" and st["Sid"] != "ScanPorthTenants"
-              for r in resources(st) if ":table/" in r]
+    tables = [r for st in _boundary(boot) if st["Effect"] == "Allow" for r in resources(st) if ":table/" in r]
     families = sorted(r.rsplit(":table/", 1)[1] for r in tables)
     assert families == ["porth-claim-mapping-configs-*", "porth-permissions-*", "porth-roles-*", "porth-tenants-*"]
     assert not any(f in ("porth-*", "*") for f in families)
 
 
-def test_the_boundary_scans_only_porth_tenants_and_holds_no_iam(boot):
-    stmts = boot["PrawfAdapterBoundary"]["Properties"]["PolicyDocument"]["Statement"]
-    allowed = {a for st in stmts if st["Effect"] == "Allow" for a in actions(st)}
-    denied = {a for st in stmts if st["Effect"] == "Deny" for a in actions(st)}
-    scans = [st for st in stmts if st["Effect"] == "Allow" and "dynamodb:Scan" in actions(st)]
-    assert [st["Sid"] for st in scans] == ["ScanPorthTenants"]
-    assert actions(scans[0]) == ["dynamodb:Scan"] and resources(scans[0])[0].endswith(":table/porth-tenants-*")
-    (deny,) = [st for st in stmts if st["Effect"] == "Deny" and "dynamodb:Scan" in actions(st)]
-    assert str(_value(deny["NotResource"])).endswith(":table/porth-tenants-*")
-    assert {"dynamodb:PartiQLSelect", "dynamodb:ExecuteStatement"} <= denied
-    assert not any(a.startswith("iam:") for a in allowed)
+#: The services the scope may name, and of each the actions: data and reads, never administration.
+SCOPE = {
+    "logs": {"logs:CreateLogStream", "logs:PutLogEvents"},
+    "ssm": {"ssm:GetParameter", "ssm:GetParameters"},
+    "cloudformation": {"cloudformation:DescribeStacks"},
+    "sts": {"sts:AssumeRole"},
+    "events": {"events:PutEvents"},
+    "dynamodb": {"dynamodb:DescribeTable", "dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:Query",
+                 "dynamodb:Scan", "dynamodb:ConditionCheckItem", "dynamodb:PutItem", "dynamodb:UpdateItem",
+                 "dynamodb:DeleteItem", "dynamodb:BatchWriteItem"},
+}
 
 
-def test_the_boundary_reads_the_install_auth_record_and_no_other_parameter_outside_its_own(boot):
-    stmts = boot["PrawfAdapterBoundary"]["Properties"]["PolicyDocument"]["Statement"]
-    params = sorted(r.rsplit(":parameter", 1)[1] for st in stmts if st["Effect"] == "Allow"
+def test_the_boundary_is_a_deploy_scope_with_no_runtime_detail_and_no_iam(boot):
+    stmts = _boundary(boot)
+    assert all(st["Effect"] == "Allow" for st in stmts), "denies are runtime policy - template.yml holds them"
+    for st in stmts:
+        for a in actions(st):
+            service = a.split(":", 1)[0]
+            assert service in SCOPE and a in SCOPE[service], (st["Sid"], a)
+        assert "Condition" not in st, f"{st['Sid']}: conditions are runtime policy"
+    allowed = {a for st in stmts for a in actions(st)}
+    assert not any(a.startswith(("iam:", "kms:")) or a.endswith("*") for a in allowed)
+    assert not {"dynamodb:CreateTable", "dynamodb:UpdateTable", "dynamodb:DeleteTable"} & allowed
+
+
+def test_the_boundary_reads_porths_and_the_adapters_parameters_and_writes_none(boot):
+    params = sorted(r.rsplit(":parameter", 1)[1] for st in _boundary(boot)
                     for r in resources(st) if ":parameter" in r)
-    assert params == ["/porth/auth", "/prawf/adapter/*"]
-    assert not any(a.startswith(("ssm:Put", "ssm:Delete")) for st in stmts for a in actions(st))
+    assert params == ["/porth/*", "/prawf/adapter/*"]
+    assert not any(a.startswith(("ssm:Put", "ssm:Delete")) for st in _boundary(boot) for a in actions(st))
 
 
 def test_the_deploy_role_has_no_iam_power_beyond_passing_the_execution_role(boot):
@@ -147,21 +163,51 @@ def test_the_execution_role_can_read_the_lambda_code_and_nothing_more_of_s3(boot
         assert all("samclisourcebucket-*/*" in r for r in resources(st)), st["Sid"]
 
 
+#: What the deploy resolves template.yml's parameters to, near enough to test against the boundary.
+_RESOLVED = {"AWS::Region": "us-east-1", "AWS::AccountId": "195950944420", "PorthStackName": "serverlessrepo-porth-components",
+             "PorthTenantsTable": "porth-tenants-dev", "PorthRolesTable": "porth-roles-dev",
+             "PorthPermissionsTable": "porth-permissions-dev", "PorthClaimMappingConfigsTable": "porth-claim-mapping-configs-dev",
+             "PorthEventBus": "porth-events-dev"}
+
+
+def _arn(x) -> str:
+    """A template resource as the ARN it deploys to: !Sub resolved, !GetAtt DataRole.Arn as the role SAM names."""
+    if isinstance(x, dict) and "GetAtt" in x:
+        assert x["GetAtt"] in ("DataRole.Arn", "RunnerLogs.Arn"), x
+        return "arn:aws:iam::195950944420:role/porth-provisioning-adapter-DataRole-ABC123"
+    if isinstance(x, dict) and "Ref" in x:
+        return "arn:aws:ssm:us-east-1:195950944420:parameter/prawf/adapter/slot-map"
+    text = str(_value(x))
+    return re.sub(r"\$\{([^}]+)\}", lambda m: _RESOLVED[m.group(1)], text)
+
+
+def _iam_like(pattern: str, value: str) -> bool:
+    return re.fullmatch(re.escape(pattern).replace(r"\*", ".*"), value) is not None
+
+
 def test_everything_the_adapter_roles_use_is_inside_the_boundary(boot):
     """A permission a role holds but its boundary does not allow is silently denied at runtime. So
-    every action the adapter's roles are granted in template.yml must be one the boundary permits -
-    this is what fails first when a later slice adds a verb and forgets the bootstrap."""
-    boundary = {a for st in boot["PrawfAdapterBoundary"]["Properties"]["PolicyDocument"]["Statement"]
-                if st["Effect"] == "Allow" for a in actions(st)}
+    every action the adapter's roles are granted in template.yml - and every resource it is granted on
+    - must be one the boundary permits. This is what fails, in the PR, when a runtime change would
+    need a bootstrap deploy: the fix is almost always in template.yml, not here."""
+    scope = [(set(actions(st)), [_arn(r) for r in (st["Resource"] if isinstance(st["Resource"], list) else [st["Resource"]])])
+             for st in _boundary(boot)]
+    scope = [(acts, [re.sub(r"\$\{([^}]+)\}", lambda m: _RESOLVED[m.group(1)], r) for r in res]) for acts, res in scope]
     tpl = load("template.yml")["Resources"]
-    used = {}
+    outside = []
     for name in ("ExecutionRole", "DataRole", "ExecutionRoleMayAssumeDataRole"):
         for st in statements(tpl[name]):
-            if st["Effect"] == "Allow" and "Principal" not in st:
-                for a in actions(st):
-                    used.setdefault(a, name)
-    outside = {a: role for a, role in used.items() if a not in boundary}
-    assert not outside, f"granted but not inside prawf-adapter-boundary (denied at runtime): {outside}"
+            if st["Effect"] != "Allow" or "Principal" in st:
+                continue
+            res = st["Resource"] if isinstance(st["Resource"], list) else [st["Resource"]]
+            for a in actions(st):
+                for r in res:
+                    arn = _arn(r)
+                    if arn == "*" and a.startswith("events:"):
+                        continue
+                    if not any(a in acts and any(_iam_like(p, arn) for p in pats) for acts, pats in scope):
+                        outside.append((name, st.get("Sid"), a, arn))
+    assert not outside, f"granted but outside prawf-adapter-boundary (denied at runtime): {outside}"
 
 
 def test_the_execution_role_can_expand_the_sam_transform(boot):
@@ -176,8 +222,7 @@ def test_the_execution_role_can_expand_the_sam_transform(boot):
 def test_the_boundary_publishes_on_porths_bus_family_only(boot):
     """PRF-12: Porth's repositories raise if they cannot publish, so writing Porth's rows with Porth's
     code needs PutEvents - on Porth's buses (porth-events-{env}) and nowhere else."""
-    stmts = boot["PrawfAdapterBoundary"]["Properties"]["PolicyDocument"]["Statement"]
-    events = [st for st in stmts if any(a.startswith("events:") for a in actions(st))]
+    events = [st for st in _boundary(boot) if any(a.startswith("events:") for a in actions(st))]
     (st,) = events
     assert actions(st) == ["events:PutEvents"]
     assert [_value(r) for r in resources(st)] == ["arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/porth-events-*"]

@@ -144,8 +144,14 @@ Porth SAR stack's `serverlessrepo:semanticVersion` tag.
 ## Deploying
 
 `.github/workflows/deploy-provisioning-adapter.yml`, dispatch only, GitHub environment
-`prawf-adapter`. The deploy and CloudFormation execution roles are created by hand, outside this repo, from
-drafted policy documents; the stack creates only its own runtime roles. The cross-account permission is off until PRF-10 sets
+`prawf-adapter`. `bootstrap.yml`, deployed by hand once, holds only what **deploys** the adapter: the
+deploy role, the CloudFormation execution role, and `prawf-adapter-boundary` - the scope the pipeline may
+grant, by service and resource family (Porth's four table families' data plane, Porth's and the adapter's
+parameters read-only, Porth's stack read, Porth's event buses, the adapter's own logs and roles; nothing
+in IAM). What the adapter may **do** at runtime is `template.yml`'s, and changes through the pipeline:
+which actions, the one-slot session, Scan on the tenants table alone, the denials. A runtime change that
+stays inside the scope needs no bootstrap deploy; one that does not fails `tests/test_bootstrap.py` in
+its PR. The stack creates only its own runtime roles. The cross-account permission is off until PRF-10 sets
 `CallerRoleArn`; it deliberately carries **no `aws:SourceAccount` condition** — that key is absent when
 a role invokes directly, so the condition would deny every call.
 

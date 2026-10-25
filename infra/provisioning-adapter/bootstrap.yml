@@ -10,13 +10,13 @@ Description: >
 # ONLY with prawf-adapter-boundary attached, and may never remove it. The boundary lives here, outside
 # the pipeline's reach.
 #
-# The boundary is wider than the runner's, because the adapter's job is data access. It still caps the
-# adapter at: its own log group, its own slot map, reading the Porth stack's version tag and the
-# install's /porth/auth record, assuming its own data role, and Porth's four table FAMILIES by name -
-# never porth-*, which on main also matches the sample app's own table. PartiQL is denied outright.
-# Scan is allowed on the tenants family alone, for reset (PRF-14): ForAllValues over the absent
-# LeadingKeys of a Scan evaluates true, so it reads every slot's rows there - read only, and the
-# adapter filters to the slot. A Scan of any other table is denied.
+# What lives here is what DEPLOYS the adapter - the deploy role, the CloudFormation execution role,
+# and the scope the pipeline may grant (prawf-adapter-boundary). What the adapter may DO at runtime
+# lives in template.yml and changes through the pipeline, never by hand: the boundary names services
+# and resource families - the adapter's log group and roles, Porth's and the adapter's parameters
+# (read), Porth's stack (read), the data plane of Porth's four table families, Porth's event buses -
+# and nothing in IAM. A runtime change that stays inside that scope needs no bootstrap deploy; one
+# that does not fails tests/test_bootstrap.py in the PR, before it can be deployed.
 
 Parameters:
   GitHubRepo:
@@ -34,44 +34,53 @@ Parameters:
     Description: The Components account, which owns the estyn-prawf CodeArtifact domain.
 
 Resources:
+  # What the pipeline may grant the adapter - a deploy-time scope, not the adapter's runtime policy
+  # (Richard, 2026-10-24: this file holds what is required to deploy the adapter; the permissions to
+  # execute it live in template.yml and change through the pipeline). So it names services and
+  # resource families, never which action a verb needs: template.yml narrows every grant to what the
+  # adapter actually does, and tests/test_bootstrap.py fails a PR whose template reaches outside this.
   PrawfAdapterBoundary:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: prawf-adapter-boundary
-      Description: The most any provisioning-adapter role can ever do.
+      Description: The most the adapter pipeline may ever grant an adapter role.
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Sid: OwnLogGroup
+          - Sid: AdapterLogs
             Effect: Allow
             Action:
               - logs:CreateLogStream
               - logs:PutLogEvents
             Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/porth-provisioning-adapter:*
-          - Sid: OwnSlotMap
+          - Sid: ReadPorthAndAdapterParameters
             Effect: Allow
-            Action: ssm:GetParameter
-            Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/prawf/adapter/*
-          # PRF-11: bootstrap reads the install's own record of its IdP, to check the platform baseline.
-          - Sid: PorthAuthRecord
-            Effect: Allow
-            Action: ssm:GetParameter
-            Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/auth
-          - Sid: PorthStackVersionTag
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+            Resource:
+              - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/*
+              - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/prawf/adapter/*
+          - Sid: ReadThePorthStack
             Effect: Allow
             Action: cloudformation:DescribeStacks
             Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${PorthStackName}/*
-          - Sid: AssumeOwnDataRole
+          - Sid: AssumeAdapterRoles
             Effect: Allow
             Action: sts:AssumeRole
             Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/porth-provisioning-adapter-*
-          - Sid: PorthTableFamilies
+          # Porth's data, never its tables: every data-plane call on the four families and their
+          # indexes - never porth-*, which on main also matches the sample app's own table - and no
+          # CreateTable, UpdateTable or DeleteTable.
+          - Sid: PorthDataPlane
             Effect: Allow
             Action:
+              - dynamodb:DescribeTable
               - dynamodb:GetItem
               - dynamodb:BatchGetItem
               - dynamodb:Query
-              - dynamodb:DescribeTable
+              - dynamodb:Scan
+              - dynamodb:ConditionCheckItem
               - dynamodb:PutItem
               - dynamodb:UpdateItem
               - dynamodb:DeleteItem
@@ -81,31 +90,10 @@ Resources:
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-roles-*
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-permissions-*
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-claim-mapping-configs-*
-          # PRF-12. Porth's repositories publish an event for every write and raise if they cannot,
-          # so writing Porth's rows with Porth's code means publishing on Porth's bus. The family,
-          # like the tables: Porth names it porth-events-{env}.
-          - Sid: PorthEventBusFamily
+          - Sid: PorthEventBuses
             Effect: Allow
             Action: events:PutEvents
             Resource: !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/porth-events-*
-          # PRF-14 (Richard, 2026-10-24): reset finds every tenant as Porth's own directory does, by
-          # scanning the tenants table. That family only; a Scan anywhere else is denied.
-          - Sid: ScanPorthTenants
-            Effect: Allow
-            Action: dynamodb:Scan
-            Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-tenants-*
-          - Sid: ScanNothingElse
-            Effect: Deny
-            Action: dynamodb:Scan
-            NotResource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-tenants-*
-          - Sid: NeverPartiQL
-            Effect: Deny
-            Action:
-              - dynamodb:PartiQLSelect
-              - dynamodb:ExecuteStatement
-              - dynamodb:BatchExecuteStatement
-              - dynamodb:ExecuteTransaction
-            Resource: '*'
 
   DeployRole:
     Type: AWS::IAM::Role
