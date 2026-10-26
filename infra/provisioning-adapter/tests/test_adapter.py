@@ -53,7 +53,7 @@ AGREED_ENTITIES = {
 }
 OTHER_VERBS = ["bootstrap", "seed", "reset", "ensure", "absent", "teardown", "status"]
 #: An entity none of the verbs is implemented for, so every one of them is unsupported against it.
-UNIMPLEMENTED_ENTITY = "porth-role"
+UNIMPLEMENTED_ENTITY = "porth-idp"
 
 
 # ---------------------------------------------------------------- fakes
@@ -170,6 +170,7 @@ def test_exactly_the_implemented_cells_are_declared(world):
     assert declared.pop("porth-tenant") == ["seed", "reset", "teardown"]
     assert declared.pop("porth-org") == ["seed", "reset", "teardown"]
     assert declared.pop("porth-claim-mapping") == ["reset"]
+    assert declared.pop("porth-role") == ["reset"]
     assert caps["extension_types"] == ["porth.org", "porth.permission", "porth.role", "porth.role-grant", "porth.claim-mapping"]
     assert all(v == [] for v in declared.values()), declared
     assert caps["dataset_forms"] == ["enumerated"]

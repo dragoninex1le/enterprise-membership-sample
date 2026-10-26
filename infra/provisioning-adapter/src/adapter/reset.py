@@ -9,13 +9,15 @@ roles, permissions and claim mapping (`porth-platform`, porth_platform.py). Rese
 `porth-platform` is not resettable, and resetting one entity leaves the others alone (C16). Each
 resettable entity's baseline is therefore *none of its own rows*:
 
+* `porth-role` - every role arranged after the seed (not a system role) in every tenant but the
+  platform, through Porth's own `delete_role`; the seeded `tenant-admin` stays, with its grants;
 * `porth-claim-mapping` - every claim-mapping version of every tenant except the platform's;
 * `porth-tenant` - every tenant except the platform, with its roles, grants and permissions (both
   grant key shapes, PORTH-604) and its IdP config, which lives on the tenant row;
 * `porth-org` - every organisation except the platform's. Refused while tenants still belong to one:
   reset `porth-tenant` first, which reset with no entity does.
 
-With no entity, all three, in that order - claim mappings are found through the tenants they belong
+With no entity, all four, in that order - claim mappings are found through the tenants they belong
 to, and an organisation cannot go while it has tenants.
 
 **Finding what is there.** Porth's tenant directory finds tenants by scanning the tenants table, and
@@ -44,8 +46,9 @@ from envelope import ContractError
 from porth_tenant import Porth
 
 CLAIM_MAPPING = "porth-claim-mapping"
+ROLE = "porth-role"
 #: Ordered: claim mappings are found through their tenants, and tenants go before their organisations.
-ORDER = (CLAIM_MAPPING, porth_tenant.ENTITY, porth_org.ENTITY)
+ORDER = (ROLE, CLAIM_MAPPING, porth_tenant.ENTITY, porth_org.ENTITY)
 PLATFORM = "platform"
 UNREACHABLE = "Porth's users, org-units and sessions tables are outside this adapter's grant; any rows there for removed tenants remain"
 
@@ -161,6 +164,26 @@ def _query(db, table: str, attr: str, value: str, index: str | None = None) -> l
             return items
 
 
+def _roles(slot: Slot, env_scope: str, dry_run: bool) -> str:
+    """Every role arranged after the seed - a role Porth did not make a system role - in every tenant
+    but the platform, through Porth's own `delete_role` (DELETE /roles/{id}): it refuses a system role,
+    and takes the role's grants (both key shapes) and its user assignments with it. The seeded
+    `tenant-admin` is a system role and stays, with its grants; permissions are never touched, so an
+    application's own registrations survive (PORTH-609)."""
+    gone = []
+    for tenant_id in slot.fixture_tenants():
+        for role in slot.porth.roles.list_roles(tenant_id):
+            if not role.is_system:
+                gone.append((tenant_id, role))
+    labels = [f"{t}/{r.name}" for t, r in gone]
+    if dry_run:
+        return f"{ROLE}: would remove role(s) {labels or '(none)'}, with their grants and assignments"
+    for tenant_id, role in gone:
+        slot.porth.roles.delete_role(tenant_id, role.id)
+    slot.forget(ROLE)
+    return f"{ROLE}: removed role(s) {labels or '(none)'}, with their grants and assignments"
+
+
 def _claim_mappings(slot: Slot, env_scope: str, dry_run: bool) -> str:
     table = os.environ["PORTH_CLAIM_MAPPING_CONFIGS_TABLE"]
     found = {t: _query(slot.porth.db, table, "PK", f"ENV#{env_scope}#TENANT#{t}") for t in slot.fixture_tenants()}
@@ -223,7 +246,7 @@ def _orgs(slot: Slot, env_scope: str, dry_run: bool) -> str:
     return f"{porth_org.ENTITY}: removed organisation(s) {labels or '(none)'}"
 
 
-RESETS = {CLAIM_MAPPING: _claim_mappings, porth_tenant.ENTITY: _tenants, porth_org.ENTITY: _orgs}
+RESETS = {ROLE: _roles, CLAIM_MAPPING: _claim_mappings, porth_tenant.ENTITY: _tenants, porth_org.ENTITY: _orgs}
 
 
 def reset(entity: str | None, slot_cfg: dict, run_id: str, dry_run: bool, payload: object) -> tuple[list[dict], list[str]]:

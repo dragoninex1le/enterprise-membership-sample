@@ -119,8 +119,10 @@ ENTITIES: tuple[Entity, ...] = (
         id="porth-role",
         description="Arranged roles, such as a role with no grants for a denial test.",
         destructive=True,
-        resources=("roles: pk=ENV#{s}#TENANT#{tid} sk=ROLE#{uuid}",),
+        resources=("roles: pk=ENV#{s}#TENANT#{tid} sk=ROLE#{uuid} (not a system role)",),
         planned={"ensure": "PRF-18", "absent": "PRF-18"},
+        # PRF-14: reset removes every arranged role; the seeded tenant-admin is a system role and stays.
+        verbs=("reset",),
     ),
     Entity(
         id="porth-idp",

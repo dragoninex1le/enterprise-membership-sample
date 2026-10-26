@@ -42,10 +42,12 @@ removed. The baseline is no run's fixture: teardown never removes it, reset neve
 
 What §8.4 sends a caller to when a seed meets data it did not write. Reset returns an entity to its
 bootstrapped state — whoever wrote what is there — and leaves the platform baseline untouched (C12,
-C16): `porth-claim-mapping` loses every tenant's claim mappings but the platform's; `porth-tenant`
+C16): `porth-role` loses every role arranged after the seed - through Porth's own `delete_role`,
+which refuses a system role, so the seeded `tenant-admin` stays with its grants, and permissions are
+never touched (PORTH-609); `porth-claim-mapping` loses every tenant's claim mappings but the platform's; `porth-tenant`
 every tenant but the platform, with its roles, grants (both key shapes) and permissions;
 `porth-org` every organisation but the platform's, refused while tenants still belong to one. With
-no entity, all three in that order. A `protected` slot refuses it outright (C8); on a disposable one
+no entity, all four in that order. A `protected` slot refuses it outright (C8); on a disposable one
 the caller must confirm `confirm_environment_class` and is refused on a mismatch. Users, org-units
 and sessions are outside the adapter's grant and are named in the response, not passed over.
 
@@ -93,7 +95,7 @@ moves with it.
 | `porth-claim-mapping` | yes | claim-mapping-configs `ENV#{s}#TENANT#{tid}` / `VERSION#{n:06d}` | `reset` PRF-14 — implemented; `seed` PRF-13 | |
 | `porth-app-permission` | yes | permissions `ENV#{s}#TENANT#{tid}#NS#{app}` / `PERM#{key}` | `seed`, `absent` | |
 | `porth-role-grant` | yes | roles `ENV#{s}#TENANT#{tid}#ROLE#{uuid}` / `PERM#{key}` — unioned, never replaced (PORTH-609) | `ensure`, `absent` | |
-| `porth-role` | yes | roles `ENV#{s}#TENANT#{tid}` / `ROLE#{uuid}` | `ensure`, `absent` — PRF-18 | |
+| `porth-role` | yes | roles `ENV#{s}#TENANT#{tid}` / `ROLE#{uuid}`, not a system role | `reset` PRF-14 — implemented; `ensure`, `absent` — PRF-18 | |
 | `porth-idp` | no | Auth0 users, Organizations, role assignments | — | every verb: needs the provider's Management API, which is not in this account |
 
 Attribute case is part of the shape: tenants and claim-mapping-configs use `PK`/`SK`; permissions and

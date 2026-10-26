@@ -234,3 +234,59 @@ def test_reset_twice_is_ok_and_removes_nothing_more(testbed):
     again = reset(run_id="run-reset-2")
     assert again["outcome"] == "ok"
     assert slot_rows() == after
+
+
+# ---------------------------------------------------------------- arranged roles (PRF-14)
+
+def _arrange_controller(tenant_id="acme-test"):
+    """What Tier 2 does: a role created through the app after the seed, with grants."""
+    from porth_common.providers.aws.repositories.role_repo import RoleRepository
+    roles = RoleRepository(TABLES["roles"], boto3.resource("dynamodb"), environment=SLOT)
+    role = roles.create_role(tenant_id=tenant_id, name="controller", source_key="controller", description="arranged")
+    roles.set_role_permissions(role.id, ["tenant.users.read"], tenant_id)
+    return roles, role
+
+
+def _role_names(roles, tenant_id="acme-test"):
+    return sorted(r.name for r in roles.list_roles(tenant_id))
+
+
+def test_reset_of_roles_removes_the_arranged_role_and_keeps_the_seeded_baseline(testbed):
+    """PRF-14 AC1: a seeded tenant, a role created afterwards, then reset - the extra role and its grants
+    are gone; the baseline tenant-admin role and its grants remain."""
+    roles, controller = _arrange_controller()
+    admin = next(r for r in roles.list_roles("acme-test") if r.name == "tenant-admin")
+    admin_grants = sorted(roles.get_role_permissions("acme-test", admin.id))
+    permissions = {r for r in slot_rows() if r[0] == "permissions"}
+
+    response = reset(entity="porth-role")
+    assert response["outcome"] == "ok", response
+    assert _role_names(roles) == ["tenant-admin"]
+    assert roles.get_role_permissions("acme-test", controller.id) == [], "its grants go with it"
+    assert sorted(roles.get_role_permissions("acme-test", admin.id)) == admin_grants
+    assert tenants_in() >= {"acme-test", "ems-test"}, "C16: tenants are another entity's"
+    assert {r for r in slot_rows() if r[0] == "permissions"} == permissions, "PORTH-609: permissions are never touched"
+    assert "acme-test/controller" in " ".join(response["diagnostics"]["messages"])
+
+
+def test_reset_of_roles_never_touches_the_platforms(testbed):
+    from porth_common.providers.aws.repositories.role_repo import RoleRepository
+    roles = RoleRepository(TABLES["roles"], boto3.resource("dynamodb"), environment=SLOT)
+    roles.create_role(tenant_id="platform", name="platform-extra", source_key="platform-extra", description="x")
+    reset(entity="porth-role")
+    assert "platform-extra" in [r.name for r in roles.list_roles("platform")], "the platform is porth-platform's"
+
+
+def test_a_dry_run_of_roles_lists_them_and_removes_nothing(testbed):
+    roles, _ = _arrange_controller()
+    response = reset(entity="porth-role", dry_run=True)
+    assert any("would remove role(s) ['acme-test/controller']" in m for m in response["diagnostics"]["messages"])
+    assert _role_names(roles) == ["controller", "tenant-admin"]
+
+
+def test_a_full_reset_takes_arranged_roles_first_and_still_leaves_the_baseline(testbed):
+    _arrange_controller()
+    response = reset()
+    assert response["outcome"] == "ok", response
+    assert response["diagnostics"]["messages"][0].startswith("porth-role:")
+    assert platform_rows(SLOT) == testbed["baseline"]
