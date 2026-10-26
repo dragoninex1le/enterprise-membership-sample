@@ -92,10 +92,11 @@ def check_tenant(tenant: dict | None, slot: str, tenant_id: str, org: dict | Non
             if tenant.get(field) != expected[field]:
                 problems.append(f"{field} is {tenant.get(field)!r}, the dataset says {expected[field]!r}")
         want_idp = expected.get("idp_config_override")
-        if want_idp is not None and tenant.get("idp_config_override") != want_idp:
+        if want_idp is not None and any((tenant.get("idp_config_override") or {}).get(k) != v for k, v in want_idp.items()):
             # Field names only - never the values, which are the testbed's.
+            # The dataset's own fields, as written; a field Porth fills with its default (protocol) is not a difference.
             have = tenant.get("idp_config_override") or {}
-            differ = sorted(k for k in set(have) | set(want_idp) if have.get(k) != want_idp.get(k))
+            differ = sorted(k for k in want_idp if have.get(k) != want_idp[k])
             problems.append(f"the IdP config differs from the dataset's in {differ or 'its presence'}")
     return problems
 

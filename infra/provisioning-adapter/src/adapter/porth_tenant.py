@@ -96,7 +96,19 @@ def _tenant(resource: object) -> dict:
             f"(it takes {', '.join(sorted(ATTRIBUTES))}), and nothing here writes to the identity provider",
         )
     from pydantic import ValidationError
-    from porth_common.models.tenant import TenantAddToOrg
+    from porth_common.models.tenant import TenantAddToOrg, TenantIdpConfig
+
+    idp = attributes.get("idp_config_override")
+    if isinstance(idp, dict):
+        # Porth's model ignores a field it does not define - it would be dropped without a word, and the
+        # tenant would quietly differ from its dataset. Refused instead, by name.
+        dropped = sorted(set(idp) - set(TenantIdpConfig.model_fields))
+        if dropped:
+            raise ContractError(
+                "refused", "dataset_conflict",
+                f"tenant {tenant_id!r}: idp_config_override fields {dropped} are not ones Porth 0.3.1 keeps "
+                f"(it keeps {', '.join(sorted(TenantIdpConfig.model_fields))})",
+            )
 
     try:
         TenantAddToOrg(

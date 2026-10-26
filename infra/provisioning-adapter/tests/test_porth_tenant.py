@@ -235,6 +235,16 @@ def test_an_idp_config_porth_would_reject_is_refused_before_anything_is_written(
     assert rows() == before
 
 
+def test_an_idp_field_porth_would_drop_is_refused_by_name(porth):
+    """end_session_endpoint is in the testbed manifest but not in Porth 0.3.1's TenantIdpConfig, which
+    ignores it - so the seeded tenant would quietly differ from its dataset."""
+    before = rows()
+    response = call("seed", {"dataset": ems_test(idp_config_override={**IDP, "end_session_endpoint": "https://x/logout"})})
+    assert (response["outcome"], response["reason_code"]) == ("refused", "dataset_conflict")
+    assert "['end_session_endpoint']" in response["diagnostics"]["messages"][0]
+    assert rows() == before
+
+
 def test_seed_publishes_the_events_porth_would(porth):
     call("seed", {"dataset": ems_test()})
     published = porth["published"]()
