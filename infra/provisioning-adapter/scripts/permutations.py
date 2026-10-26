@@ -19,8 +19,7 @@ What each case asserts:
     closed list, no results, and a message saying why
   * on `capabilities`, the declaration itself: the served slot, contract 1.0.0, the implemented
     verbs, the eight catalogue entities, and exactly the implemented cells (C1): `bootstrap` on
-    porth-platform; `seed`, `reset` and `teardown` on porth-org and porth-tenant; `reset` on
-    porth-claim-mapping
+    porth-platform; `seed`, `reset` and `teardown` on porth-org, porth-tenant and porth-claim-mapping
   * if `prawf_schemas` is importable, every response against the canonical response schema
 
 Exit status is 0 only when every case passes. --report writes each request and response as JSON.
@@ -52,7 +51,7 @@ IMPLEMENTED = {
     ("bootstrap", "porth-platform"),
     ("seed", "porth-org"), ("reset", "porth-org"), ("teardown", "porth-org"),
     ("seed", "porth-tenant"), ("reset", "porth-tenant"), ("teardown", "porth-tenant"),
-    ("reset", "porth-claim-mapping"),
+    ("seed", "porth-claim-mapping"), ("reset", "porth-claim-mapping"), ("teardown", "porth-claim-mapping"),
     ("reset", "porth-role"),
 }
 INSTALL_VERBS = ["capabilities", "bootstrap", "seed", "reset", "teardown"]
