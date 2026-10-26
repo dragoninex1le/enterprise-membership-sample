@@ -52,6 +52,7 @@ IMPLEMENTED = {
     ("seed", "porth-org"), ("reset", "porth-org"), ("teardown", "porth-org"),
     ("seed", "porth-tenant"), ("reset", "porth-tenant"), ("teardown", "porth-tenant"),
     ("seed", "porth-claim-mapping"), ("reset", "porth-claim-mapping"), ("teardown", "porth-claim-mapping"),
+    ("reset", "porth-role"),
 }
 INSTALL_VERBS = ["capabilities", "bootstrap", "seed", "reset", "teardown"]
 EXTENSION_TYPES = ["porth.org", "porth.permission", "porth.role", "porth.role-grant", "porth.claim-mapping"]
