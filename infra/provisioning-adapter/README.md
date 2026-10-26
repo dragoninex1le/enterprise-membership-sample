@@ -83,14 +83,23 @@ three is Porth 0.3.1's `provision_tenant_admin_role`, which is not in the wheel.
   validated by `TenantPatch`) - Porth 0.3.1's `PUT` accepts it but porth-common 0.0.9's `create` drops it.
 
 Claim mappings are their own table and entity (`porth-claim-mapping`), and nothing here writes to the
-identity provider. When EMS moves to a newer Porth, the porth-common pin
+identity provider.
+
+## `porth-claim-mapping`: seed and teardown
+
+What Porth 0.3.1 writes for `POST /claim-mapping-configs/?tenant_id=…`, with Porth's own code: the
+dataset's `mapping_source` is validated by `MappingSource`, compiled by `compile_mapping_source`, and
+saved as the tenant's next version by `ClaimMappingConfigRepository.save` (`ClaimMappingConfig.created`).
+The authorizer runs that compiled mapping to turn a token's roles claim into Porth roles - a tenant
+without one signs in with no roles (PORTH-479). The tenant must exist (seed `porth-tenant` first) and
+have no claim mapping of its own. Teardown with no entity removes it before its tenant. When EMS moves to a newer Porth, the porth-common pin
 moves with it.
 
 | Entity | Destructive | Porth resources | Planned | Ruled out |
 |---|---|---|---|---|
 | `porth-platform` | no | tenants `ENV#{s}#ORG#{uuid}` and `ENV#{s}#TENANT#platform` / `METADATA`; permissions `ENV#{s}#TENANT#platform#NS#porth-platform`; roles `platform-admin` and its grants; its claim mapping | `bootstrap` — PRF-11, implemented | `reset` (breaks every sign-in); `seed` (the baseline is the target's, D7); `teardown` (nothing here is run-created) |
 | `porth-tenant` | yes | tenants `ENV#{s}#TENANT#{tid}` / `METADATA`, its IdP config (`idp_config_override`) included; its roles, grants and permissions | `seed` PRF-12, `reset` PRF-14, `teardown` PRF-15 — implemented | |
-| `porth-claim-mapping` | yes | claim-mapping-configs `ENV#{s}#TENANT#{tid}` / `VERSION#{n:06d}` | `reset` PRF-14 — implemented; `seed` PRF-13 | |
+| `porth-claim-mapping` | yes | claim-mapping-configs `ENV#{s}#TENANT#{tid}` / `VERSION#{n:06d}` | `seed` PRF-13, `reset` PRF-14, `teardown` — implemented | |
 | `porth-app-permission` | yes | permissions `ENV#{s}#TENANT#{tid}#NS#{app}` / `PERM#{key}` | `seed`, `absent` | |
 | `porth-role-grant` | yes | roles `ENV#{s}#TENANT#{tid}#ROLE#{uuid}` / `PERM#{key}` — unioned, never replaced (PORTH-609) | `ensure`, `absent` | |
 | `porth-role` | yes | roles `ENV#{s}#TENANT#{tid}` / `ROLE#{uuid}` | `ensure`, `absent` — PRF-18 | |

@@ -94,8 +94,7 @@ ENTITIES: tuple[Entity, ...] = (
         resources=(
             "claim-mapping-configs: PK=ENV#{s}#TENANT#{tid} SK=VERSION#{n:06d} (compiled_hash computed, never supplied)",
         ),
-        planned={"seed": "PRF-13"},
-        verbs=("reset",),
+        verbs=("seed", "reset", "teardown"),
     ),
     Entity(
         id="porth-app-permission",

@@ -169,7 +169,7 @@ def test_exactly_the_implemented_cells_are_declared(world):
     assert declared.pop("porth-platform") == ["bootstrap"]
     assert declared.pop("porth-tenant") == ["seed", "reset", "teardown"]
     assert declared.pop("porth-org") == ["seed", "reset", "teardown"]
-    assert declared.pop("porth-claim-mapping") == ["reset"]
+    assert declared.pop("porth-claim-mapping") == ["seed", "reset", "teardown"]
     assert caps["extension_types"] == ["porth.org", "porth.permission", "porth.role", "porth.role-grant", "porth.claim-mapping"]
     assert all(v == [] for v in declared.values()), declared
     assert caps["dataset_forms"] == ["enumerated"]

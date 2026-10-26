@@ -62,6 +62,7 @@ class Porth:
 
         # The repositories package first: importing the publisher module first is a circular import.
         from porth_common.audit.context import set_audit_context
+        from porth_common.providers.aws.repositories.claim_mapping_config_repo import ClaimMappingConfigRepository
         from porth_common.providers.aws.repositories.organization_repo import OrganizationRepository
         from porth_common.providers.aws.repositories.permission_repo import PermissionRepository
         from porth_common.providers.aws.repositories.role_repo import RoleRepository
@@ -73,6 +74,8 @@ class Porth:
         self.publisher = EventPublisher(client=self.events, environment=env_scope)
         self.orgs = OrganizationRepository(tenants, resource, event_publisher=self.publisher, environment=env_scope)
         self.tenants = TenantRepository(tenants, resource, event_publisher=self.publisher, environment=env_scope)
+        self.claims = ClaimMappingConfigRepository(os.environ["PORTH_CLAIM_MAPPING_CONFIGS_TABLE"], resource,
+                                                   event_publisher=self.publisher, environment=env_scope)
         self.roles = RoleRepository(roles, resource, events_client=self.events, environment=env_scope)
         self.permissions = PermissionRepository(permissions, resource, events_client=self.events, environment=env_scope)
 

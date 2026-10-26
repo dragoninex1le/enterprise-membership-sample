@@ -6,7 +6,7 @@ direction — one shape, so no caller ever has to double-decode.
 
 Implemented: `capabilities` (PRF-9); `seed` and `teardown` on `porth-org` and `porth-tenant`
 (PRF-12, PRF-15); `bootstrap` on `porth-platform` (PRF-11); and `reset` on `porth-claim-mapping`,
-`porth-tenant` and `porth-org` (PRF-14).
+`porth-tenant` and `porth-org` (PRF-14); and `seed`/`teardown` on `porth-claim-mapping` (PRF-13).
 Every other verb x entity answers `unsupported` with `not_implemented`, which prawf reads as "skip",
 not "fail" (D3). That is the honest answer, and C1 forbids any other.
 
@@ -23,6 +23,7 @@ import time
 
 import capabilities
 import catalogue
+import porth_claim_mapping
 import porth_org
 import porth_platform
 import porth_tenant
@@ -54,9 +55,11 @@ def _log(request: object, response: dict) -> None:
     }))
 
 
-SEEDS = {porth_org.ENTITY: porth_org.seed, porth_tenant.ENTITY: porth_tenant.seed}
-#: Ordered: an organisation cannot be removed while tenants belong to it.
-TEARDOWNS = {porth_tenant.ENTITY: porth_tenant.teardown, porth_org.ENTITY: porth_org.teardown}
+SEEDS = {porth_org.ENTITY: porth_org.seed, porth_tenant.ENTITY: porth_tenant.seed,
+         porth_claim_mapping.ENTITY: porth_claim_mapping.seed}
+#: Ordered: a claim mapping goes before its tenant, and a tenant before its organisation.
+TEARDOWNS = {porth_claim_mapping.ENTITY: porth_claim_mapping.teardown,
+             porth_tenant.ENTITY: porth_tenant.teardown, porth_org.ENTITY: porth_org.teardown}
 
 #: §3.4, C17: these carry entity-specific data, so omitting the entity is refused - there is nothing
 #: to infer a destination from. Only teardown and reset may omit it.
