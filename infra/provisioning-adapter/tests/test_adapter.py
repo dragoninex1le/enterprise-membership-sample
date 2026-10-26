@@ -48,7 +48,7 @@ TWO_SLOTS = {"slots": {
 }}
 
 AGREED_ENTITIES = {
-    "porth-platform", "porth-org", "porth-tenant", "porth-idp-config", "porth-claim-mapping",
+    "porth-platform", "porth-org", "porth-tenant", "porth-claim-mapping",
     "porth-app-permission", "porth-role-grant", "porth-role", "porth-idp",
 }
 OTHER_VERBS = ["bootstrap", "seed", "reset", "ensure", "absent", "teardown", "status"]

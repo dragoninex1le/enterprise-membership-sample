@@ -187,6 +187,54 @@ def test_seed_provisions_the_tenant_admin_role_as_porth_0_3_1_did(porth):
     assert granted == registered
 
 
+#: The manifest's IdP block, as Porth's TenantIdpConfig carries it - synthetic values.
+IDP = {"issuer": "https://idp.synthetic.test/", "jwks_uri": "https://idp.synthetic.test/.well-known/jwks.json",
+       "client_id": "synthetic-tenant-client", "audience": "https://api.synthetic.test", "protocol": "oidc",
+       "provider_org_id": "org_synthetic"}
+
+
+def test_the_tenants_idp_config_is_seeded_with_it_and_porth_reads_it(porth):
+    """Richard, 2026-10-25: the IdP config is part of the tenant - an attribute of its row."""
+    response = call("seed", {"dataset": ems_test(idp_config_override=IDP)})
+    assert response["outcome"] == "ok", response
+    tenants, _, _ = repos()
+    tenant = tenants.get_by_id("ems-test")
+    assert tenant.idp_config_override.model_dump(exclude_none=True) == IDP
+    row = boto3.resource("dynamodb").Table(TABLES["tenants"]).get_item(
+        Key={"PK": f"ENV#{SLOT}#TENANT#ems-test", "SK": "METADATA"})["Item"]
+    assert row["idp_config_override"] == IDP, "stored as a map, unset fields left out - as PATCH stores it"
+
+
+def test_porths_tenant_directory_resolves_a_token_to_the_seeded_tenant(porth, monkeypatch):
+    """What the IdP config is for: Porth's tenant directory - the lookup every sign-in makes - maps a
+    token's (issuer, client_id, org) to its tenant. Loaded from the seeded table by Porth's own code."""
+    import porth_common.config as config
+    from porth_common.tenants import directory
+
+    call("seed", {"dataset": ems_test(idp_config_override=IDP)})
+    monkeypatch.setattr(config, "TABLE_PORTH_TENANTS", TABLES["tenants"], raising=False)
+    directory.reset()
+    try:
+        found = directory.get(IDP["issuer"], IDP["client_id"], IDP["provider_org_id"])
+    finally:
+        directory.reset()
+    assert found is not None and found.get("tenant_id") == "ems-test", found
+
+
+def test_the_idp_config_publishes_the_update_porth_would(porth):
+    call("seed", {"dataset": ems_test(idp_config_override=IDP)})
+    published = porth["published"]()
+    assert {"Tenant.created", "Tenant.updated", "tenant.updated"} <= set(published), published
+
+
+def test_an_idp_config_porth_would_reject_is_refused_before_anything_is_written(porth):
+    before = rows()
+    response = call("seed", {"dataset": ems_test(idp_config_override={"issuer": "https://x/"})})
+    assert (response["outcome"], response["reason_code"]) == ("refused", "dataset_conflict")
+    assert "idp_config_override" in response["diagnostics"]["messages"][0]
+    assert rows() == before
+
+
 def test_seed_publishes_the_events_porth_would(porth):
     call("seed", {"dataset": ems_test()})
     published = porth["published"]()

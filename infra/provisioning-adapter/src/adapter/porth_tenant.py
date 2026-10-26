@@ -12,8 +12,14 @@ is added to an existing organisation (`PUT /tenants/`), using Porth's own code f
    configuration values it read passed as their defaults (role name `tenant-admin`, no platform
    overrides).
 
-Nothing else: no IdP config (`porth-idp-config`) and no claim mapping (`porth-claim-mapping`) - one
-call, one entity (D12) - and nothing in the identity provider. porth-common is pinned to 0.0.9, the
+3. the tenant's IdP config (`idp_config_override`), when the dataset carries one - through
+   porth-common's `TenantRepository.update`, validated by Porth 0.3.1's `TenantPatch`. It lives on the
+   tenant row and is part of the tenant (Richard, 2026-10-25). Porth 0.3.1's `PUT /tenants/` accepts
+   it but porth-common 0.0.9's `create` drops it, so in 0.3.1 it is set by `PATCH /tenants/{id}` -
+   which is `update`, and what this does.
+
+Nothing else: no claim mapping (`porth-claim-mapping`, its own table and entity - one call, one
+entity, D12) and nothing in the identity provider. porth-common is pinned to 0.0.9, the
 release SAR 0.3.1 shipped; when EMS moves to a newer Porth, the pin moves with it.
 
 **It adds tenants; it never takes one over.** The organisation must already exist - Porth 0.3.1 had
@@ -37,7 +43,7 @@ ENTITY = "porth-tenant"
 ADMIN_ROLE_NAME = "tenant-admin"
 ADMIN_ROLE_DESCRIPTION = "Tenant Administrator — full access to all tenant-level features"
 PLATFORM_NAMESPACE = "porth-platform"
-ATTRIBUTES = {"tenant_tier", "org", "admin_role_source_key"}
+ATTRIBUTES = {"tenant_tier", "org", "admin_role_source_key", "idp_config_override"}
 
 
 def _tables() -> tuple[str, str, str]:
@@ -83,8 +89,8 @@ def _tenant(resource: object) -> dict:
     if extra:
         raise ContractError(
             "refused", "dataset_conflict",
-            f"tenant {tenant_id!r}: attributes {extra} are not part of {ENTITY} - IdP settings belong to "
-            "porth-idp-config, and nothing here writes to the identity provider",
+            f"tenant {tenant_id!r}: attributes {extra} are not part of a Porth tenant "
+            f"(it takes {', '.join(sorted(ATTRIBUTES))}), and nothing here writes to the identity provider",
         )
     from pydantic import ValidationError
     from porth_common.models.tenant import TenantAddToOrg
@@ -96,6 +102,7 @@ def _tenant(resource: object) -> dict:
             display_name=spec.get("display_name"),
             tenant_tier=attributes.get("tenant_tier"),
             admin_role_source_key=attributes.get("admin_role_source_key"),
+            idp_config_override=attributes.get("idp_config_override"),
         )
     except ValidationError as e:
         problems = "; ".join(f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}" for err in e.errors())
@@ -108,6 +115,7 @@ def _tenant(resource: object) -> dict:
         "tenant_tier": attributes["tenant_tier"],
         "org": attributes["org"],
         "admin_role_source_key": attributes["admin_role_source_key"],
+        "idp_config_override": attributes.get("idp_config_override"),
     }
 
 
@@ -165,6 +173,10 @@ def seed(env_scope: str, run_id: str, dry_run: bool, payload: object) -> tuple[l
             "display_name": t["display_name"], "tenant_tier": t["tenant_tier"],
             "created_by": f"prawf:{run_id}",
         })
+        if t["idp_config_override"]:
+            # PATCH /tenants/{id}, Porth 0.3.1: TenantPatch's dump, without unset fields, through update.
+            from porth_common.models.tenant import TenantPatch
+            porth.tenants.update(tid, TenantPatch(idp_config_override=t["idp_config_override"]).model_dump(exclude_none=True))
 
         # provision_tenant_admin_role, Porth 0.3.1 - role, then the tenant permissions, then grants.
         ledger.record(porth.db, env_scope, run_id, ENTITY, ledger.tenant_scope(tid))

@@ -12,7 +12,7 @@ Optionally compare against the datasets that were seeded, read from prawf's buck
 What it checks, each as its own line:
   * the organisation row exists under its slug, active, with the name the dataset gave it
   * the tenant row exists as Porth 0.3.1 writes it - both indexes (gsi2 is what lists it), active,
-    belonging to that organisation by id and name, with the dataset's display name and tier
+    belonging to that organisation by id and name, with the dataset's display name, tier and IdP config
   * the tenant-admin role exists, answers to the dataset's claim value, is a system role, and holds
     exactly the tenant permissions registered under the tenant
   * the adapter's dataset markers - in prawf's own audit table - say which dataset version (and
@@ -89,6 +89,12 @@ def check_tenant(tenant: dict | None, slot: str, tenant_id: str, org: dict | Non
         for field in ("display_name", "tenant_tier"):
             if tenant.get(field) != expected[field]:
                 problems.append(f"{field} is {tenant.get(field)!r}, the dataset says {expected[field]!r}")
+        want_idp = expected.get("idp_config_override")
+        if want_idp is not None and tenant.get("idp_config_override") != want_idp:
+            # Field names only - never the values, which are the testbed's.
+            have = tenant.get("idp_config_override") or {}
+            differ = sorted(k for k in set(have) | set(want_idp) if have.get(k) != want_idp.get(k))
+            problems.append(f"the IdP config differs from the dataset's in {differ or 'its presence'}")
     return problems
 
 
@@ -206,7 +212,8 @@ def main() -> int:
         org_expected = org_res["spec"]["name"]
         attrs = tenant_res["spec"]["attributes"]
         tenant_expected = {"display_name": tenant_res["spec"]["display_name"], "tenant_tier": attrs["tenant_tier"],
-                           "admin_role_source_key": attrs["admin_role_source_key"]}
+                           "admin_role_source_key": attrs["admin_role_source_key"],
+                           "idp_config_override": attrs.get("idp_config_override")}
 
     orgs = ems.query(tenants, "gsi1pk", f"ENV#{s}#ORG_SLUG#{args.org}", index="gsi1")
     org = orgs[0] if orgs else None
