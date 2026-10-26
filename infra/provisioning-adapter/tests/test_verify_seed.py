@@ -107,3 +107,18 @@ def test_dynamodb_json_is_read_as_the_cli_returns_it():
     raw = {"PK": {"S": "x"}, "is_system": {"BOOL": True}, "n": {"N": "3"}, "m": {"M": {"a": {"L": [{"S": "b"}]}}},
            "z": {"NULL": True}}
     assert verify.item(raw) == {"PK": "x", "is_system": True, "n": "3", "m": {"a": ["b"]}, "z": None}
+
+
+def test_the_claim_mapping_check_passes_on_a_seed_and_catches_its_absence(porth):
+    from test_porth_claim_mapping import claims_dataset, mapping_source
+    call("seed", {"dataset": ems_org()}, entity="porth-org")
+    call("seed", {"dataset": ems_test(org="ems-fixtures")})
+    org, tenant, roles, *_ = read()
+    admin = next(r for r in roles if r["name"] == "tenant-admin")
+    assert verify.check_claim_mapping([], admin, None) == [
+        "the tenant has no claim mapping - every sign-in resolves no roles (PORTH-479)"]
+    call("seed", {"dataset": claims_dataset()}, entity="porth-claim-mapping")
+    versions = raw_query(TABLES["claims"], "PK", f"ENV#{SLOT}#TENANT#ems-test")
+    assert verify.check_claim_mapping(versions, admin, mapping_source()) == []
+    assert verify.check_claim_mapping(versions, admin, mapping_source("https://other.test/roles")) == [
+        "the claim mapping differs from the dataset's"]

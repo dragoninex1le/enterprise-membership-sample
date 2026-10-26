@@ -15,6 +15,8 @@ What it checks, each as its own line:
     belonging to that organisation by id and name, with the dataset's display name, tier and IdP config
   * the tenant-admin role exists, answers to the dataset's claim value, is a system role, and holds
     exactly the tenant permissions registered under the tenant
+  * the tenant's latest claim mapping exists, is compiled, and resolves roles - without it every
+    sign-in gets no roles (PORTH-479)
   * the adapter's dataset markers - in prawf's own audit table - say which dataset version (and
     digest) each entity carries
   * **Porth's tenants table holds no prawf rows** - prawf's bookkeeping lives in its own table
@@ -129,6 +131,25 @@ def check_admin_role(roles: list[dict], grants: list[str], registered: list[str]
     return problems
 
 
+def check_claim_mapping(versions: list[dict], admin: dict | None, expected_source: dict | None) -> list[str]:
+    """The tenant's latest claim mapping exists, compiled, and resolves the claim the admin role answers to."""
+    if not versions:
+        return ["the tenant has no claim mapping - every sign-in resolves no roles (PORTH-479)"]
+    latest = max(versions, key=lambda v: int(v.get("version", 0)))
+    problems = []
+    if not latest.get("compiled_source") or not latest.get("compiled_hash"):
+        problems.append(f"claim mapping version {latest.get('version')} is not compiled")
+    fields = (latest.get("mapping_source") or {}).get("fields") or []
+    roles = [f for f in fields if f.get("name") == "roles"]
+    if not roles or not any(op.get("op") == "resolve_roles" for op in roles[0].get("ops") or []):
+        problems.append("the claim mapping has no roles field resolving roles - the admin role is never assigned")
+    if expected_source is not None and latest.get("mapping_source") != expected_source:
+        problems.append("the claim mapping differs from the dataset's")
+    if admin is None:
+        problems.append("no tenant-admin role for the claim mapping to resolve to")
+    return problems
+
+
 def check_directory(rows: list[dict]) -> list[str]:
     return [p for row in rows for p in readable(row)]
 
@@ -176,7 +197,7 @@ class Ems:
         return [item(i) for i in out.get("Items", [])]
 
 
-def expected_from_bucket(profile: str, tenant_id: str, slug: str, version: str) -> tuple[dict, dict]:
+def expected_from_bucket(profile: str, tenant_id: str, slug: str, version: str) -> tuple[dict, dict, dict | None]:
     def fetch(key: str) -> dict:
         account = json.loads(subprocess.run(["aws", "--profile", profile, "sts", "get-caller-identity"],
                                             capture_output=True, text=True, check=True).stdout)["Account"]
@@ -187,7 +208,8 @@ def expected_from_bucket(profile: str, tenant_id: str, slug: str, version: str) 
         return json.loads(proc.stdout)
     org = fetch(f"ems/porth-org/ems.org.{slug}@{version}.json")["resources"][0]
     tenant = fetch(f"ems/porth-tenant/ems.tenant.{tenant_id}@{version}.json")["resources"][0]
-    return org, tenant
+    claims = fetch(f"ems/porth-claim-mapping/ems.claims.{tenant_id}@{version}.json")["resources"][0]
+    return org, tenant, claims
 
 
 def main() -> int:
@@ -198,17 +220,19 @@ def main() -> int:
     ap.add_argument("--tenant", default="ems-test")
     ap.add_argument("--org", default="ems", help="the organisation's slug")
     ap.add_argument("--components-profile", help="also compare against the seeded datasets in prawf's bucket")
-    ap.add_argument("--version", default="1.0.0")
+    ap.add_argument("--version", default="1.1.0")
     args = ap.parse_args()
 
     ems = Ems(args.profile, args.region)
     tables = ems.outputs()
     tenants, roles_t, perms_t = tables["TenantsTableName"], tables["RolesTableName"], tables["PermissionsTableName"]
+    claims_t = tables["ClaimMappingConfigsTableName"]
     s = args.slot
 
-    org_expected = tenant_expected = None
+    org_expected = tenant_expected = claims_expected = None
     if args.components_profile:
-        org_res, tenant_res = expected_from_bucket(args.components_profile, args.tenant, args.org, args.version)
+        org_res, tenant_res, claims_res = expected_from_bucket(args.components_profile, args.tenant, args.org, args.version)
+        claims_expected = claims_res["spec"]["mapping_source"]
         org_expected = org_res["spec"]["name"]
         attrs = tenant_res["spec"]["attributes"]
         tenant_expected = {"display_name": tenant_res["spec"]["display_name"], "tenant_tier": attrs["tenant_tier"],
@@ -223,7 +247,9 @@ def main() -> int:
     grants = [g["permission_key"] for g in ems.query(roles_t, "pk", f"ENV#{s}#TENANT#{args.tenant}#ROLE#{admin['id']}")] if admin else []
     registered = [p["key"] for p in ems.query(perms_t, "gsi1pk", f"ENV#{s}#TENANT#{args.tenant}", index="gsi1")
                   if p.get("app_namespace") != "porth-platform"]
-    markers = {e: ems.get(AUDIT_TABLE, {"PK": f"ENV#{s}#ENTITY#{e}", "SK": "DATASET"}) for e in ("porth-org", "porth-tenant")}
+    versions = ems.query(claims_t, "PK", f"ENV#{s}#TENANT#{args.tenant}")
+    markers = {e: ems.get(AUDIT_TABLE, {"PK": f"ENV#{s}#ENTITY#{e}", "SK": "DATASET"})
+               for e in ("porth-org", "porth-tenant", "porth-claim-mapping")}
     strays = ems.prawf_rows(tenants, s)
 
     checks = [
@@ -231,6 +257,7 @@ def main() -> int:
         (f"tenant {args.tenant!r} as Porth 0.3.1 writes it", check_tenant(tenant, s, args.tenant, org, tenant_expected)),
         ("tenant-admin role, claim value and grants", check_admin_role(
             roles, grants, registered, tenant_expected["admin_role_source_key"] if tenant_expected else None)),
+        ("the tenant's claim mapping, compiled and resolving roles", check_claim_mapping(versions, admin, claims_expected)),
         ("the adapter's dataset markers, in prawf's audit table", [f"no dataset marker for {e}" for e, m in markers.items() if not m]),
         ("Porth's tenants table holds no prawf rows", [f"{r['PK']} / {r['SK']}" for r in strays]),
         ("every row Porth's tenant directory loads is readable", check_directory(ems.directory(tenants))),
