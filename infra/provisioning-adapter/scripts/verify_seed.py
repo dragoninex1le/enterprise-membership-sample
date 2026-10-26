@@ -20,6 +20,8 @@ What it checks, each as its own line:
   * the adapter's dataset markers - in prawf's own audit table - say which dataset version (and
     digest) each entity carries
   * **Porth's tenants table holds no prawf rows** - prawf's bookkeeping lives in its own table
+  * no tenant row in the slot carries `admin_email` or `admin_password_secret` - the identity
+    provider's, not Porth's
   * **every row Porth's tenant directory loads is one Porth can read** - the directory reads them all
     (`SK = METADATA AND contains(PK, "TENANT#")`), and a single row it cannot read empties it and stops
     every login in the slot. This is the check that says the seed broke nothing around it.
@@ -92,6 +94,8 @@ def check_tenant(tenant: dict | None, slot: str, tenant_id: str, org: dict | Non
             if tenant.get(field) != expected[field]:
                 problems.append(f"{field} is {tenant.get(field)!r}, the dataset says {expected[field]!r}")
         want_idp = expected.get("idp_config_override")
+        # A field the dataset holds as a secret reference is substituted by the runner, and not compared here.
+        want_idp = {k: v for k, v in (want_idp or {}).items() if not _is_secret(v)} if want_idp is not None else None
         if want_idp is not None and any((tenant.get("idp_config_override") or {}).get(k) != v for k, v in want_idp.items()):
             # Field names only - never the values, which are the testbed's.
             # The dataset's own fields, as written; a field Porth fills with its default (protocol) is not a difference.
@@ -99,6 +103,19 @@ def check_tenant(tenant: dict | None, slot: str, tenant_id: str, org: dict | Non
             differ = sorted(k for k in want_idp if have.get(k) != want_idp[k])
             problems.append(f"the IdP config differs from the dataset's in {differ or 'its presence'}")
     return problems
+
+
+def _is_secret(value: object) -> bool:
+    return isinstance(value, dict) and set(value) == {"$secret"}
+
+
+#: The identity provider's, not Porth's. The old qa-tools seeder wrote them on tenant rows (Richard,
+#: 2026-10-25: they should not exist in this table at all).
+NOT_PORTHS = ("admin_email", "admin_password_secret")
+
+
+def check_no_admin_identity(rows: list[dict]) -> list[str]:
+    return [f"{row.get('tenant_id') or row.get('PK')} carries {field}" for row in rows for field in NOT_PORTHS if field in row]
 
 
 def readable(row: dict) -> list[str]:
@@ -253,6 +270,7 @@ def main() -> int:
                for e in ("porth-org", "porth-tenant", "porth-claim-mapping")}
     strays = ems.prawf_rows(tenants, s)
 
+    directory = ems.directory(tenants)
     checks = [
         (f"organisation {args.org!r} in {s}", check_org(org, args.org, org_expected)),
         (f"tenant {args.tenant!r} as Porth 0.3.1 writes it", check_tenant(tenant, s, args.tenant, org, tenant_expected)),
@@ -261,7 +279,9 @@ def main() -> int:
         ("the tenant's claim mapping, compiled and resolving roles", check_claim_mapping(versions, admin, claims_expected)),
         ("the adapter's dataset markers, in prawf's audit table", [f"no dataset marker for {e}" for e, m in markers.items() if not m]),
         ("Porth's tenants table holds no prawf rows", [f"{r['PK']} / {r['SK']}" for r in strays]),
-        ("every row Porth's tenant directory loads is readable", check_directory(ems.directory(tenants))),
+        ("every row Porth's tenant directory loads is readable", check_directory(directory)),
+        ("no tenant row carries the identity provider's admin_email or admin_password_secret",
+         check_no_admin_identity([r for r in directory if str(r.get("PK", "")).startswith(f"ENV#{s}#")])),
     ]
     failed = 0
     for name, problems in checks:

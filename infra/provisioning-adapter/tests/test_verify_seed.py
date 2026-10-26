@@ -125,3 +125,23 @@ def test_the_claim_mapping_check_passes_on_a_seed_and_catches_its_absence(porth)
     assert verify.check_claim_mapping(versions, admin, mapping_source()) == []
     assert verify.check_claim_mapping(versions, admin, mapping_source("https://other.test/roles")) == [
         "the claim mapping differs from the dataset's"]
+
+
+def test_a_secret_reference_in_the_dataset_is_not_reported_as_a_difference(porth):
+    from test_porth_tenant import IDP
+    call("seed", {"dataset": ems_org()}, entity="porth-org")
+    call("seed", {"dataset": ems_test(org="ems-fixtures", idp_config_override=IDP)})
+    org, tenant, *_ = read()
+    referenced = {**IDP, "client_id": {"$secret": "ems/porth-dau/ems-test/idp/client_id"}}
+    expected = {"display_name": "EMS Test Tenant", "tenant_tier": "development", "idp_config_override": referenced}
+    assert verify.check_tenant(tenant, SLOT, "ems-test", org, expected) == []
+
+
+def test_admin_identity_on_a_tenant_row_fails_naming_the_field_not_its_value(porth):
+    call("seed", {"dataset": ems_org()}, entity="porth-org")
+    call("seed", {"dataset": ems_test(org="ems-fixtures")})
+    *_, directory = read()
+    assert verify.check_no_admin_identity(directory) == []
+    dirty = [*directory, {**directory[-1], "tenant_id": "legacy", "admin_email": "a@synthetic.test", "admin_password_secret": "x"}]
+    problems = verify.check_no_admin_identity(dirty)
+    assert problems == ["legacy carries admin_email", "legacy carries admin_password_secret"]
