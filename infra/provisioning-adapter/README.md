@@ -78,15 +78,18 @@ three is Porth 0.3.1's `provision_tenant_admin_role`, which is not in the wheel.
   finished one. It also records which dataset each entity carries. A test tool's bookkeeping does not
   belong in the application's tables (2026-10-25); a full reset removes any an earlier adapter left there.
 
-IdP settings and claim mappings are other entities (`porth-idp-config`, `porth-claim-mapping`), and
-nothing here writes to the identity provider. When EMS moves to a newer Porth, the porth-common pin
+- The tenant's IdP config (`idp_config_override`, `provider_org_id` included) is part of the tenant:
+  it lives on the tenant row, and is set with Porth's own `PATCH /tenants/{id}` path (`update`,
+  validated by `TenantPatch`) - Porth 0.3.1's `PUT` accepts it but porth-common 0.0.9's `create` drops it.
+
+Claim mappings are their own table and entity (`porth-claim-mapping`), and nothing here writes to the
+identity provider. When EMS moves to a newer Porth, the porth-common pin
 moves with it.
 
 | Entity | Destructive | Porth resources | Planned | Ruled out |
 |---|---|---|---|---|
 | `porth-platform` | no | tenants `ENV#{s}#ORG#{uuid}` and `ENV#{s}#TENANT#platform` / `METADATA`; permissions `ENV#{s}#TENANT#platform#NS#porth-platform`; roles `platform-admin` and its grants; its claim mapping | `bootstrap` — PRF-11, implemented | `reset` (breaks every sign-in); `seed` (the baseline is the target's, D7); `teardown` (nothing here is run-created) |
-| `porth-tenant` | yes | tenants `ENV#{s}#TENANT#{tid}` / `METADATA`; its roles, grants and permissions | `seed` PRF-12, `reset` PRF-14, `teardown` PRF-15 — implemented | |
-| `porth-idp-config` | yes | tenants `ENV#{s}#TENANT#{tid}` / `METADATA`, attribute `idp_config_override` | `seed`, `reset` | |
+| `porth-tenant` | yes | tenants `ENV#{s}#TENANT#{tid}` / `METADATA`, its IdP config (`idp_config_override`) included; its roles, grants and permissions | `seed` PRF-12, `reset` PRF-14, `teardown` PRF-15 — implemented | |
 | `porth-claim-mapping` | yes | claim-mapping-configs `ENV#{s}#TENANT#{tid}` / `VERSION#{n:06d}` | `reset` PRF-14 — implemented; `seed` PRF-13 | |
 | `porth-app-permission` | yes | permissions `ENV#{s}#TENANT#{tid}#NS#{app}` / `PERM#{key}` | `seed`, `absent` | |
 | `porth-role-grant` | yes | roles `ENV#{s}#TENANT#{tid}#ROLE#{uuid}` / `PERM#{key}` — unioned, never replaced (PORTH-609) | `ensure`, `absent` | |
@@ -99,13 +102,11 @@ roles use `pk`/`sk`.
 ### Findings against PRF-7's agreed list (§12 — the first real entity catalogue)
 
 - **`porth-idp` was two things.** Porth's *stored record* of an IdP is writable from this account; the
-  IdP itself is not. Same name, opposite reachability. Split into `porth-idp-config` and `porth-idp`.
+  IdP itself is not. Same name, opposite reachability. The stored record is part of `porth-tenant`
+  (2026-10-25: it is an attribute of the tenant row, not an entity); `porth-idp` is the IdP.
 - **Two entities the list did not have:** `porth-app-permission` and `porth-role-grant`, the
   application's own layer on top of what Porth installs. Kept separate (one call, one entity, D12) so
   teardown is never ambiguous about which half it undoes.
-- **`porth-tenant` and `porth-idp-config` share one DynamoDB item.** Both must write with `UpdateItem`
-  on disjoint attributes — a `PutItem` from either erases the other's half of the row. This is the
-  sharpest test so far of §3.3's granularity guidance: one logical row, two addressable entities.
 - **`porth-org` is not declared.** Own entity or tenant attribute is deferred to the live-data
   extraction, not decided here.
 

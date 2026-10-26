@@ -18,7 +18,7 @@ What each case asserts:
   * the §9 invariants on every response: ok carries no reason code; a non-ok carries one from the
     closed list, no results, and a message saying why
   * on `capabilities`, the declaration itself: the served slot, contract 1.0.0, the implemented
-    verbs, the nine catalogue entities, and exactly the implemented cells (C1): `bootstrap` on
+    verbs, the eight catalogue entities, and exactly the implemented cells (C1): `bootstrap` on
     porth-platform; `seed`, `reset` and `teardown` on porth-org and porth-tenant; `reset` on
     porth-claim-mapping
   * if `prawf_schemas` is importable, every response against the canonical response schema
@@ -38,7 +38,7 @@ from pathlib import Path
 
 VERBS = ("bootstrap", "seed", "reset", "ensure", "absent", "teardown", "status")
 ENTITIES = (
-    "porth-platform", "porth-org", "porth-tenant", "porth-idp-config", "porth-claim-mapping",
+    "porth-platform", "porth-org", "porth-tenant", "porth-claim-mapping",
     "porth-app-permission", "porth-role-grant", "porth-role", "porth-idp",
 )
 #: common.schema.json $defs/reasonCode - the closed list (§9).
@@ -211,7 +211,9 @@ def cases(slot: str) -> list[Case]:
              "refused", "dataset_conflict"),
         Case("seed", "a tenant tier Porth would reject", seed(tenant_dataset(tenant_tier="standard")),
              "refused", "dataset_conflict"),
-        Case("seed", "IdP settings belong to porth-idp-config", seed(tenant_dataset(provider_org_id="org_x")),
+        Case("seed", "an attribute a Porth tenant does not have", seed(tenant_dataset(provider_org_id="org_x")),
+             "refused", "dataset_conflict"),
+        Case("seed", "an IdP config Porth would reject", seed(tenant_dataset(idp_config_override={"issuer": "x"})),
              "refused", "dataset_conflict"),
         Case("seed", "a resource type not implemented",
              seed(signed({**good, "resources": [{"type": "user", "alias": "u"}]})), "unsupported", "not_implemented"),

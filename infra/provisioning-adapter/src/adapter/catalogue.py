@@ -18,6 +18,9 @@ scope; sort keys never do. Attribute case differs by table and is part of the sh
 
 **`porth-org` is its own entity** - the porth-org ruling, Option A (Richard, 2026-10-23). An
 organisation is seeded before the tenants that belong to it, and torn down after them.
+
+**A tenant's IdP config is part of the tenant**, not an entity of its own (Richard, 2026-10-25): it
+is an attribute of the tenant row (`idp_config_override`), set with the tenant.
 """
 from __future__ import annotations
 
@@ -83,17 +86,6 @@ ENTITIES: tuple[Entity, ...] = (
         destructive=True,
         resources=("tenants: PK=ENV#{s}#ORG#{uuid} SK=METADATA, gsi1pk=ENV#{s}#ORG_SLUG#{slug}",),
         verbs=("seed", "reset", "teardown"),
-    ),
-    Entity(
-        id="porth-idp-config",
-        description="Porth's stored record of a tenant's IdP. Not the IdP itself.",
-        destructive=True,
-        resources=(
-            "tenants: PK=ENV#{s}#TENANT#{tid} SK=METADATA, attribute idp_config_override",
-        ),
-        planned={"seed": "PRF-12/13 area", "reset": "PRF-14"},
-        # Shares a physical item with porth-tenant. Both must write with UpdateItem on disjoint
-        # attributes: a PutItem from either would erase the other's half of the row.
     ),
     Entity(
         id="porth-claim-mapping",

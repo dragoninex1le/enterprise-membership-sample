@@ -57,6 +57,19 @@ def test_every_check_passes_on_what_a_seed_writes(porth):
     assert verify.check_directory(directory) == []
 
 
+def test_the_idp_config_is_checked_against_the_dataset_naming_fields_never_values(porth):
+    from test_porth_tenant import IDP
+    call("seed", {"dataset": ems_org()}, entity="porth-org")
+    call("seed", {"dataset": ems_test(org="ems-fixtures", idp_config_override=IDP)})
+    org, tenant, *_ = read()
+    expected = {"display_name": "EMS Test Tenant", "tenant_tier": "development", "idp_config_override": IDP}
+    assert verify.check_tenant(tenant, SLOT, "ems-test", org, expected) == []
+    moved = {**IDP, "issuer": "https://elsewhere.test/"}
+    problems = verify.check_tenant(tenant, SLOT, "ems-test", org, {**expected, "idp_config_override": moved})
+    assert problems == ["the IdP config differs from the dataset's in ['issuer']"]
+    assert not any("elsewhere" in p or "synthetic" in p for p in problems), "values never printed"
+
+
 def test_a_missing_seed_is_reported(porth):
     assert verify.check_org(None, "ems", None) == ["no organisation with slug 'ems'"]
     assert verify.check_tenant(None, SLOT, "ems-test", None, None)
