@@ -68,6 +68,9 @@ def test_the_idp_config_is_checked_against_the_dataset_naming_fields_never_value
     problems = verify.check_tenant(tenant, SLOT, "ems-test", org, {**expected, "idp_config_override": moved})
     assert problems == ["the IdP config differs from the dataset's in ['issuer']"]
     assert not any("elsewhere" in p or "synthetic" in p for p in problems), "values never printed"
+    no_protocol = {k: v for k, v in IDP.items() if k != "protocol"}
+    assert verify.check_tenant(tenant, SLOT, "ems-test", org, {**expected, "idp_config_override": no_protocol}) == [], \
+        "a field the dataset leaves to Porth's default is not a difference"
 
 
 def test_a_missing_seed_is_reported(porth):
