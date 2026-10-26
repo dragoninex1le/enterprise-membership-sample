@@ -318,7 +318,7 @@ jobs:
               --cli-binary-format raw-in-base64-out --payload "$1" "$2" > /dev/null
           }
           invoke '{"contract_version":"1.0.0","verb":"capabilities"}' caps.json
-          invoke '{"contract_version":"1.0.0","verb":"seed","run":{"run_id":"deploy-proof"},"entity":"porth-role"}' unsupported.json
+          invoke '{"contract_version":"1.0.0","verb":"seed","run":{"run_id":"deploy-proof"},"entity":"porth-app-permission"}' unsupported.json
           invoke '{"contract_version":"1.0.0","verb":"seed","run":{"run_id":"deploy-proof"},"entity":"porth-tables"}' unknown.json
           python - <<'PY' > dryrun-request.json
           import hashlib, json
@@ -382,7 +382,7 @@ jobs:
               f"- **adapter**: `{body['adapter_version']}`, contract {', '.join(body['contract_versions'])}",
               f"- **verbs**: {', '.join(body['verbs'])}",
               f"- **entities**: {', '.join(e['id'] for e in body['entities'])}",
-              "- `seed porth-role` -> `unsupported / not_implemented`",
+              "- `seed porth-app-permission` -> `unsupported / not_implemented`",
               "- `seed porth-tables` -> `refused / unknown_entity`",
               f"- dry-run `seed porth-tenant` (probe, nothing written) -> `{dry_note}`: {'; '.join(dryrun['diagnostics']['messages'])}",
               f"- dry-run `bootstrap porth-platform` (nothing written) -> `ok`: {baseline}",

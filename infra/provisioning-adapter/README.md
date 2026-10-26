@@ -87,6 +87,14 @@ three is Porth 0.3.1's `provision_tenant_admin_role`, which is not in the wheel.
 Claim mappings are their own table and entity (`porth-claim-mapping`), and nothing here writes to the
 identity provider.
 
+## `porth-role`: seed and teardown
+
+An arranged role - one a test needs that the tenant's seed does not make, such as `no-access` for a
+denial test (PRF-18). What Porth 0.3.1 writes for `POST /roles/`: `create_role` with `is_system=False`,
+never taken from the caller (PORTH-597), so every seeded role is one reset may remove. No grants:
+`spec` takes `tenant`, `source_key` and `description` only. The tenant must exist, and the name and
+claim value must be free in it (PORTH-226).
+
 ## `porth-claim-mapping`: seed and teardown
 
 What Porth 0.3.1 writes for `POST /claim-mapping-configs/?tenant_id=…`, with Porth's own code: the
@@ -104,7 +112,7 @@ moves with it.
 | `porth-claim-mapping` | yes | claim-mapping-configs `ENV#{s}#TENANT#{tid}` / `VERSION#{n:06d}` | `seed` PRF-13, `reset` PRF-14, `teardown` — implemented | |
 | `porth-app-permission` | yes | permissions `ENV#{s}#TENANT#{tid}#NS#{app}` / `PERM#{key}` | `seed`, `absent` | |
 | `porth-role-grant` | yes | roles `ENV#{s}#TENANT#{tid}#ROLE#{uuid}` / `PERM#{key}` — unioned, never replaced (PORTH-609) | `ensure`, `absent` | |
-| `porth-role` | yes | roles `ENV#{s}#TENANT#{tid}` / `ROLE#{uuid}`, not a system role | `reset` PRF-14 — implemented; `ensure`, `absent` — PRF-18 | |
+| `porth-role` | yes | roles `ENV#{s}#TENANT#{tid}` / `ROLE#{uuid}`, not a system role | `seed` PRF-18, `reset` PRF-14, `teardown` — implemented | |
 | `porth-idp` | no | Auth0 users, Organizations, role assignments | — | every verb: needs the provider's Management API, which is not in this account |
 
 Attribute case is part of the shape: tenants and claim-mapping-configs use `PK`/`SK`; permissions and
