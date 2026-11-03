@@ -7,8 +7,8 @@ what "speaks the contract" means; the canary at the end proves the validator can
 
 What is pinned, and why:
 
-* **C1 — declare only what is implemented.** Install verbs are exactly `["capabilities"]`; every
-  entity declares `verbs: []`. The schema forbids an empty install list, so that is its honest form.
+* **C1 — declare only what is implemented.** The install verbs and each entity's verbs are exactly
+  the implemented cells of the verb x entity matrix, checked by behaviour as well as by list.
 * **C2 — every unimplemented verb is `unsupported`,** never an opaque failure. prawf skips it.
 * **C15 — an unknown entity is `refused` with `unknown_entity`,** never a silent no-op.
 * **R8 — one adapter per target, slot chosen per call, and no default slot.** Omission resolves only
@@ -17,7 +17,8 @@ What is pinned, and why:
   adapter does not report back whatever slot it was asked about.
 * **D5 — environment_class is the target's.** A request field claiming a class is ignored.
 * **Isolation by IAM.** Data calls use credentials from an AssumeRole whose session policy admits
-  one slot's keys, with Scan denied; `ENV#porth-dau#*` must not match `ENV#porth-dau-probe#...`.
+  one slot's keys, with Scan on the tenants table alone (reset, PRF-14) and denied everywhere else;
+  `ENV#porth-dau#*` must not match `ENV#porth-dau-probe#...`.
 """
 import copy
 import fnmatch
@@ -47,10 +48,12 @@ TWO_SLOTS = {"slots": {
 }}
 
 AGREED_ENTITIES = {
-    "porth-platform", "porth-tenant", "porth-idp-config", "porth-claim-mapping",
+    "porth-platform", "porth-org", "porth-tenant", "porth-claim-mapping",
     "porth-app-permission", "porth-role-grant", "porth-role", "porth-idp",
 }
 OTHER_VERBS = ["bootstrap", "seed", "reset", "ensure", "absent", "teardown", "status"]
+#: An entity none of the verbs is implemented for, so every one of them is unsupported against it.
+UNIMPLEMENTED_ENTITY = "porth-idp"
 
 
 # ---------------------------------------------------------------- fakes
@@ -159,10 +162,19 @@ def test_capabilities_validates_against_the_real_schemas(world):
     assert caps["adapter_version"] == "test-build"
 
 
-def test_install_verbs_are_capabilities_only_and_every_entity_declares_none(world):
+def test_exactly_the_implemented_cells_are_declared(world):
     caps = assert_valid_capabilities(capabilities())
-    assert caps["verbs"] == ["capabilities"]
-    assert all(e["verbs"] == [] for e in caps["entities"])
+    assert caps["verbs"] == ["capabilities", "bootstrap", "seed", "reset", "teardown"]
+    declared = {e["id"]: e["verbs"] for e in caps["entities"]}
+    assert declared.pop("porth-platform") == ["bootstrap"]
+    assert declared.pop("porth-tenant") == ["seed", "reset", "teardown"]
+    assert declared.pop("porth-org") == ["seed", "reset", "teardown"]
+    assert declared.pop("porth-claim-mapping") == ["seed", "reset", "teardown"]
+    assert declared.pop("porth-role") == ["seed", "reset", "teardown"]
+    assert caps["extension_types"] == ["porth.org", "porth.permission", "porth.role", "porth.role-grant", "porth.claim-mapping"]
+    assert all(v == [] for v in declared.values()), declared
+    assert caps["dataset_forms"] == ["enumerated"]
+    assert caps["resource_types"] == ["tenant"]
 
 
 def test_c1_every_declared_verb_is_actually_implemented(world):
@@ -296,9 +308,9 @@ def test_data_calls_run_on_a_one_slot_session(world):
     assert world["dynamodb_kwargs"][-1]["aws_access_key_id"] == "FAKEKEYID", "DynamoDB never sees the Lambda's own role"
 
 
-def test_the_session_policy_admits_one_slot_and_not_its_prefix_extension():
+def test_the_session_policy_admits_one_slot_and_not_its_prefix_extension(world):
     policy = json.loads(slots.session_policy("porth-dau"))
-    (allow,) = [s for s in policy["Statement"] if s["Effect"] == "Allow"]
+    (allow,) = [s for s in policy["Statement"] if s["Sid"] == "OneSlotOnly"]
     (pattern,) = allow["Condition"]["ForAllValues:StringLike"]["dynamodb:LeadingKeys"]
     assert iam_string_like(pattern, "ENV#porth-dau#TENANT#platform")
     assert not iam_string_like(pattern, "ENV#porth-sample#TENANT#platform")
@@ -306,14 +318,25 @@ def test_the_session_policy_admits_one_slot_and_not_its_prefix_extension():
     assert not iam_string_like(pattern, "TENANT#platform"), "an unscoped key is another slot's, not ours"
 
 
-def test_the_session_policy_is_read_only_and_denies_scan():
+def test_the_session_policy_writes_single_items_in_one_slot_and_scans_only_the_tenants_table(world):
     policy = json.loads(slots.session_policy("porth-dau"))
+    (one_slot,) = [s for s in policy["Statement"] if s["Sid"] == "OneSlotOnly"]
+    assert set(one_slot["Action"]) == set(slots.READ_ACTIONS + slots.WRITE_ACTIONS)
+    assert "dynamodb:LeadingKeys" in one_slot["Condition"]["ForAllValues:StringLike"], "every write is held to the slot"
     allowed = {a for s in policy["Statement"] if s["Effect"] == "Allow" for a in s["Action"]}
     denied = {a for s in policy["Statement"] if s["Effect"] == "Deny" for a in s["Action"]}
-    assert allowed == set(slots.READ_ACTIONS)
-    assert not any(a.startswith(("dynamodb:Put", "dynamodb:Update", "dynamodb:Delete", "dynamodb:BatchWrite")) for a in allowed)
-    assert {"dynamodb:Scan", "dynamodb:PartiQLSelect", "dynamodb:ExecuteStatement"} <= denied
-    assert "dynamodb:Scan" not in allowed
+    assert allowed == set(slots.READ_ACTIONS + slots.WRITE_ACTIONS + slots.EVENT_ACTIONS + ("dynamodb:Scan",))
+    assert not any(a.startswith(("dynamodb:BatchWrite", "dynamodb:Transact")) for a in allowed)
+    assert {"dynamodb:PartiQLSelect", "dynamodb:ExecuteStatement"} <= denied
+
+    # Scan: the tenants table, exactly - not an index, not another table - and denied everywhere else.
+    tenants = f"arn:aws:dynamodb:us-east-1:111111111111:table/{TENANTS}"
+    scans = [s for s in policy["Statement"] if "dynamodb:Scan" in s["Action"]]
+    (allow,) = [s for s in scans if s["Effect"] == "Allow"]
+    (deny,) = [s for s in scans if s["Effect"] == "Deny"]
+    assert allow["Action"] == ["dynamodb:Scan"] and allow["Resource"] == tenants and "Condition" not in allow
+    assert deny["NotResource"] == tenants
+    assert not any("Scan" in a for s in policy["Statement"] if s["Effect"] == "Allow" and s is not allow for a in s["Action"])
 
 
 @pytest.mark.parametrize("scope", ["*", "porth-*", "a#b", "Porth", ""])
@@ -333,9 +356,16 @@ def test_credentials_never_reach_a_response(world):
 
 @pytest.mark.parametrize("verb", OTHER_VERBS)
 def test_every_unimplemented_verb_is_unsupported_not_failed(world, verb):
-    response = call(contract_version="1.0.0", verb=verb, run={"run_id": "run-x"}, entity="porth-tenant")
+    response = call(contract_version="1.0.0", verb=verb, run={"run_id": "run-x"}, entity=UNIMPLEMENTED_ENTITY)
     assert_speaks_the_contract(response)
     assert (response["outcome"], response["reason_code"]) == ("unsupported", "not_implemented")
+
+
+@pytest.mark.parametrize("verb", ["bootstrap", "seed", "ensure", "absent"])
+def test_c17_omitting_the_entity_on_a_verb_that_writes_to_one_is_refused(world, verb):
+    response = call(contract_version="1.0.0", verb=verb, run={"run_id": "run-x"})
+    assert_speaks_the_contract(response)
+    assert (response["outcome"], response["reason_code"]) == ("refused", "unknown_entity")
 
 
 def test_an_unknown_verb_is_unsupported(world):

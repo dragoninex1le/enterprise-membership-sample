@@ -15,6 +15,7 @@ import os
 
 import aws
 import catalogue
+import datasets
 import slots
 from envelope import CONTRACT_VERSIONS, ContractError, adapter_version
 
@@ -71,6 +72,10 @@ def answer(slot_name: str, slot_cfg: dict) -> tuple[dict, list[str]]:
         "environment_class": slot_cfg["environment_class"],
         "verbs": list(catalogue.INSTALL_VERBS),
         "entities": catalogue.declared(),
+        "resource_types": ["tenant"],
+        # porth.org is seeded; the rest name the pieces of the platform baseline bootstrap reports.
+        "extension_types": ["porth.org", "porth.permission", "porth.role", "porth.role-grant", "porth.claim-mapping"],
+        "dataset_forms": list(datasets.FORMS),
         "async": False,
     }
     return result, [note] if note else []

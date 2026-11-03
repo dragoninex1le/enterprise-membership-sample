@@ -5,6 +5,7 @@ Each of these has cost a deploy somewhere in this system, or would have:
 * **aws:SourceAccount** in a resource policy for a role principal denies every call (the key only
   exists for service-to-service requests). PROVISIONING-CONTRACT §1.1's own example carries it.
 * **Scan through a LeadingKeys condition** reads every slot: ForAllValues over an absent key is true.
+  So Scan is granted on the tenants table alone, for reset (PRF-14), and denied on everything else.
 * **porth-* as a table wildcard** also matches the sample app's own table on main.
 * **Non-ASCII** in an IAM description once rolled back the whole ffug stack.
 """
@@ -78,18 +79,52 @@ def test_the_execution_role_has_no_data_access(tpl):
             assert not any(a.startswith("dynamodb:") for a in _actions(st)), st
 
 
-def test_nothing_ever_allows_scan(tpl):
-    for _, st in _statements(tpl):
-        if st["Effect"] == "Allow":
-            assert not {"dynamodb:Scan", "dynamodb:*", "*"} & set(_actions(st)), st
+def test_only_the_tenants_table_may_ever_be_scanned(tpl):
+    for name, st in _statements(tpl):
+        if st["Effect"] != "Allow":
+            continue
+        assert not {"dynamodb:*", "*"} & set(_actions(st)), st
+        if "dynamodb:Scan" in _actions(st):
+            assert (name, st.get("Sid")) == ("DataRole", "ScanTheTenantsTable"), st
+            assert _actions(st) == ["dynamodb:Scan"], "the scan grant carries nothing else"
+            assert "table/${PorthTenantsTable}" in str(st["Resource"])
+            assert "index" not in str(st["Resource"])
+    (deny,) = [st for n, st in _statements(tpl) if n == "DataRole" and st.get("Sid") == "ScanNothingElse"]
+    assert deny["Effect"] == "Deny" and _actions(deny) == ["dynamodb:Scan"]
+    assert "table/${PorthTenantsTable}" in str(deny["NotResource"])
 
 
-def test_the_data_role_is_read_only_and_denies_scan(tpl):
+def test_the_data_role_reads_porth_writes_single_items_and_denies_partiql(tpl):
     stmts = [st for n, st in _statements(tpl) if n == "DataRole" and "Service" not in str(st.get("Principal", ""))]
     allowed = {a for st in stmts if st["Effect"] == "Allow" for a in _actions(st) if a.startswith("dynamodb:")}
     denied = {a for st in stmts if st["Effect"] == "Deny" for a in _actions(st)}
-    assert allowed == {"dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:Query", "dynamodb:DescribeTable"}
-    assert "dynamodb:Scan" in denied
+    assert allowed == {"dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:Query", "dynamodb:DescribeTable",
+                       "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Scan"}
+    assert not any(a.startswith(("dynamodb:BatchWrite", "dynamodb:Transact")) for a in allowed)
+    assert {"dynamodb:Scan", "dynamodb:PartiQLSelect", "dynamodb:ExecuteStatement"} <= denied
+
+
+def test_the_data_role_writes_porths_four_tables_and_no_index(tpl):
+    (writes,) = [st for n, st in _statements(tpl) if n == "DataRole" and st.get("Sid") == "WritePorthTables"]
+    tables = {str(r) for r in writes["Resource"]}
+    assert len(tables) == 4
+    assert any("ClaimMapping" in t for t in tables), "bootstrap writes the platform claim mapping; reset removes others"
+    assert not any("index" in t for t in tables), "writes go to tables; indexes are read"
+
+
+def test_the_execution_role_reads_the_install_auth_record_and_writes_no_parameter(tpl):
+    (auth,) = [st for n, st in _statements(tpl) if n == "ExecutionRole" and st.get("Sid") == "ReadPorthAuth"]
+    assert _actions(auth) == ["ssm:GetParameter"]
+    assert str(auth["Resource"]).rstrip("'}").endswith(":parameter/porth/auth")
+    assert not any(a.startswith("ssm:Put") or a.startswith("ssm:Delete") for _, st in _statements(tpl) for a in _actions(st))
+
+
+def test_the_data_role_publishes_on_porths_bus_and_no_other(tpl):
+    (events,) = [st for n, st in _statements(tpl) if n == "DataRole" and st.get("Sid") == "PorthEventsOnly"]
+    assert _actions(events) == ["events:PutEvents"]
+    assert "event-bus/${PorthEventBus}" in str(events["Resource"])
+    fn = tpl["Resources"]["AdapterFunction"]["Properties"]["Environment"]["Variables"]
+    assert fn["PORTH_EVENT_BUS"] == {"Ref": "PorthEventBus"}, "porth-common's default bus is not Porth's"
 
 
 def test_porth_tables_are_named_never_wildcarded(raw):
@@ -102,6 +137,16 @@ def test_the_cross_account_permission_is_off_unless_a_caller_is_named(tpl):
     assert perm["Condition"] == "HasCaller"
     assert perm["Properties"]["Principal"] == {"Ref": "CallerRoleArn"}
     assert tpl["Parameters"]["CallerRoleArn"]["Default"] == ""
+    off = tpl["Conditions"]["HasCaller"]["Not"][0]["Or"]
+    assert {"Equals": [{"Ref": "CallerRoleArn"}, ""]} in off
+    assert {"Equals": [{"Ref": "CallerRoleArn"}, "none"]} in off, "the deploy's release pass"
+
+
+def test_the_deploy_releases_the_caller_grant_before_granting_it():
+    wf = (TEMPLATE.parents[2] / ".github/workflows/deploy-provisioning-adapter.yml").read_text("utf-8")
+    release, grant = wf.index('deploy "CallerRoleArn=none"'), wf.index('deploy "${CALLER_ARG[@]}"')
+    assert release < grant, "the stale grant must go before a fresh one can be added"
+    assert "CallerBinding" not in wf
 
 
 def test_the_default_slot_map_is_single_slot_until_prf_19(tpl):
@@ -115,3 +160,19 @@ def test_every_sid_is_alphanumeric(tpl):
     for _, st in _statements(tpl):
         if "Sid" in st:
             assert re.fullmatch(r"[A-Za-z0-9]+", st["Sid"]), st["Sid"]
+
+
+def test_prawfs_bookkeeping_has_its_own_table_kept_out_of_porths(tpl):
+    """Richard, 2026-10-25: a test tool's rows do not belong in the application's tables."""
+    table = tpl["Resources"]["AuditTable"]
+    assert table["Type"] == "AWS::DynamoDB::Table"
+    assert table["DeletionPolicy"] == "RetainExceptOnCreate" and table["UpdateReplacePolicy"] == "Retain", "the record of what prawf did"
+    props = table["Properties"]
+    assert props["TableName"] == "prawf-adapter-audit"
+    assert [k["AttributeName"] for k in props["KeySchema"]] == ["PK", "SK"]
+    assert "GlobalSecondaryIndexes" not in props
+    fn = tpl["Resources"]["AdapterFunction"]["Properties"]["Environment"]["Variables"]
+    assert fn["PRAWF_AUDIT_TABLE"] == {"Ref": "AuditTable"}
+    (grant,) = [st for n, st in _statements(tpl) if n == "DataRole" and st.get("Sid") == "PrawfAuditTable"]
+    assert grant["Resource"] == {"GetAtt": "AuditTable.Arn"}
+    assert "dynamodb:Scan" not in _actions(grant)

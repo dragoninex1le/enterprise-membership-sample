@@ -5,25 +5,29 @@ only the four fields the schema allows (`id`, `description`, `verbs`, `destructi
 here so the mapping lives next to the code that will one day act on it, not in a document that
 drifts from it.
 
-**Every entity declares `verbs: []` in this slice.** Conformance C1: whatever is declared must be
-genuinely implemented. The install-level verb list cannot be empty (the schema's `minItems: 1`),
-so it is `["capabilities"]`; a per-entity list can, and saying so is the honest answer. Each later
-slice flips one cell of the verb x entity matrix from `[]` to implemented. `planned` records which
+**An entity declares only the verbs it implements.** Conformance C1: whatever is declared must be
+genuinely implemented. PRF-9 declared `verbs: []` everywhere, with `["capabilities"]` the honest
+install list (the schema's `minItems: 1`). Each slice flips one cell of the verb x entity matrix
+from `[]` to implemented - PRF-12 and PRF-15 flipped `porth-tenant`'s `seed` and `teardown`, PRF-11
+`porth-platform`'s `bootstrap`, and PRF-14 `reset` on the three entities that can return to it. `planned` records which
 slice, and `ruled_out` records every verb that will never apply, with its reason — a verb ruled out
 with a reason is a finding; a verb ruled out silently is a gap.
 
 Key shapes: `{s}` is the slot's env_scope (ADR-Z8), `{tid}` a tenant id. Partition keys carry the
 scope; sort keys never do. Attribute case differs by table and is part of the shape.
 
-**Not declared: `porth-org`.** Whether an org is its own entity (Option A) or an attribute of the
-tenant (Option B) is deferred to the live-data extraction. Declaring it now would pre-empt that.
+**`porth-org` is its own entity** - the porth-org ruling, Option A (Richard, 2026-10-23). An
+organisation is seeded before the tenants that belong to it, and torn down after them.
+
+**A tenant's IdP config is part of the tenant**, not an entity of its own (Richard, 2026-10-25): it
+is an attribute of the tenant row (`idp_config_override`), set with the tenant.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 #: Install-level verbs actually implemented. Grows one verb at a time, with the slice that adds it.
-INSTALL_VERBS: tuple[str, ...] = ("capabilities",)
+INSTALL_VERBS: tuple[str, ...] = ("capabilities", "bootstrap", "seed", "reset", "teardown")
 
 
 @dataclass(frozen=True)
@@ -48,7 +52,7 @@ class Entity:
 ENTITIES: tuple[Entity, ...] = (
     Entity(
         id="porth-platform",
-        description="Porth-installed platform state. Verified, never written.",
+        description="Porth's platform baseline. Checked, and completed from Porth's own install definition.",
         destructive=False,
         resources=(
             "tenants: PK=ENV#{s}#ORG#{uuid} SK=METADATA (platform org)",
@@ -56,38 +60,32 @@ ENTITIES: tuple[Entity, ...] = (
             "permissions: pk=ENV#{s}#TENANT#platform#NS#porth-platform sk=PERM#{key}",
             "roles: pk=ENV#{s}#TENANT#platform sk=ROLE#{uuid} (platform-admin)",
             "roles: pk=ENV#{s}#TENANT#platform#ROLE#{uuid} sk=PERM#{key} (grants)",
+            "claim-mapping-configs: PK=ENV#{s}#TENANT#platform SK=VERSION#{n:06d}",
         ),
-        planned={"bootstrap": "PRF-11 - dry_run only: verify the install, write nothing"},
         ruled_out={
             "reset": "resetting the platform tenant breaks every subsequent sign-in, including the one that would report it",
-            "seed": "porth-install owns this data; the adapter verifies it",
-            "teardown": "nothing here is created by a run",
+            "seed": "the baseline is the target's to define (D7); bootstrap writes it",
+            "teardown": "the baseline is no run's fixture; nothing here is labelled with a run",
         },
+        verbs=("bootstrap",),
     ),
     Entity(
         id="porth-tenant",
         description="A tenant beyond the install's own template, as a test fixture.",
         destructive=True,
         resources=(
-            "tenants: PK=ENV#{s}#TENANT#{tid} SK=METADATA",
-            "tenants: PK=ENV#{s}#ORG#{uuid} SK=METADATA (org, pending the porth-org ruling)",
+            "tenants: PK=ENV#{s}#TENANT#{tid} SK=METADATA (in an existing porth-org)",
+            "roles: pk=ENV#{s}#TENANT#{tid} sk=ROLE#{uuid} (tenant-admin) + pk=...#ROLE#{uuid} sk=PERM#{key}",
+            "permissions: pk=ENV#{s}#TENANT#{tid}#NS#porth-tenant sk=PERM#{key}",
         ),
-        planned={
-            "seed": "PRF-12",
-            "reset": "PRF-14",
-            "teardown": "PRF-15",
-        },
+        verbs=("seed", "reset", "teardown"),
     ),
     Entity(
-        id="porth-idp-config",
-        description="Porth's stored record of a tenant's IdP. Not the IdP itself.",
+        id="porth-org",
+        description="An organisation for fixture tenants. Seeded before them, torn down after them.",
         destructive=True,
-        resources=(
-            "tenants: PK=ENV#{s}#TENANT#{tid} SK=METADATA, attribute idp_config_override",
-        ),
-        planned={"seed": "PRF-12/13 area", "reset": "PRF-14"},
-        # Shares a physical item with porth-tenant. Both must write with UpdateItem on disjoint
-        # attributes: a PutItem from either would erase the other's half of the row.
+        resources=("tenants: PK=ENV#{s}#ORG#{uuid} SK=METADATA, gsi1pk=ENV#{s}#ORG_SLUG#{slug}",),
+        verbs=("seed", "reset", "teardown"),
     ),
     Entity(
         id="porth-claim-mapping",
@@ -96,7 +94,7 @@ ENTITIES: tuple[Entity, ...] = (
         resources=(
             "claim-mapping-configs: PK=ENV#{s}#TENANT#{tid} SK=VERSION#{n:06d} (compiled_hash computed, never supplied)",
         ),
-        planned={"seed": "PRF-13", "reset": "PRF-14"},
+        verbs=("seed", "reset", "teardown"),
     ),
     Entity(
         id="porth-app-permission",
@@ -120,8 +118,10 @@ ENTITIES: tuple[Entity, ...] = (
         id="porth-role",
         description="Arranged roles, such as a role with no grants for a denial test.",
         destructive=True,
-        resources=("roles: pk=ENV#{s}#TENANT#{tid} sk=ROLE#{uuid}",),
-        planned={"ensure": "PRF-18", "absent": "PRF-18"},
+        resources=("roles: pk=ENV#{s}#TENANT#{tid} sk=ROLE#{uuid} (not a system role)",),
+        # PRF-18 seeds arranged roles (never system roles); PRF-14's reset removes every one of them,
+        # and the seeded tenant-admin - a system role - stays.
+        verbs=("seed", "reset", "teardown"),
     ),
     Entity(
         id="porth-idp",

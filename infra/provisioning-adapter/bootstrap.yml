@@ -10,11 +10,14 @@ Description: >
 # ONLY with prawf-adapter-boundary attached, and may never remove it. The boundary lives here, outside
 # the pipeline's reach.
 #
-# The boundary is wider than the runner's, because the adapter's job is data access. It still caps the
-# adapter at: its own log group, its own slot map, reading the Porth stack's version tag, assuming its
-# own data role, and Porth's four table FAMILIES by name - never porth-*, which on main also matches
-# the sample app's own table. Scan and PartiQL are denied outright: ForAllValues over the absent
-# LeadingKeys of a Scan evaluates true and would read every slot.
+# What lives here is what DEPLOYS the adapter - the deploy role, the CloudFormation execution role,
+# and the scope the pipeline may grant (prawf-adapter-boundary). What the adapter may DO at runtime
+# lives in template.yml and changes through the pipeline, never by hand: the boundary names services
+# and resource families - the adapter's log group and roles, Porth's and the adapter's parameters
+# (read), Porth's stack (read), the data plane of Porth's four table families and of prawf's own
+# prawf-adapter-* tables, Porth's event buses - and nothing in IAM. The execution role may create
+# prawf-adapter-* tables, and never a Porth one. A runtime change that stays inside that scope needs no bootstrap deploy; one
+# that does not fails tests/test_bootstrap.py in the PR, before it can be deployed.
 
 Parameters:
   GitHubRepo:
@@ -32,6 +35,11 @@ Parameters:
     Description: The Components account, which owns the estyn-prawf CodeArtifact domain.
 
 Resources:
+  # What the pipeline may grant the adapter - a deploy-time scope, not the adapter's runtime policy
+  # (Richard, 2026-10-24: this file holds what is required to deploy the adapter; the permissions to
+  # execute it live in template.yml and change through the pipeline). So it names services and
+  # resource families, never which action a verb needs: template.yml narrows every grant to what the
+  # adapter actually does, and tests/test_bootstrap.py fails a PR whose template reaches outside this.
   PrawfAdapterBoundary:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -40,31 +48,40 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Sid: OwnLogGroup
+          - Sid: AdapterLogs
             Effect: Allow
             Action:
               - logs:CreateLogStream
               - logs:PutLogEvents
             Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/porth-provisioning-adapter:*
-          - Sid: OwnSlotMap
+          - Sid: ReadPorthAndAdapterParameters
             Effect: Allow
-            Action: ssm:GetParameter
-            Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/prawf/adapter/*
-          - Sid: PorthStackVersionTag
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+            Resource:
+              - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/*
+              - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/prawf/adapter/*
+          - Sid: ReadThePorthStack
             Effect: Allow
             Action: cloudformation:DescribeStacks
             Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${PorthStackName}/*
-          - Sid: AssumeOwnDataRole
+          - Sid: AssumeAdapterRoles
             Effect: Allow
             Action: sts:AssumeRole
             Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/porth-provisioning-adapter-*
-          - Sid: PorthTableFamilies
+          # Porth's data, never its tables: every data-plane call on the four families and their
+          # indexes - never porth-*, which on main also matches the sample app's own table - and no
+          # CreateTable, UpdateTable or DeleteTable.
+          - Sid: PorthDataPlane
             Effect: Allow
             Action:
+              - dynamodb:DescribeTable
               - dynamodb:GetItem
               - dynamodb:BatchGetItem
               - dynamodb:Query
-              - dynamodb:DescribeTable
+              - dynamodb:Scan
+              - dynamodb:ConditionCheckItem
               - dynamodb:PutItem
               - dynamodb:UpdateItem
               - dynamodb:DeleteItem
@@ -74,15 +91,24 @@ Resources:
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-roles-*
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-permissions-*
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-claim-mapping-configs-*
-          - Sid: NeverScan
-            Effect: Deny
+          # prawf's own bookkeeping: which run wrote what (the audit table, template.yml).
+          - Sid: PrawfAdapterTables
+            Effect: Allow
             Action:
-              - dynamodb:Scan
-              - dynamodb:PartiQLSelect
-              - dynamodb:ExecuteStatement
-              - dynamodb:BatchExecuteStatement
-              - dynamodb:ExecuteTransaction
-            Resource: '*'
+              - dynamodb:DescribeTable
+              - dynamodb:GetItem
+              - dynamodb:BatchGetItem
+              - dynamodb:Query
+              - dynamodb:ConditionCheckItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:BatchWriteItem
+            Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/prawf-adapter-*
+          - Sid: PorthEventBuses
+            Effect: Allow
+            Action: events:PutEvents
+            Resource: !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/porth-events-*
 
   DeployRole:
     Type: AWS::IAM::Role
@@ -148,6 +174,17 @@ Resources:
                 Resource:
                   - !Sub arn:aws:codeartifact:${AWS::Region}:${PrawfDomainOwner}:domain/estyn-prawf
                   - !Sub arn:aws:codeartifact:${AWS::Region}:${PrawfDomainOwner}:repository/estyn-prawf/estyn-prawf-py
+              # PRF-12: porth-common, which the adapter writes Porth's rows with. Same account as
+              # estyn-prawf; the sample app's pipeline already reads this repository from EMS.
+              - Sid: ReadPorthCommon
+                Effect: Allow
+                Action:
+                  - codeartifact:GetAuthorizationToken
+                  - codeartifact:GetRepositoryEndpoint
+                  - codeartifact:ReadFromRepository
+                Resource:
+                  - !Sub arn:aws:codeartifact:${AWS::Region}:${PrawfDomainOwner}:domain/porth
+                  - !Sub arn:aws:codeartifact:${AWS::Region}:${PrawfDomainOwner}:repository/porth/porth-py
               - Sid: CodeArtifactBearerToken
                 Effect: Allow
                 Action: sts:GetServiceBearerToken
@@ -177,6 +214,13 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
+              # template.yml uses the SAM transform, and with --role-arn it is THIS role that expands
+              # it. Without this the change set fails before any resource exists: "not authorized to
+              # perform: cloudformation:CreateChangeSet on ...:aws:transform/Serverless-2016-10-31".
+              - Sid: ExpandTheSamTransform
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31
               - Sid: GrantOnlyWithTheBoundary
                 Effect: Allow
                 Action:
@@ -236,6 +280,14 @@ Resources:
                 Resource:
                   - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/porth-provisioning-adapter
                   - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/porth-provisioning-adapter:*
+              # prawf's own tables (the audit table, template.yml): created, changed and removed with
+              # the stack. Never Porth's - the pipeline never creates or alters an application table.
+              - Sid: TheAdapterTables
+                Effect: Allow
+                Action: dynamodb:*
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/prawf-adapter-*
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/prawf-adapter-*/*
               - Sid: TheSlotMap
                 Effect: Allow
                 Action:

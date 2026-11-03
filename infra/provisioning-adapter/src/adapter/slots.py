@@ -31,13 +31,27 @@ _SLOT_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 ENVIRONMENT_CLASSES = ("disposable", "protected")
 
-#: Read-only in PRF-9. Writes arrive with the first write verb, reviewed in that slice.
 READ_ACTIONS = ("dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:Query", "dynamodb:DescribeTable")
+#: PRF-12: the first write verb. Single-item writes only - every one of them carries a partition
+#: key, so LeadingKeys holds it to the slot. Batch and transactional writes are not granted: Porth's
+#: create path uses neither, and each would be one more shape to reason about.
+WRITE_ACTIONS = ("dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem")
+#: Porth's repositories publish an event for every write and raise if they cannot (porth-common
+#: 0.0.9 `_put_event`), so a seed that may not publish would write a row and then fail. The role
+#: policy names Porth's bus; the session only has to not take it away.
+EVENT_ACTIONS = ("events:PutEvents",)
 
 #: `ForAllValues` over an absent key evaluates TRUE, and a Scan carries no LeadingKeys — so a Scan
-#: would pass a LeadingKeys-conditioned Allow and read every slot. Denied outright, as is PartiQL.
-NEVER = ("dynamodb:Scan", "dynamodb:PartiQLSelect", "dynamodb:ExecuteStatement",
+#: would pass a LeadingKeys-conditioned Allow and read every slot. Never granted through that Allow,
+#: and PartiQL is denied outright.
+NEVER = ("dynamodb:PartiQLSelect", "dynamodb:ExecuteStatement",
          "dynamodb:BatchExecuteStatement", "dynamodb:ExecuteTransaction")
+#: PRF-14 (Richard, 2026-10-24): reset finds every tenant in the slot the way Porth's tenant directory
+#: does - by scanning the tenants table - because a tenant without Porth's list index is still one
+#: every login loads. So Scan is granted on that one table and denied on every other. IAM cannot hold
+#: a Scan to one slot: it can READ other slots' rows in that table, never write them (writes stay
+#: LeadingKeys-bound), and reset.scan_slot filters to the slot before anything acts on a row.
+SCAN = "dynamodb:Scan"
 
 
 class SlotMapError(Exception):
@@ -108,6 +122,13 @@ def resolve(slot_map: dict[str, dict], requested: object) -> tuple[str, dict]:
     return requested, slot_map[requested]
 
 
+def tenants_table_arn() -> str:
+    """Porth's tenants table, in the account the data role lives in."""
+    account = os.environ["DATA_ROLE_ARN"].split(":")[4]
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
+    return f"arn:aws:dynamodb:{region}:{account}:table/{os.environ['PORTH_TENANTS_TABLE']}"
+
+
 def session_policy(env_scope: str) -> str:
     """The inline policy that narrows the data role to one slot for one call."""
     if not _SLOT_NAME.fullmatch(env_scope):
@@ -119,28 +140,35 @@ def session_policy(env_scope: str) -> str:
             {
                 "Sid": "OneSlotOnly",
                 "Effect": "Allow",
-                "Action": list(READ_ACTIONS),
+                "Action": list(READ_ACTIONS + WRITE_ACTIONS),
                 "Resource": "*",
                 "Condition": {
                     "ForAllValues:StringLike": {"dynamodb:LeadingKeys": [f"ENV#{env_scope}#*"]},
                 },
             },
-            {"Sid": "NeverScan", "Effect": "Deny", "Action": list(NEVER), "Resource": "*"},
+            {"Sid": "PorthEvents", "Effect": "Allow", "Action": list(EVENT_ACTIONS), "Resource": "*"},
+            {"Sid": "ScanTheTenantsTable", "Effect": "Allow", "Action": [SCAN], "Resource": tenants_table_arn()},
+            {"Sid": "ScanNothingElse", "Effect": "Deny", "Action": [SCAN], "NotResource": tenants_table_arn()},
+            {"Sid": "NeverPartiQL", "Effect": "Deny", "Action": list(NEVER), "Resource": "*"},
         ],
     }, separators=(",", ":"))
 
 
-def data_session(env_scope: str):
-    """A DynamoDB client whose credentials reach one slot's rows and nothing else."""
+def data_credentials(env_scope: str) -> dict:
+    """Credentials that reach one slot's rows and nothing else, as boto3 keyword arguments."""
     creds = aws.client("sts").assume_role(
         RoleArn=os.environ["DATA_ROLE_ARN"],
         RoleSessionName=f"prawf-{env_scope}"[:64],
         Policy=session_policy(env_scope),
         DurationSeconds=900,
     )["Credentials"]
-    return aws.client(
-        "dynamodb",
-        aws_access_key_id=creds["AccessKeyId"],
-        aws_secret_access_key=creds["SecretAccessKey"],
-        aws_session_token=creds["SessionToken"],
-    )
+    return {
+        "aws_access_key_id": creds["AccessKeyId"],
+        "aws_secret_access_key": creds["SecretAccessKey"],
+        "aws_session_token": creds["SessionToken"],
+    }
+
+
+def data_session(env_scope: str):
+    """A DynamoDB client whose credentials reach one slot's rows and nothing else."""
+    return aws.client("dynamodb", **data_credentials(env_scope))

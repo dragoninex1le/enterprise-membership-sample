@@ -4,9 +4,12 @@ Invoked directly by ARN (PROVISIONING-CONTRACT §1.1). There is no HTTP surface:
 request envelope, and the return value IS the response envelope. No API-Gateway wrapping in either
 direction — one shape, so no caller ever has to double-decode.
 
-This slice implements `capabilities` and nothing else. Every other verb answers `unsupported` with
-`not_implemented`, which prawf reads as "skip", not "fail" (D3). That is the honest answer, and C1
-forbids any other.
+Implemented: `capabilities` (PRF-9); `seed` and `teardown` on `porth-org` and `porth-tenant`
+(PRF-12, PRF-15); `bootstrap` on `porth-platform` (PRF-11); and `reset` on `porth-claim-mapping`,
+`porth-tenant` and `porth-org` (PRF-14); `seed`/`teardown` on `porth-claim-mapping` (PRF-13);
+and `seed`/`teardown` on `porth-role` (PRF-18).
+Every other verb x entity answers `unsupported` with `not_implemented`, which prawf reads as "skip",
+not "fail" (D3). That is the honest answer, and C1 forbids any other.
 
 Order of checks, each the stronger failure first:
   1. the request is an envelope, in a contract version we share      -> refused
@@ -21,6 +24,12 @@ import time
 
 import capabilities
 import catalogue
+import porth_claim_mapping
+import porth_org
+import porth_platform
+import porth_role
+import porth_tenant
+import reset
 import slots
 from envelope import CONTRACT_VERSIONS, VERBS, ContractError, negotiate, not_ok, ok
 
@@ -46,6 +55,59 @@ def _log(request: object, response: dict) -> None:
         "reason_code": response.get("reason_code"),
         "duration_ms": response["diagnostics"]["duration_ms"],
     }))
+
+
+SEEDS = {porth_org.ENTITY: porth_org.seed, porth_tenant.ENTITY: porth_tenant.seed,
+         porth_claim_mapping.ENTITY: porth_claim_mapping.seed, porth_role.ENTITY: porth_role.seed}
+#: Ordered: arranged roles and the claim mapping go before their tenant, a tenant before its organisation.
+TEARDOWNS = {porth_role.ENTITY: porth_role.teardown, porth_claim_mapping.ENTITY: porth_claim_mapping.teardown,
+             porth_tenant.ENTITY: porth_tenant.teardown, porth_org.ENTITY: porth_org.teardown}
+
+#: §3.4, C17: these carry entity-specific data, so omitting the entity is refused - there is nothing
+#: to infer a destination from. Only teardown and reset may omit it.
+NEEDS_ENTITY = ("bootstrap", "seed", "ensure", "absent")
+
+
+def _dispatch(verb: str, entity: str | None, request: dict, slot_cfg: dict) -> tuple[list, list[str]]:
+    """One implemented cell of the verb x entity matrix, or `unsupported` (C1, C2)."""
+    if entity is None and verb in NEEDS_ENTITY:
+        raise ContractError("refused", "unknown_entity", f"{verb} must name the entity it writes to (§3.4)")
+    env_scope = slot_cfg["env_scope"]
+    run = request.get("run") if isinstance(request.get("run"), dict) else {}
+    run_id = run.get("run_id")
+    payload = request.get("payload")
+    if verb == "bootstrap" and entity == porth_platform.ENTITY:
+        return porth_platform.bootstrap(env_scope, _run_id(run_id), bool(run.get("dry_run")), payload)
+    # §3.4: reset may omit the entity too - every resettable entity, in reset.ORDER.
+    if verb == "reset" and (entity is None or entity in reset.RESETS):
+        return reset.reset(entity, slot_cfg, _run_id(run_id), bool(run.get("dry_run")), payload)
+    if verb == "seed" and entity in SEEDS:
+        return SEEDS[entity](env_scope, _run_id(run_id), bool(run.get("dry_run")), payload)
+    # §3.4: teardown may omit the entity, meaning every entity that supports it - in TEARDOWN order,
+    # tenants before the organisations they belong to.
+    if verb == "teardown" and (entity is None or entity in TEARDOWNS):
+        target = payload.get("run_id") if isinstance(payload, dict) else None
+        if not isinstance(target, str) or not target:
+            raise ContractError("refused", "scope_violation", "teardown needs payload.run_id: the run whose writes to remove")
+        results, notes = [], []
+        for name, fn in TEARDOWNS.items():
+            if entity in (None, name):
+                r, n = fn(env_scope, _run_id(run_id), target)
+                results += r
+                notes += n
+        return results, notes
+    raise ContractError(
+        "unsupported", "not_implemented",
+        f"verb {verb!r} is not implemented by this adapter at this version"
+        + (f" for entity {entity!r}" if entity else ""),
+    )
+
+
+def _run_id(value: object) -> str:
+    # D6: everything written is labelled with the run. Without one there is no label to write.
+    if not isinstance(value, str) or not value:
+        raise ContractError("refused", "scope_violation", "a mutating call needs run.run_id (§2.1)")
+    return value
 
 
 def handler(event, context):  # noqa: ARG001 - Lambda signature
@@ -74,10 +136,20 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
                     "refused", "unknown_entity",
                     f"entity {entity!r} is not in this target's catalogue",
                 )
-            raise ContractError(
-                "unsupported", "not_implemented",
-                f"verb {verb!r} is not implemented by this adapter at this version",
-            )
+            try:
+                results, notes = _dispatch(verb, entity, request, slot_cfg)
+            except ContractError:
+                raise
+            except Exception as e:  # noqa: BLE001 - silence is never an outcome (§9)
+                # Porth's code raised part way. The ledger was written ahead of every write, so the
+                # run can still be torn down; say so, and say what failed - never a credential, which
+                # boto's messages do not carry.
+                raise ContractError(
+                    "failed", "upstream_error",
+                    f"{verb} on {entity or 'every entity'} failed part way: {type(e).__name__}: {str(e)[:300]}. "
+                    "Anything written is labelled with the run; tear it down to remove it.",
+                ) from e
+            response = ok(version, results, started, notes)
     except ContractError as e:
         response = not_ok(version, e, started)
 
