@@ -52,6 +52,7 @@ jobs:
   prove:
     name: A - seeded from the bus, B - synchronous call, C - environment isolation
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     environment: sample-app-deploy
     env:
       PORTH_STACK_NAME: ${{ vars.PORTH_STACK_NAME || 'serverlessrepo-porth-components' }}
