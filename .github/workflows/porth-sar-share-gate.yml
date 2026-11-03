@@ -1,0 +1,213 @@
+name: Porth SAR-share security gate (report-only)
+
+# PORTH-526 / ADR-Z10 — the gate on the SAR *share* (not the publish).
+#
+# A candidate Porth version sits private in SAR until a black-box security run against the EMS
+# reference install is green on CRITICAL+HIGH; only then is it shared/promoted to consumer accounts.
+# This workflow runs the NON-destructive gate suites (Suite 1 security posture + Suite 2 install
+# conformance) from the private `porth-security-testbed` package (Components repo), evaluates
+# report/summary.json with `porth-sectest-gate`, and — in blocking mode — performs the share.
+#
+# Ships REPORT-ONLY (ADR-Z10): the gate ALWAYS exits 0 and the `serverlessrepo put-application-policy`
+# share step is guarded off. The CRITICAL+HIGH blocking flip happens once the BFF posture (PORTH-484)
+# is live. The gate logic (skip != pass, min executed-coverage) lives in the Components package
+# (testbed.gate, PORTH-519/527) so every consumer reuses it; this workflow only orchestrates.
+#
+# Destructive suites (3-7) and the pen test run separately against a network-contained ephemeral
+# slot (PORTH-456) under a Head-of-Security-signed RoE — NEVER from this reference-install gate.
+#
+# Prereq: run `porth-install.yml` for the candidate `sar_version` first (installs it into the EMS
+# reference install). This gate then validates that install and gates the share.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sar_version:
+        description: 'Candidate Porth SAR version being gated (for traceability)'
+        required: true
+        default: '0.0.6'
+      components_ref:
+        description: 'Components repo ref to install the testbed from'
+        required: false
+        default: 'main'
+      gate_mode:
+        description: 'report-only (default; never blocks/shares) or blocking'
+        required: false
+        default: 'report-only'
+        type: choice
+        options: [report-only, blocking]
+  workflow_call:
+    inputs:
+      sar_version:
+        required: true
+        type: string
+      components_ref:
+        required: false
+        default: 'main'
+        type: string
+      gate_mode:
+        required: false
+        default: 'report-only'
+        type: string
+
+permissions:
+  id-token: write      # only used by the (guarded) share step's AWS OIDC auth
+  contents: read
+
+concurrency:
+  group: porth-sar-share-gate-${{ inputs.sar_version }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  # Non-destructive gate set: severity-gated, MINUS every destructive suite marker (those run on
+  # the ephemeral slot, never the reference install).
+  GATE_MARKERS: (critical or high) and not (isolation_load or perf or adversarial or upgrade or pentest)
+
+jobs:
+  security-gate:
+    name: Security gate ${{ inputs.sar_version }} (${{ inputs.gate_mode }})
+    runs-on: ubuntu-latest
+    environment: porth-install
+    timeout-minutes: 20
+    steps:
+      - name: Checkout EMS (this repo)
+        uses: actions/checkout@v4
+
+      - name: Checkout Components (private — the testbed package)
+        uses: actions/checkout@v4
+        with:
+          repository: dragoninex1le/Components
+          ref: ${{ inputs.components_ref || 'main' }}
+          token: ${{ secrets.COMPONENTS_REPO_TOKEN }}
+          path: components
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the security testbed
+        run: pip install "./components/security-testbed[aws]"
+
+      - name: Render config.yaml (public reference-install URLs; secrets from env only)
+        run: |
+          set -euo pipefail
+          cd components/security-testbed
+          cat > config.yaml <<YAML
+          spa_origin:  "${{ vars.PORTH_SPA_ORIGIN }}"
+          api_base:    "${{ vars.PORTH_API_BASE }}"
+          proxy_base:  "${{ vars.PORTH_PROXY_BASE }}"
+          product_cookie_domain: "${{ vars.PORTH_COOKIE_DOMAIN }}"
+          other_product_origin:  ""
+          expect:
+            cookie_prefix: "__Secure-"
+            samesite: "Lax"
+            cache_ttl_seconds: 30
+            required_headers: ["strict-transport-security","content-security-policy","x-frame-options","x-content-type-options"]
+          endpoints:
+            login: "/auth/login"
+            callback: "/auth/callback"
+            logout: "/auth/logout"
+            me: "/auth/me"
+            api_read: "/users/me"
+            api_write: "/users/me/profile"
+            discovery: "/.well-known/openid-configuration"
+            platform_read: "/platform/tenants"
+            platform_object: ""
+            idp_register: ""
+            idp_config: ""
+            idp_metadata_refresh: ""
+          login:
+            mode: "browser"
+            idp_selectors:
+              username: "input[name='username'], input[name='email'], input#username"
+              password: "input[name='password'], input#password"
+              submit: "button[type='submit'], button[name='action']"
+            tenant_a: { tenant_id: "acme", username: "test-admin@acme.example", password_env: "PORTH_TESTBED_TENANT_A_PASSWORD" }
+            tenant_b: { tenant_id: "globex", username: "test-admin@globex.example", password_env: "PORTH_TESTBED_TENANT_B_PASSWORD" }
+          install:
+            stack_name: "${{ vars.PORTH_STACK_NAME }}"
+            region: "${{ env.AWS_REGION }}"
+            expected_params: []
+            required_params: []
+            expected_outputs: []
+            session_table: ""
+          YAML
+          echo "config.yaml rendered (blank values skip-clean)."
+
+      - name: Run non-destructive gate suites
+        id: run
+        continue-on-error: true   # report-only: a red run must not fail the job; the gate decides
+        env:
+          PORTH_TESTBED_TENANT_A_PASSWORD: ${{ secrets.PORTH_TESTBED_TENANT_A_PASSWORD }}
+          PORTH_TESTBED_TENANT_B_PASSWORD: ${{ secrets.PORTH_TESTBED_TENANT_B_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cd components/security-testbed
+          python -m playwright install --with-deps chromium || echo "playwright install best-effort"
+          pytest -m "${GATE_MARKERS}" \
+            --html=report/security.html --self-contained-html \
+            --sectest-json report/summary.json || true
+
+      - name: Evaluate SAR-share gate
+        id: gate
+        run: |
+          set -euo pipefail
+          cd components/security-testbed
+          # porth-sectest-gate exits 0 in report-only regardless of verdict.
+          porth-sectest-gate report/summary.json --mode "${{ inputs.gate_mode || 'report-only' }}" || true
+          VERDICT=$(porth-sectest-gate report/summary.json --mode "${{ inputs.gate_mode || 'report-only' }}" --json \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])')
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          echo "Gate verdict: $VERDICT (mode: ${{ inputs.gate_mode || 'report-only' }})"
+
+      - name: Upload gate artifacts (HTML sign-off + JSON summary)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: porth-sar-gate-${{ inputs.sar_version }}
+          path: |
+            components/security-testbed/report/security.html
+            components/security-testbed/report/summary.json
+          if-no-files-found: warn
+
+      # ── Share step — GUARDED. Inert in report-only; only a green blocking run reaches it. ──
+      - name: Configure AWS credentials (OIDC) for the share
+        if: ${{ inputs.gate_mode == 'blocking' && steps.gate.outputs.verdict == 'green' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Share the SAR version (serverlessrepo put-application-policy)
+        if: ${{ inputs.gate_mode == 'blocking' && steps.gate.outputs.verdict == 'green' }}
+        env:
+          SAR_APP_ID: ${{ vars.PORTH_SAR_APP_ID }}
+          ORG_ID: ${{ vars.PORTH_SHARE_ORG_ID }}
+        run: |
+          set -euo pipefail
+          echo "Gate GREEN in blocking mode — sharing ${SAR_APP_ID} @ ${{ inputs.sar_version }}"
+          aws serverlessrepo put-application-policy \
+            --application-id "$SAR_APP_ID" \
+            --statements "Principals=*,PrincipalOrgIDs=${ORG_ID},Actions=Deploy DeployApplication UnshareApplication"
+          echo "✅ Shared."
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Porth SAR-share security gate"
+            echo ""
+            echo "- **Candidate:** ${{ inputs.sar_version }}"
+            echo "- **Mode:** ${{ inputs.gate_mode || 'report-only' }}"
+            echo "- **Verdict:** ${{ steps.gate.outputs.verdict }}"
+            echo "- **Gate set:** \`${GATE_MARKERS}\` (non-destructive only)"
+            echo ""
+            if [ "${{ inputs.gate_mode || 'report-only' }}" = "report-only" ]; then
+              echo "> Report-only — the share step is guarded off and the job never blocks."
+              echo "> The blocking flip happens once the BFF posture (PORTH-484) is live."
+            fi
+            echo ""
+            echo "Destructive suites (3–7) run separately on the ephemeral slot (PORTH-456) under RoE."
+          } >> "$GITHUB_STEP_SUMMARY"
