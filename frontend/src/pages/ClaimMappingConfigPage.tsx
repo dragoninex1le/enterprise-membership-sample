@@ -3,24 +3,11 @@ import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { usePorthContext } from '../context/PorthContext'
 import { useHasRole } from '../hooks/useRoles'
-import { PLATFORM_ADMIN } from '../constants'
+import { PLATFORM_ADMIN, DEFAULT_CLAIM_MAPPING } from '../constants'
 import { claimConfigsApi } from '../api/claimConfigs'
 import type { ClaimMappingConfig } from '../api/types'
 
-const DEFAULT_MAPPING = JSON.stringify(
-  {
-    schema_version: '1',
-    fields: {
-      roles: {
-        claim_key: 'https://porth.io/roles',
-        ops: [{ op: 'resolve_roles' }],
-      },
-    },
-    default_roles: [],
-  },
-  null,
-  2,
-)
+const DEFAULT_MAPPING = JSON.stringify(DEFAULT_CLAIM_MAPPING, null, 2)
 
 export default function ClaimMappingConfigPage() {
   const { currentUser } = usePorthContext()

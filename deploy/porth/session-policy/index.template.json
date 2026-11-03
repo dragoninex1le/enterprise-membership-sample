@@ -2,9 +2,9 @@
   "context_rules": [
     {
       "match": {
-        "host_pattern": "sample-api.porth-sample.ems.estynsoftware.cloud"
+        "host_pattern": "sample-api.{{ENV_SLOT}}.ems.estynsoftware.cloud"
       },
-      "context_hint": "sample"
+      "context_hint": "sample-{{ENV_SLOT}}"
     },
     {
       "match": {
@@ -14,13 +14,13 @@
     }
   ],
   "bindings": {
-    "sample:/sample": {
+    "sample-{{ENV_SLOT}}:/sample": {
       "role_types": [
         "tenant"
       ],
-      "role_arn": "arn:aws:iam::{account}:role/porth-sample-app-${role_type}-{{ENV}}",
+      "role_arn": "arn:aws:iam::{account}:role/ems-sample-app-${role_type}-{{ENV_SLOT}}",
       "session_policy_arns": [
-        "arn:aws:iam::{account}:policy/porth-sample-app-${role_type}-session-{{ENV}}"
+        "arn:aws:iam::{account}:policy/ems-sample-app-${role_type}-session-{{ENV_SLOT}}"
       ]
     },
     "porth:/": {

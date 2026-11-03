@@ -24,7 +24,12 @@ import boto3
 # harmless while nothing reads them and nothing writes them, a bug the moment
 # either changes. Hence this comment rather than silence.
 logger = logging.getLogger(__name__)
-TABLE_NAME = f"porth-sample-app-{os.environ.get('PORTH_ENVIRONMENT', 'dev')}"
+#: The app's table, named by the resource that creates it (PORTH-627).
+#:
+#: Was `f"porth-sample-app-{PORTH_ENVIRONMENT}"`, rebuilt independently in three
+#: modules. Passed from `!Ref SampleAppTable` there is one source, so the name
+#: cannot drift from the table — the same reason ffug reads FFUG_TABLE_NAME.
+TABLE_NAME = os.environ.get("SAMPLE_APP_TABLE_NAME", "")
 _table = None
 
 def _get_table():

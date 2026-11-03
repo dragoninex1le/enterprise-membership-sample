@@ -435,6 +435,10 @@ def test_the_probe_names_no_tenant_and_asks_only_about_its_own(porth, table):
         "ENV#prod#TENANT#globex",
         "ENV#prod#TENANT#__isolation_probe__",
         "ENV#prod#TENANT#globex-probe",
+        # The environment axis's own prefix-extension row (PORTH-627). Both
+        # halves of the key are written by different substitutions, so the
+        # tenant sibling above says nothing about this one.
+        "ENV#prod-probe#TENANT#globex",
         "ENV#__isolation_probe__#TENANT#globex",
     ]
 
@@ -541,7 +545,7 @@ def test_a_batch_that_answers_partially_fails_the_probe(porth, table):
     """
     narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
     porth.store.batch_get_item = lambda **_: {
-        "Responses": {"porth-ffug-dev": [{"pk": "ENV#prod#TENANT#acme", "sk": "PROJECTION"}]}
+        "Responses": {"ems-ffug-porth-sample": [{"pk": "ENV#prod#TENANT#acme", "sk": "PROJECTION"}]}
     }
 
     result = h.handler({"operation": "isolation_probe"})
@@ -584,6 +588,42 @@ def test_a_named_real_tenant_is_probed_and_refused(porth, table):
     assert result["probe_tenant"] == "globex"
     assert named["attempt"].startswith("query ENV#prod#TENANT#globex")
     assert named["allowed"] is False
+    assert result["isolated"] is True
+
+
+def test_a_named_real_environment_is_probed_and_refused(porth, table):
+    """The property EMS could not assert at all until it ran two environments.
+
+    `ENV#__isolation_probe__#…` above refuses a sentinel that exists nowhere —
+    honest, and vacuous in the way PORTH-598 objected to for tenants. This names
+    an environment that has its own stack, its own table, and this same tenant's
+    rows in it.
+
+    The query still goes to THIS environment's table, because that is the only
+    table these credentials can reach. The foreign half is the KEY, so the
+    denial is attributable to the session policy's $env narrowing rather than to
+    the resource layer — and FfugTenantRole's ceiling is ENV#*#TENANT#*, so an
+    un-narrowed session would be allowed to read exactly this partition.
+    """
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
+
+    result = call("isolation_probe", probe_environment="porth-dau")
+    named = attempt(result, "a real environment")
+
+    assert result["probe_environment"] == "porth-dau"
+    assert named["attempt"].startswith("query ENV#porth-dau#TENANT#acme")
+    assert named["allowed"] is False
+    assert result["isolated"] is True
+
+
+def test_naming_your_own_environment_adds_no_probe(porth, table):
+    """Same reasoning as the tenant case: it would assert 'deny' against the one
+    partition that must be allowed, and a typo would fail the whole strip."""
+    narrowed_to(table, "ENV#prod#TENANT#acme", porth.store)
+
+    result = call("isolation_probe", probe_environment="prod")
+
+    assert not [a for a in result["attempts"] if "a real environment" in a["attempt"]]
     assert result["isolated"] is True
 
 

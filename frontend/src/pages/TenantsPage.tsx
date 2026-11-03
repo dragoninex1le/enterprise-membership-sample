@@ -4,33 +4,83 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { organizationsApi } from '../api/organizations'
 import { tenantsApi } from '../api/tenants'
-import type { Organization, Tenant, CreateOrganizationRequest, CreateTenantRequest, UpdateTenantRequest, IdpConfig } from '../api/types'
+import type { Organization, Tenant, CreateOrganizationRequest, CreateTenantRequest, UpdateTenantRequest, TenantIdpConfig, TenantTier } from '../api/types'
 
-const ENV_TYPES = ['production', 'staging', 'development', 'sandbox'] as const
-type EnvType = typeof ENV_TYPES[number]
+const TIERS: readonly TenantTier[] = ['production', 'staging', 'development', 'sandbox']
 
 interface TenantRow extends Tenant { org_name: string }
 
 interface NewOrgForm { name: string; slug: string; admin_role_source_key: string }
 interface NewTenantForm {
-  org_id: string; tenant_id: string; display_name: string; environment_type: EnvType
+  org_id: string; tenant_id: string; display_name: string; tenant_tier: TenantTier
   admin_role_source_key: string
-  idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string
+  idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string; idp_org_id: string
 }
 interface EditTenantForm {
   display_name: string
-  idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string
+  idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string; idp_org_id: string
 }
 
 const EMPTY_ORG: NewOrgForm = { name: '', slug: '', admin_role_source_key: 'tenant-admin' }
-const EMPTY_TENANT: NewTenantForm = { org_id: '', tenant_id: '', display_name: '', environment_type: 'production', admin_role_source_key: 'tenant-admin', idp_enabled: false, idp_domain: '', idp_client_id: '', idp_audience: '' }
+const EMPTY_TENANT: NewTenantForm = { org_id: '', tenant_id: '', display_name: '', tenant_tier: 'production', admin_role_source_key: 'tenant-admin', idp_enabled: false, idp_domain: '', idp_client_id: '', idp_audience: '', idp_org_id: '' }
 
-function idpFromForm(f: { idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string }): IdpConfig | undefined {
-  if (!f.idp_enabled) return undefined
-  return { provider: 'auth0', domain: f.idp_domain, client_id: f.idp_client_id, audience: f.idp_audience || undefined }
+/** The Auth0 domain an operator typed, reduced to the host it names. */
+function hostOf(domain: string): string {
+  return domain.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
 }
 
-function IdpFields<T extends { idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string }>(
+/** Porth's neutral OIDC config, built from the form's Auth0 fields.
+ *
+ * Porth replaced `{ provider, domain }` with `{ issuer, jwks_uri, client_id,
+ * protocol }` (PORTH-488/S5) and ignores fields it does not know. The old body
+ * therefore lost its IdP silently and the create failed 422 on the fields that
+ * were missing.
+ *
+ * `protocol` is not optional in practice: the server defaults it to "oidc",
+ * which would store an Auth0 tenant as generic OIDC without the authorize and
+ * token endpoints its login needs. The create would succeed; the first login
+ * would not. `issuer` keeps its trailing slash — it has to equal the token's
+ * `iss`, and Auth0 issues `https://{domain}/`.
+ *
+ * `provider_org_id` is what makes a tenant login a TENANT login. Porth's auth
+ * proxy maps the host a user logs in at to this id and sends it to Auth0 as the
+ * organization; resolution then keys on (issuer, client_id, provider_org_id).
+ * Left empty on a tenant that shares its Auth0 app with the platform tenant, the
+ * login is unscoped and resolves to platform.
+ *
+ * `base` is the tenant's existing config when editing. PATCH replaces the whole
+ * object, so fields this form never shows (explicit authorize and token
+ * endpoints) are carried over rather than wiped by an edit to the audience.
+ */
+function idpFromForm(
+  f: { idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string; idp_org_id: string },
+  base?: TenantIdpConfig,
+): TenantIdpConfig | undefined {
+  if (!f.idp_enabled) return undefined
+  const host = hostOf(f.idp_domain)
+  return {
+    ...base,
+    protocol: 'auth0',
+    issuer: `https://${host}/`,
+    jwks_uri: `https://${host}/.well-known/jwks.json`,
+    client_id: f.idp_client_id,
+    audience: f.idp_audience || undefined,
+    provider_org_id: f.idp_org_id.trim() || undefined,
+  }
+}
+
+/** The domain to show when editing: the issuer's host, or a pre-PORTH-488 record's `domain`. */
+function domainOf(cfg?: TenantIdpConfig): string {
+  if (!cfg) return ''
+  try {
+    if (cfg.issuer) return new URL(cfg.issuer).host
+  } catch {
+    // not a URL — fall through to the legacy field
+  }
+  return (cfg as unknown as { domain?: string }).domain ?? ''
+}
+
+function IdpFields<T extends { idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string; idp_org_id: string }>(
   { prefix, form, setForm }: { prefix: string; form: T; setForm: (fn: (f: T) => T) => void }
 ) {
   return (
@@ -62,6 +112,16 @@ function IdpFields<T extends { idp_enabled: boolean; idp_domain: string; idp_cli
               onChange={e => setForm(f => ({ ...f, idp_audience: e.target.value }))}
               placeholder="https://your-api.example.com"
               className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+          </div>
+          <div>
+            <label htmlFor={`${prefix}-idp-org`} className="block text-sm font-medium text-gray-700 mb-1">Auth0 Organization ID</label>
+            <input id={`${prefix}-idp-org`} type="text" value={form.idp_org_id}
+              onChange={e => setForm(f => ({ ...f, idp_org_id: e.target.value }))}
+              placeholder="org_…"
+              pattern="org_[A-Za-z0-9]+"
+              title="An Auth0 Organization ID, e.g. org_AbC123"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+            <p className="mt-1 text-xs text-gray-400">Needed when this Auth0 app is shared with other tenants. Without it, logging in at this tenant's address lands in the platform tenant.</p>
           </div>
         </div>
       )}
@@ -96,7 +156,7 @@ export default function TenantsPage() {
 
   // Edit Tenant
   const [editing, setEditing] = useState<TenantRow | null>(null)
-  const [editForm, setEditForm] = useState<EditTenantForm>({ display_name: '', idp_enabled: false, idp_domain: '', idp_client_id: '', idp_audience: '' })
+  const [editForm, setEditForm] = useState<EditTenantForm>({ display_name: '', idp_enabled: false, idp_domain: '', idp_client_id: '', idp_audience: '', idp_org_id: '' })
   const [editSaving, setEditSaving] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
 
@@ -130,7 +190,7 @@ export default function TenantsPage() {
     setOrgSaving(true); setOrgError(null)
     const body: CreateOrganizationRequest = {
       name: orgForm.name, slug: orgForm.slug,
-      tenant: { tenant_id: orgForm.slug, display_name: orgForm.name, environment_type: 'production', admin_role_source_key: orgForm.admin_role_source_key },
+      tenant: { tenant_id: orgForm.slug, display_name: orgForm.name, tenant_tier: 'production', admin_role_source_key: orgForm.admin_role_source_key },
     }
     try {
       await organizationsApi.create(body)
@@ -144,22 +204,40 @@ export default function TenantsPage() {
     setTenantSaving(true); setTenantError(null)
     const body: CreateTenantRequest = {
       org_id: tenantForm.org_id, tenant_id: tenantForm.tenant_id,
-      display_name: tenantForm.display_name, environment_type: tenantForm.environment_type,
+      display_name: tenantForm.display_name, tenant_tier: tenantForm.tenant_tier,
       admin_role_source_key: tenantForm.admin_role_source_key,
       idp_config_override: idpFromForm(tenantForm),
     }
     try {
       await tenantsApi.create(body)
-      setTenantOpen(false); setTenantForm(EMPTY_TENANT); loadAll()
-    } catch (e: unknown) { setTenantError(e instanceof Error ? e.message : 'Failed') }
-    finally { setTenantSaving(false) }
+    } catch (e: unknown) {
+      setTenantError(e instanceof Error ? e.message : 'Failed')
+      setTenantSaving(false)
+      return
+    }
+    // Porth's create accepts idp_config_override and does not store it:
+    // TenantRepository.create writes an explicit field list that omits it, so
+    // the tenant comes back with no IdP and nobody can log in to it. PATCH does
+    // store it, so set it straight away. Harmless once Porth's create is fixed —
+    // this writes the same config a second time.
+    if (body.idp_config_override) {
+      try {
+        await tenantsApi.update(body.tenant_id, { idp_config_override: body.idp_config_override })
+      } catch (e: unknown) {
+        setTenantError(`Tenant created, but its identity provider was not saved: ${e instanceof Error ? e.message : 'Failed'}. Use Edit to set it.`)
+        setTenantSaving(false)
+        loadAll()
+        return
+      }
+    }
+    setTenantOpen(false); setTenantForm(EMPTY_TENANT); setTenantSaving(false); loadAll()
   }
 
   async function submitEdit(e: React.FormEvent) {
     e.preventDefault()
     if (!editing) return
     setEditSaving(true); setEditError(null)
-    const body: UpdateTenantRequest = { display_name: editForm.display_name, idp_config_override: idpFromForm(editForm) }
+    const body: UpdateTenantRequest = { display_name: editForm.display_name, idp_config_override: idpFromForm(editForm, editing.idp_config_override) }
     try {
       await tenantsApi.update(editing.tenant_id, body)
       setEditing(null); loadAll()
@@ -203,9 +281,10 @@ export default function TenantsPage() {
     setEditForm({
       display_name: t.display_name,
       idp_enabled: !!t.idp_config_override,
-      idp_domain: t.idp_config_override?.domain ?? '',
+      idp_domain: domainOf(t.idp_config_override),
       idp_client_id: t.idp_config_override?.client_id ?? '',
       idp_audience: t.idp_config_override?.audience ?? '',
+      idp_org_id: t.idp_config_override?.provider_org_id ?? '',
     })
     setEditError(null)
   }
@@ -261,7 +340,7 @@ export default function TenantsPage() {
               <th className="px-4 py-3">Tenant ID</th>
               <th className="px-4 py-3">Display Name</th>
               <th className="px-4 py-3">Organization</th>
-              <th className="px-4 py-3">Environment</th>
+              <th className="px-4 py-3">Tier</th>
               <th className="px-4 py-3">IdP</th>
               <th className="px-4 py-3">Status</th>
               <th className="px-4 py-3">Actions</th>
@@ -273,7 +352,7 @@ export default function TenantsPage() {
                 <td className="px-4 py-3 font-mono text-xs text-gray-500">{t.tenant_id}</td>
                 <td className="px-4 py-3 font-medium text-gray-900">{t.display_name}</td>
                 <td className="px-4 py-3 text-gray-500">{t.org_name}</td>
-                <td className="px-4 py-3 text-gray-500">{t.environment_type}</td>
+                <td className="px-4 py-3 text-gray-500">{t.tenant_tier}</td>
                 <td className="px-4 py-3">
                   {t.idp_config_override
                     ? <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">configured</span>
@@ -395,12 +474,13 @@ export default function TenantsPage() {
                 <p className="mt-1 text-xs text-gray-400">JWT claim value your IdP places in the roles claim for admin users.</p>
               </div>
               <div>
-                <label htmlFor="nt-env" className="block text-sm font-medium text-gray-700 mb-1">Environment Type</label>
-                <select id="nt-env" value={tenantForm.environment_type}
-                  onChange={e => setTenantForm(f => ({ ...f, environment_type: e.target.value as EnvType }))}
+                <label htmlFor="nt-env" className="block text-sm font-medium text-gray-700 mb-1">Tenant Tier</label>
+                <select id="nt-env" value={tenantForm.tenant_tier}
+                  onChange={e => setTenantForm(f => ({ ...f, tenant_tier: e.target.value as TenantTier }))}
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
-                  {ENV_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                  {TIERS.map(t => <option key={t} value={t}>{t}</option>)}
                 </select>
+                <p className="mt-1 text-xs text-gray-400">A label on the tenant — not the environment it lives in, which comes from the host.</p>
               </div>
               <IdpFields prefix="nt" form={tenantForm} setForm={setTenantForm} />
               <div className="flex justify-end gap-3 pt-2">
