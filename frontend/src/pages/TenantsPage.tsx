@@ -12,29 +12,46 @@ import type { Organization, Tenant, UpdateTenantRequest, TenantIdpConfig, Tenant
 
 const TIERS: readonly TenantTier[] = ['production', 'staging', 'development', 'sandbox']
 
+/** Every tenant has an identity provider: Porth has no other way to log in.
+ * A new provider is a row here and a case in `idpFromForm`. */
+type IdpProvider = 'auth0' | 'keycloak'
+const IDP_PROVIDERS: readonly { id: IdpProvider; label: string }[] = [
+  { id: 'auth0', label: 'Auth0' },
+  { id: 'keycloak', label: 'Keycloak' },
+]
+interface IdpForm {
+  idp_provider: IdpProvider; idp_domain: string; idp_realm: string
+  idp_client_id: string; idp_audience: string; idp_org_id: string
+}
+
 interface TenantRow extends Tenant { org_name: string }
 
-interface NewTenantForm {
+interface NewTenantForm extends IdpForm {
   org_id: string; org_name: string; org_slug: string; tenant_id: string; display_name: string; tenant_tier: TenantTier
   admin_role_source_key: string
-  idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string; idp_org_id: string
 }
-interface EditTenantForm {
+interface EditTenantForm extends IdpForm {
   display_name: string
-  idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string; idp_org_id: string
 }
 
 /** The Organization choice that creates a new org along with the tenant. */
 const NEW_ORG = '__new__'
 
-const EMPTY_TENANT: NewTenantForm = { org_id: '', org_name: '', org_slug: '', tenant_id: '', display_name: '', tenant_tier: 'production', admin_role_source_key: 'tenant-admin', idp_enabled: false, idp_domain: '', idp_client_id: '', idp_audience: '', idp_org_id: '' }
+const EMPTY_IDP: IdpForm = { idp_provider: 'auth0', idp_domain: '', idp_realm: '', idp_client_id: '', idp_audience: '', idp_org_id: '' }
+const EMPTY_TENANT: NewTenantForm = { ...EMPTY_IDP, org_id: '', org_name: '', org_slug: '', tenant_id: '', display_name: '', tenant_tier: 'production', admin_role_source_key: 'tenant-admin' }
 
 /** The Auth0 domain an operator typed, reduced to the host it names. */
 function hostOf(domain: string): string {
   return domain.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
 }
 
-/** Porth's neutral OIDC config, built from the form's Auth0 fields.
+/** The Keycloak server address an operator typed, with its scheme and no trailing slash. */
+function serverOf(address: string): string {
+  const a = address.trim().replace(/\/+$/, '')
+  return /^https?:\/\//.test(a) ? a : `https://${a}`
+}
+
+/** Porth's neutral OIDC config, built from the form's fields for the chosen provider.
  *
  * Porth replaced `{ provider, domain }` with `{ issuer, jwks_uri, client_id,
  * protocol }` (PORTH-488/S5) and ignores fields it does not know. The old body
@@ -53,24 +70,58 @@ function hostOf(domain: string): string {
  * Left empty on a tenant that shares its Auth0 app with the platform tenant, the
  * login is unscoped and resolves to platform.
  *
+ * Keycloak is generic OIDC to Porth, which composes nothing for "oidc", so all
+ * four addresses are spelled out from the server and realm.
+ *
  * `base` is the tenant's existing config when editing. PATCH replaces the whole
- * object, so fields this form never shows (explicit authorize and token
- * endpoints) are carried over rather than wiped by an edit to the audience.
+ * object, so fields this form never shows are carried over rather than wiped by
+ * an edit to the audience. Not across a change of provider: the old provider's
+ * endpoints would be wrong for the new one.
  */
-function idpFromForm(
-  f: { idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string; idp_org_id: string },
-  base?: TenantIdpConfig,
-): TenantIdpConfig | undefined {
-  if (!f.idp_enabled) return undefined
-  const host = hostOf(f.idp_domain)
+function idpFromForm(f: IdpForm, base?: TenantIdpConfig): TenantIdpConfig {
+  const kept = base && providerOf(base) === f.idp_provider ? base : undefined
+  const shared = { client_id: f.idp_client_id, audience: f.idp_audience || undefined }
+  switch (f.idp_provider) {
+    case 'auth0': {
+      const host = hostOf(f.idp_domain)
+      return {
+        ...kept, ...shared,
+        protocol: 'auth0',
+        issuer: `https://${host}/`,
+        jwks_uri: `https://${host}/.well-known/jwks.json`,
+        provider_org_id: f.idp_org_id.trim() || undefined,
+      }
+    }
+    case 'keycloak': {
+      const issuer = `${serverOf(f.idp_domain)}/realms/${f.idp_realm.trim()}`
+      return {
+        ...kept, ...shared,
+        protocol: 'oidc',
+        issuer,
+        jwks_uri: `${issuer}/protocol/openid-connect/certs`,
+        authorization_endpoint: `${issuer}/protocol/openid-connect/auth`,
+        token_endpoint: `${issuer}/protocol/openid-connect/token`,
+      }
+    }
+  }
+}
+
+/** Which provider a stored config belongs to. Keycloak's issuer always ends in its realm. */
+function providerOf(cfg?: TenantIdpConfig): IdpProvider {
+  return cfg?.protocol !== 'auth0' && /\/realms\/[^/]+\/?$/.test(cfg?.issuer ?? '') ? 'keycloak' : 'auth0'
+}
+
+/** The form's fields for a stored config, when editing. */
+function idpFormOf(cfg?: TenantIdpConfig): IdpForm {
+  const provider = providerOf(cfg)
+  const [server, realm] = provider === 'keycloak' ? (cfg?.issuer ?? '').replace(/\/$/, '').split('/realms/') : ['', '']
   return {
-    ...base,
-    protocol: 'auth0',
-    issuer: `https://${host}/`,
-    jwks_uri: `https://${host}/.well-known/jwks.json`,
-    client_id: f.idp_client_id,
-    audience: f.idp_audience || undefined,
-    provider_org_id: f.idp_org_id.trim() || undefined,
+    idp_provider: provider,
+    idp_domain: provider === 'keycloak' ? server : domainOf(cfg),
+    idp_realm: realm,
+    idp_client_id: cfg?.client_id ?? '',
+    idp_audience: cfg?.audience ?? '',
+    idp_org_id: cfg?.provider_org_id ?? '',
   }
 }
 
@@ -85,49 +136,59 @@ function domainOf(cfg?: TenantIdpConfig): string {
   return (cfg as unknown as { domain?: string }).domain ?? ''
 }
 
-function IdpFields<T extends { idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string; idp_org_id: string }>(
+function IdpFields<T extends IdpForm>(
   { prefix, form, setForm }: { prefix: string; form: T; setForm: (fn: (f: T) => T) => void }
 ) {
+  const input = 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500'
+  const keycloak = form.idp_provider === 'keycloak'
   return (
-    <div className="border-t border-gray-100 pt-4">
-      <label className="flex items-center gap-2 cursor-pointer">
-        <input type="checkbox" checked={form.idp_enabled}
-          onChange={e => setForm(f => ({ ...f, idp_enabled: e.target.checked }))}
-          className="rounded" />
-        <span className="text-sm font-medium text-gray-700">Identity Provider</span>
-      </label>
-      {form.idp_enabled && (
-        <div className="mt-3 space-y-3">
-          <div>
-            <label htmlFor={`${prefix}-domain`} className="block text-sm font-medium text-gray-700 mb-1">Domain</label>
-            <input id={`${prefix}-domain`} type="text" required value={form.idp_domain}
-              onChange={e => setForm(f => ({ ...f, idp_domain: e.target.value }))}
-              placeholder="your-tenant.auth0.com"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-          </div>
-          <div>
-            <label htmlFor={`${prefix}-cid`} className="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
-            <input id={`${prefix}-cid`} type="text" required value={form.idp_client_id}
-              onChange={e => setForm(f => ({ ...f, idp_client_id: e.target.value }))}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-          </div>
-          <div>
-            <label htmlFor={`${prefix}-aud`} className="block text-sm font-medium text-gray-700 mb-1">Audience <span className="text-gray-400 font-normal">(optional)</span></label>
-            <input id={`${prefix}-aud`} type="text" value={form.idp_audience}
-              onChange={e => setForm(f => ({ ...f, idp_audience: e.target.value }))}
-              placeholder="https://your-api.example.com"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-          </div>
-          <div>
-            <label htmlFor={`${prefix}-idp-org`} className="block text-sm font-medium text-gray-700 mb-1">Auth0 Organization ID</label>
-            <input id={`${prefix}-idp-org`} type="text" value={form.idp_org_id}
-              onChange={e => setForm(f => ({ ...f, idp_org_id: e.target.value }))}
-              placeholder="org_…"
-              pattern="org_[A-Za-z0-9]+"
-              title="An Auth0 Organization ID, e.g. org_AbC123"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-            <p className="mt-1 text-xs text-gray-400">Needed when this Auth0 app is shared with other tenants. Without it, logging in at this tenant's address lands in the platform tenant.</p>
-          </div>
+    <div className="border-t border-gray-100 pt-4 space-y-3">
+      <div>
+        <label htmlFor={`${prefix}-provider`} className="block text-sm font-medium text-gray-700 mb-1">Identity Provider</label>
+        <select id={`${prefix}-provider`} value={form.idp_provider}
+          onChange={e => setForm(f => ({ ...f, idp_provider: e.target.value as IdpProvider }))}
+          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+          {IDP_PROVIDERS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+        </select>
+      </div>
+      <div>
+        <label htmlFor={`${prefix}-domain`} className="block text-sm font-medium text-gray-700 mb-1">{keycloak ? 'Server URL' : 'Domain'}</label>
+        <input id={`${prefix}-domain`} type="text" required value={form.idp_domain}
+          onChange={e => setForm(f => ({ ...f, idp_domain: e.target.value }))}
+          placeholder={keycloak ? 'https://keycloak.example.com' : 'your-tenant.auth0.com'}
+          className={input} />
+      </div>
+      {keycloak && (
+        <div>
+          <label htmlFor={`${prefix}-realm`} className="block text-sm font-medium text-gray-700 mb-1">Realm</label>
+          <input id={`${prefix}-realm`} type="text" required value={form.idp_realm}
+            onChange={e => setForm(f => ({ ...f, idp_realm: e.target.value }))}
+            className={input} />
+        </div>
+      )}
+      <div>
+        <label htmlFor={`${prefix}-cid`} className="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
+        <input id={`${prefix}-cid`} type="text" required value={form.idp_client_id}
+          onChange={e => setForm(f => ({ ...f, idp_client_id: e.target.value }))}
+          className={input} />
+      </div>
+      <div>
+        <label htmlFor={`${prefix}-aud`} className="block text-sm font-medium text-gray-700 mb-1">Audience <span className="text-gray-400 font-normal">(optional)</span></label>
+        <input id={`${prefix}-aud`} type="text" value={form.idp_audience}
+          onChange={e => setForm(f => ({ ...f, idp_audience: e.target.value }))}
+          placeholder="https://your-api.example.com"
+          className={input} />
+      </div>
+      {!keycloak && (
+        <div>
+          <label htmlFor={`${prefix}-idp-org`} className="block text-sm font-medium text-gray-700 mb-1">Auth0 Organization ID</label>
+          <input id={`${prefix}-idp-org`} type="text" value={form.idp_org_id}
+            onChange={e => setForm(f => ({ ...f, idp_org_id: e.target.value }))}
+            placeholder="org_…"
+            pattern="org_[A-Za-z0-9]+"
+            title="An Auth0 Organization ID, e.g. org_AbC123"
+            className={input} />
+          <p className="mt-1 text-xs text-gray-400">Needed when this Auth0 app is shared with other tenants. Without it, logging in at this tenant's address lands in the platform tenant.</p>
         </div>
       )}
     </div>
@@ -155,7 +216,7 @@ export default function TenantsPage() {
 
   // Edit Tenant
   const [editing, setEditing] = useState<TenantRow | null>(null)
-  const [editForm, setEditForm] = useState<EditTenantForm>({ display_name: '', idp_enabled: false, idp_domain: '', idp_client_id: '', idp_audience: '', idp_org_id: '' })
+  const [editForm, setEditForm] = useState<EditTenantForm>({ ...EMPTY_IDP, display_name: '' })
   const [editSaving, setEditSaving] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
 
@@ -208,15 +269,13 @@ export default function TenantsPage() {
     // the tenant comes back with no IdP and nobody can log in to it. PATCH does
     // store it, so set it straight away. Harmless once Porth's create is fixed —
     // this writes the same config a second time.
-    if (idp) {
-      try {
-        await tenantsApi.update(tenant.tenant_id, { idp_config_override: idp })
-      } catch (e: unknown) {
-        setTenantError(`Tenant created, but its identity provider was not saved: ${e instanceof Error ? e.message : 'Failed'}. Use Edit to set it.`)
-        setTenantSaving(false)
-        loadAll()
-        return
-      }
+    try {
+      await tenantsApi.update(tenant.tenant_id, { idp_config_override: idp })
+    } catch (e: unknown) {
+      setTenantError(`Tenant created, but its identity provider was not saved: ${e instanceof Error ? e.message : 'Failed'}. Use Edit to set it.`)
+      setTenantSaving(false)
+      loadAll()
+      return
     }
     setTenantOpen(false); setTenantForm(EMPTY_TENANT); setTenantSaving(false); loadAll()
   }
@@ -268,11 +327,7 @@ export default function TenantsPage() {
     setEditing(t)
     setEditForm({
       display_name: t.display_name,
-      idp_enabled: !!t.idp_config_override,
-      idp_domain: domainOf(t.idp_config_override),
-      idp_client_id: t.idp_config_override?.client_id ?? '',
-      idp_audience: t.idp_config_override?.audience ?? '',
-      idp_org_id: t.idp_config_override?.provider_org_id ?? '',
+      ...idpFormOf(t.idp_config_override),
     })
     setEditError(null)
   }

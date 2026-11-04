@@ -350,11 +350,8 @@ async function setupE2ETenant(browser: Browser) {
     await expect(row).toBeVisible({ timeout: 10000 })
     await row.getByRole('button', { name: 'Edit' }).click()
 
-    // Enable the Identity Provider checkbox and fill in details
-    const idpCheckbox = page.getByLabel('Identity Provider')
-    if (!(await idpCheckbox.isChecked())) {
-      await idpCheckbox.check()
-    }
+    // Every tenant has an identity provider; choose it and fill in details
+    await page.getByLabel('Identity Provider').selectOption({ label: 'Auth0' })
     await page.getByLabel('Domain').fill(TENANT_CONFIG.domain!)
     await page.getByLabel('Client ID').fill(TENANT_CONFIG.client_id!)
     if (TENANT_CONFIG.audience) {

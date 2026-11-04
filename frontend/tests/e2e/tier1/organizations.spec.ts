@@ -35,6 +35,20 @@ test.describe('Organizations page', () => {
     await expect(page.getByLabel('Tenant ID', { exact: true })).toBeVisible()
   })
 
+  test('every tenant has an identity provider, and the provider decides its fields', async ({ page }) => {
+    await page.goto('/admin/platform/tenants')
+    await page.getByRole('button', { name: '+ New Tenant' }).click()
+    await expect(page.getByRole('checkbox', { name: 'Identity Provider' })).toHaveCount(0)
+    const provider = page.getByLabel('Identity Provider', { exact: true })
+    await expect(provider.locator('option')).toHaveText(['Auth0', 'Keycloak'])
+    await expect(page.getByLabel('Domain', { exact: true })).toBeVisible()
+    await expect(page.getByLabel('Auth0 Organization ID', { exact: true })).toBeVisible()
+    await provider.selectOption({ label: 'Keycloak' })
+    await expect(page.getByLabel('Server URL', { exact: true })).toBeVisible()
+    await expect(page.getByLabel('Realm', { exact: true })).toBeVisible()
+    await expect(page.getByLabel('Auth0 Organization ID', { exact: true })).toHaveCount(0)
+  })
+
   test('clicking Manage on a tenant row navigates to claim-config page', async ({ page }) => {
     await page.goto('/admin/platform/tenants')
     // mock returns same tenants for both orgs, so rows are duplicated — use .first()
