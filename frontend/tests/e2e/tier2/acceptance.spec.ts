@@ -314,25 +314,25 @@ async function setupE2ETenant(browser: Browser) {
     await expect(page).toHaveURL(/\/admin\/platform\/tenants/)
 
     // ── 2. Create org + tenant (409 = already exists, that's fine) ──────────
-    await page.getByRole('button', { name: /New Organization/i }).click()
+    await page.getByRole('button', { name: /New Tenant/i }).click()
+    await page.getByLabel('Organization', { exact: true }).selectOption({ label: '+ New organization…' })
     await page.getByLabel('Organization Name', { exact: true }).fill('Demo Corp')
     await page.getByLabel('Slug', { exact: true }).fill(E2E_TENANT_ID)
+    await page.getByLabel('Tenant ID', { exact: true }).fill(E2E_TENANT_ID)
+    await page.getByLabel('Display Name', { exact: true }).fill('Demo Corp')
     await page.getByRole('button', { name: 'Create' }).click()
     await page.waitForTimeout(1500)
 
     // Dismiss modal if still open (conflict is fine — tenant already exists).
-    // Use the heading role to avoid a strict-mode violation: locator('text=New
-    // Organization') matches both the "+New Organization" button AND the modal
-    // heading when the modal is open.
-    const modalVisible = await page.getByRole('heading', { name: 'New Organization' }).isVisible()
+    const modalVisible = await page.getByRole('heading', { name: 'New Tenant' }).isVisible()
     if (modalVisible) {
       // The custom React modal has no onKeyDown handler for Escape — pressing Escape
       // does nothing and the backdrop stays up, blocking all subsequent pointer events.
-      // Click the Cancel button explicitly to invoke setOrgOpen(false).
+      // Click the Cancel button explicitly to close it.
       await page.getByRole('button', { name: 'Cancel' }).click()
       // Wait for the modal (and its backdrop overlay) to fully animate out before
       // proceeding — the backdrop intercepts pointer events until it is gone.
-      await page.getByRole('heading', { name: 'New Organization' })
+      await page.getByRole('heading', { name: 'New Tenant' })
         .waitFor({ state: 'hidden', timeout: 5000 })
         .catch(() => { /* already closed or animation skipped */ })
     }

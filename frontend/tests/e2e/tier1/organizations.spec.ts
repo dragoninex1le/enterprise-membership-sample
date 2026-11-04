@@ -24,9 +24,15 @@ test.describe('Organizations page', () => {
     await expect(orgFilter).toContainText(DEFAULT_ORG_2.name)
   })
 
-  test('New Organization button is visible', async ({ page }) => {
+  test('a new organization is created through New Tenant, along with its first tenant', async ({ page }) => {
     await page.goto('/admin/platform/tenants')
-    await expect(page.getByRole('button', { name: '+ New Organization' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '+ New Organization' })).toHaveCount(0)
+    await page.getByRole('button', { name: '+ New Tenant' }).click()
+    await expect(page.getByLabel('Organization Name', { exact: true })).toHaveCount(0)
+    await page.getByLabel('Organization', { exact: true }).selectOption({ label: '+ New organization…' })
+    await expect(page.getByLabel('Organization Name', { exact: true })).toBeVisible()
+    await expect(page.getByLabel('Slug', { exact: true })).toBeVisible()
+    await expect(page.getByLabel('Tenant ID', { exact: true })).toBeVisible()
   })
 
   test('clicking Manage on a tenant row navigates to claim-config page', async ({ page }) => {
