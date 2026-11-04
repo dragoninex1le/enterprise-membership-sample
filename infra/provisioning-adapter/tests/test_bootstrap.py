@@ -111,7 +111,7 @@ def test_the_boundary_names_porth_tables_and_never_the_apps(boot):
     tables = [r for st in _boundary(boot) if st["Effect"] == "Allow" for r in resources(st) if ":table/" in r]
     families = sorted(r.rsplit(":table/", 1)[1] for r in tables)
     assert families == ["porth-claim-mapping-configs-*", "porth-org-units-*", "porth-permissions-*", "porth-roles-*",
-                        "porth-tenants-*", "porth-users-*", "prawf-adapter-*"]
+                        "porth-sessions-*", "porth-tenants-*", "porth-users-*", "prawf-adapter-*"]
     assert not any(f in ("porth-*", "prawf-*", "*") for f in families)
 
 
@@ -182,6 +182,7 @@ _RESOLVED = {"AWS::Region": "us-east-1", "AWS::AccountId": "195950944420", "Port
              "PorthTenantsTable": "porth-tenants-dev", "PorthRolesTable": "porth-roles-dev",
              "PorthPermissionsTable": "porth-permissions-dev", "PorthClaimMappingConfigsTable": "porth-claim-mapping-configs-dev",
              "PorthUsersTable": "porth-users-dev", "PorthOrgUnitsTable": "porth-org-units-dev",
+             "PorthSessionsTable": "porth-sessions-dev",
              "PorthEventBus": "porth-events-dev"}
 
 

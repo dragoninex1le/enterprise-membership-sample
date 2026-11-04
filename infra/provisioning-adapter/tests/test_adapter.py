@@ -39,6 +39,7 @@ import handler  # noqa: E402
 import slots  # noqa: E402
 
 TENANTS = "porth-tenants-test"
+SESSIONS = "porth-sessions-test"
 FAKE_CREDS = {"AccessKeyId": "FAKEKEYID", "SecretAccessKey": "FAKE-SECRET-VALUE", "SessionToken": "FAKE-TOKEN"}
 
 ONE_SLOT = {"slots": {"porth-dau": {"environment_id": "ems-porth-dau", "environment_class": "disposable"}}}
@@ -49,7 +50,7 @@ TWO_SLOTS = {"slots": {
 
 AGREED_ENTITIES = {
     "porth-platform", "porth-org", "porth-tenant", "porth-claim-mapping",
-    "porth-app-permission", "porth-role-grant", "porth-role", "porth-idp",
+    "porth-app-permission", "porth-role-grant", "porth-role", "porth-idp", "porth-session",
 }
 OTHER_VERBS = ["bootstrap", "seed", "reset", "ensure", "absent", "teardown", "status"]
 #: An entity none of the verbs is implemented for, so every one of them is unsupported against it.
@@ -123,6 +124,7 @@ def world(monkeypatch):
     monkeypatch.setenv("SLOT_MAP_PARAMETER", "/prawf/adapter/slot-map")
     monkeypatch.setenv("DATA_ROLE_ARN", "arn:aws:iam::111111111111:role/porth-provisioning-adapter-DataRole-X")
     monkeypatch.setenv("PORTH_TENANTS_TABLE", TENANTS)
+    monkeypatch.setenv("PORTH_SESSIONS_TABLE", SESSIONS)
     monkeypatch.setenv("PORTH_STACK_NAME", "serverlessrepo-porth-components")
     monkeypatch.setenv("ADAPTER_VERSION", "test-build")
     return state
@@ -171,6 +173,7 @@ def test_exactly_the_implemented_cells_are_declared(world):
     assert declared.pop("porth-org") == ["seed", "reset", "teardown"]
     assert declared.pop("porth-claim-mapping") == ["seed", "reset", "teardown"]
     assert declared.pop("porth-role") == ["seed", "reset", "teardown"]
+    assert declared.pop("porth-session") == ["reset"]
     assert caps["extension_types"] == ["porth.org", "porth.permission", "porth.role", "porth.role-grant", "porth.claim-mapping"]
     assert all(v == [] for v in declared.values()), declared
     assert caps["dataset_forms"] == ["enumerated"]
@@ -329,14 +332,20 @@ def test_the_session_policy_writes_single_items_in_one_slot_and_scans_only_the_t
     assert not any(a.startswith(("dynamodb:BatchWrite", "dynamodb:Transact")) for a in allowed)
     assert {"dynamodb:PartiQLSelect", "dynamodb:ExecuteStatement"} <= denied
 
-    # Scan: the tenants table, exactly - not an index, not another table - and denied everywhere else.
+    # Scan: the tenants table and the sessions table, exactly - not an index, not another table -
+    # and denied everywhere else. Sessions are the one thing reached beyond the slot, and only to
+    # find and delete rows: no read of a row's contents, no write.
     tenants = f"arn:aws:dynamodb:us-east-1:111111111111:table/{TENANTS}"
+    sessions = f"arn:aws:dynamodb:us-east-1:111111111111:table/{SESSIONS}"
     scans = [s for s in policy["Statement"] if "dynamodb:Scan" in s["Action"]]
-    (allow,) = [s for s in scans if s["Effect"] == "Allow"]
+    allows = {s["Sid"]: s for s in scans if s["Effect"] == "Allow"}
     (deny,) = [s for s in scans if s["Effect"] == "Deny"]
-    assert allow["Action"] == ["dynamodb:Scan"] and allow["Resource"] == tenants and "Condition" not in allow
-    assert deny["NotResource"] == tenants
-    assert not any("Scan" in a for s in policy["Statement"] if s["Effect"] == "Allow" and s is not allow for a in s["Action"])
+    assert set(allows) == {"ScanTheTenantsTable", "ClearTheSessionsTable"}
+    assert allows["ScanTheTenantsTable"]["Action"] == ["dynamodb:Scan"] and allows["ScanTheTenantsTable"]["Resource"] == tenants
+    clear = allows["ClearTheSessionsTable"]
+    assert sorted(clear["Action"]) == ["dynamodb:DeleteItem", "dynamodb:DescribeTable", "dynamodb:Scan"] and clear["Resource"] == sessions
+    assert not any("Condition" in s for s in allows.values())
+    assert deny["NotResource"] == [tenants, sessions]
 
 
 @pytest.mark.parametrize("scope", ["*", "porth-*", "a#b", "Porth", ""])

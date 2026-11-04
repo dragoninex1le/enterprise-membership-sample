@@ -85,13 +85,17 @@ def test_only_the_tenants_table_may_ever_be_scanned(tpl):
             continue
         assert not {"dynamodb:*", "*"} & set(_actions(st)), st
         if "dynamodb:Scan" in _actions(st):
-            assert (name, st.get("Sid")) == ("DataRole", "ScanTheTenantsTable"), st
-            assert _actions(st) == ["dynamodb:Scan"], "the scan grant carries nothing else"
-            assert "table/${PorthTenantsTable}" in str(st["Resource"])
+            assert name == "DataRole" and st.get("Sid") in ("ScanTheTenantsTable", "ClearTheSessionsTable"), st
+            if st["Sid"] == "ScanTheTenantsTable":
+                assert _actions(st) == ["dynamodb:Scan"], "the scan grant carries nothing else"
+                assert "table/${PorthTenantsTable}" in str(st["Resource"])
+            else:
+                assert sorted(_actions(st)) == ["dynamodb:DeleteItem", "dynamodb:DescribeTable", "dynamodb:Scan"], "find and delete, nothing else"
+                assert "table/${PorthSessionsTable}" in str(st["Resource"])
             assert "index" not in str(st["Resource"])
     (deny,) = [st for n, st in _statements(tpl) if n == "DataRole" and st.get("Sid") == "ScanNothingElse"]
     assert deny["Effect"] == "Deny" and _actions(deny) == ["dynamodb:Scan"]
-    assert "table/${PorthTenantsTable}" in str(deny["NotResource"])
+    assert "table/${PorthTenantsTable}" in str(deny["NotResource"]) and "table/${PorthSessionsTable}" in str(deny["NotResource"])
 
 
 def test_the_data_role_reads_porth_writes_single_items_and_denies_partiql(tpl):

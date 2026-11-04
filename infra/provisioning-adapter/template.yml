@@ -12,7 +12,7 @@ Description: >
 # IAM, in one paragraph. The function's own role (ExecutionRole) holds NO DynamoDB access. Every data
 # call assumes DataRole with an inline session policy that admits only partition keys under
 # ENV#{slot}#, so a request routed to the wrong slot is denied by AWS rather than avoided by code.
-# DataRole's policy is the ceiling: the six Porth tables named explicitly (never porth-*, which on
+# DataRole's policy is the ceiling: the seven Porth tables named explicitly (never porth-*, which on
 # main also matches the sample app's own table), single-item writes, and Scan on the tenants table
 # alone - ForAllValues over the absent LeadingKeys of a Scan evaluates true, so a Scan reads every
 # slot's rows there; reset needs it (PRF-14) and the code filters to the slot. Porth's own repositories publish an event for every write and raise if they
@@ -47,6 +47,9 @@ Parameters:
   PorthOrgUnitsTable:
     Type: String
     Description: From the Porth stack's OrgUnitsTableName output.
+  PorthSessionsTable:
+    Type: String
+    Description: From the Porth stack's SessionsTableName output.
   PorthEventBus:
     Type: String
     Description: From the Porth stack's EventBusName output (porth-events-{env}).
@@ -166,6 +169,15 @@ Resources:
                 Effect: Allow
                 Action: dynamodb:Scan
                 Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthTenantsTable}
+              # reset of porth-session clears Porth's sessions, whose keys carry no environment, so
+              # LeadingKeys can't hold them to a slot. Find rows and delete them; nothing else.
+              - Sid: ClearTheSessionsTable
+                Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:DeleteItem
+                  - dynamodb:DescribeTable
+                Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthSessionsTable}
               - Sid: PorthEventsOnly
                 Effect: Allow
                 Action: events:PutEvents
@@ -184,7 +196,9 @@ Resources:
               - Sid: ScanNothingElse
                 Effect: Deny
                 Action: dynamodb:Scan
-                NotResource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthTenantsTable}
+                NotResource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthTenantsTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthSessionsTable}
               - Sid: NeverPartiQL
                 Effect: Deny
                 Action:
@@ -273,6 +287,7 @@ Resources:
           PORTH_CLAIM_MAPPING_CONFIGS_TABLE: !Ref PorthClaimMappingConfigsTable
           PORTH_USERS_TABLE: !Ref PorthUsersTable
           PORTH_ORG_UNITS_TABLE: !Ref PorthOrgUnitsTable
+          PORTH_SESSIONS_TABLE: !Ref PorthSessionsTable
           # porth-common reads it at import (config.EVENT_BUS_NAME). Its default, porth-events, is
           # not the bus Porth deploys - left unset, every seed would write a row and then fail.
           PORTH_EVENT_BUS: !Ref PorthEventBus

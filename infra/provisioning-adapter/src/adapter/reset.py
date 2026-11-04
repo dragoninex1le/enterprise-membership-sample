@@ -18,8 +18,13 @@ resettable entity's baseline is therefore *none of its own rows*:
   that has gone (Richard, 2026-11-04). The platform's users are baseline, and stay;
 * `porth-org` - every organisation except the platform's. Refused while tenants still belong to one:
   reset `porth-tenant` first, which reset with no entity does.
+* `porth-session` - every row in Porth's sessions table. Sessions carry no environment in their keys,
+  so this one is not held to the slot: it logs everyone out of every environment on this install
+  (Richard, 2026-11-04). Sessions are throwaway, and a login makes a new one. It is the only thing
+  reset reaches beyond the slot, it has its own entity so it can be reset alone, and it reads only
+  the keys of the rows it deletes - never a token.
 
-With no entity, all four, in that order - claim mappings are found through the tenants they belong
+With no entity, all of them, in that order - claim mappings are found through the tenants they belong
 to, and an organisation cannot go while it has tenants.
 
 **Finding what is there.** Porth's tenant directory finds tenants by scanning the tenants table, and
@@ -32,8 +37,7 @@ mappings are then reached by the tenant's own keys.
 disposable one the caller must say what it believes the slot to be (`confirm_environment_class`) and
 is refused on a mismatch - a mistake-detector, never an authorisation: the slot's class decides.
 
-**What it cannot reach** - Porth's sessions, whose keys carry no environment, so a session held to one
-slot cannot touch them - is named in the response rather than passed over. A dry run lists what would
+A dry run lists what would
 go and removes nothing (C14).
 """
 from __future__ import annotations
@@ -48,11 +52,11 @@ from envelope import ContractError
 from porth_tenant import Porth
 
 CLAIM_MAPPING = "porth-claim-mapping"
+SESSION = "porth-session"
 ROLE = "porth-role"
 #: Ordered: claim mappings are found through their tenants, and tenants go before their organisations.
-ORDER = (ROLE, CLAIM_MAPPING, porth_tenant.ENTITY, porth_org.ENTITY)
+ORDER = (SESSION, ROLE, CLAIM_MAPPING, porth_tenant.ENTITY, porth_org.ENTITY)
 PLATFORM = "platform"
-UNREACHABLE = "Porth's sessions carry no environment, so this adapter cannot reach them; a session held by a removed user is not removed here"
 
 
 def confirm(slot_cfg: dict, payload: object) -> None:
@@ -226,6 +230,24 @@ def _tenants(slot: Slot, env_scope: str, dry_run: bool) -> str:
     return f"{porth_tenant.ENTITY}: removed tenant(s) {gone or '(none)'} - {rows} tenant row(s), with {also}"
 
 
+def _sessions(slot: Slot, _env_scope: str, dry_run: bool) -> str:
+    table = os.environ["PORTH_SESSIONS_TABLE"]
+    keys = [k["AttributeName"] for k in slot.porth.db.describe_table(TableName=table)["Table"]["KeySchema"]]
+    names = {f"#k{n}": k for n, k in enumerate(keys)}
+    scan = {"TableName": table, "ProjectionExpression": ", ".join(names), "ExpressionAttributeNames": names}
+    count, start = 0, None
+    while True:
+        page = slot.porth.db.scan(**scan, **({"ExclusiveStartKey": start} if start else {}))
+        for row in page.get("Items", []):
+            count += 1
+            if not dry_run:
+                slot.porth.db.delete_item(TableName=table, Key=row)
+        start = page.get("LastEvaluatedKey")
+        if not start:
+            break
+    return f"{SESSION}: {'would remove' if dry_run else 'removed'} {count} session(s), in every environment on this install"
+
+
 def _orgs(slot: Slot, env_scope: str, dry_run: bool) -> str:
     gone = slot.fixture_orgs()
     held = sorted({
@@ -251,7 +273,7 @@ def _orgs(slot: Slot, env_scope: str, dry_run: bool) -> str:
     return f"{porth_org.ENTITY}: removed organisation(s) {labels or '(none)'}"
 
 
-RESETS = {ROLE: _roles, CLAIM_MAPPING: _claim_mappings, porth_tenant.ENTITY: _tenants, porth_org.ENTITY: _orgs}
+RESETS = {SESSION: _sessions, ROLE: _roles, CLAIM_MAPPING: _claim_mappings, porth_tenant.ENTITY: _tenants, porth_org.ENTITY: _orgs}
 
 
 def reset(entity: str | None, slot_cfg: dict, run_id: str, dry_run: bool, payload: object) -> tuple[list[dict], list[str]]:
@@ -275,9 +297,9 @@ def reset(entity: str | None, slot_cfg: dict, run_id: str, dry_run: bool, payloa
                 for t in slot.fixture_tenants():
                     slot.tenants.pop(t)
         stray = slot.clear_strays(True) if entity is None else None
-        return [], ["dry run: nothing removed", *notes, *([stray] if stray else []), UNREACHABLE]
+        return [], ["dry run: nothing removed", *notes, *([stray] if stray else [])]
     for name in ORDER if entity is None else (entity,):
         notes.append(RESETS[name](slot, env_scope, False))
     # Only a full reset clears them: they are every entity's, and a scoped reset leaves the others be.
     stray = slot.clear_strays(False) if entity is None else None
-    return [], [*notes, *([stray] if stray else []), "the platform baseline is untouched", UNREACHABLE]
+    return [], [*notes, *([stray] if stray else []), "the platform baseline is untouched"]

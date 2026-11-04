@@ -70,7 +70,7 @@ Resources:
             Effect: Allow
             Action: sts:AssumeRole
             Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/porth-provisioning-adapter-*
-          # Porth's data, never its tables: every data-plane call on the six families and their
+          # Porth's data, never its tables: every data-plane call on the seven families and their
           # indexes - never porth-*, which on main also matches the sample app's own table - and no
           # CreateTable, UpdateTable or DeleteTable.
           - Sid: PorthDataPlane
@@ -93,6 +93,7 @@ Resources:
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-claim-mapping-configs-*
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-users-*
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-org-units-*
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-sessions-*
           # prawf's own bookkeeping: which run wrote what (the audit table, template.yml).
           - Sid: PrawfAdapterTables
             Effect: Allow

@@ -84,6 +84,13 @@ ENTITIES: tuple[Entity, ...] = (
         verbs=("seed", "reset", "teardown"),
     ),
     Entity(
+        id="porth-session",
+        description="Porth's login sessions. Reset clears the whole table, in every environment.",
+        destructive=True,
+        resources=("sessions: the whole table. Its keys carry no environment, so this is not held to a slot",),
+        verbs=("reset",),
+    ),
+    Entity(
         id="porth-org",
         description="An organisation for fixture tenants. Seeded before them, torn down after them.",
         destructive=True,

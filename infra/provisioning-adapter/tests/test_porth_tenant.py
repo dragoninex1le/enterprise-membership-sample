@@ -20,7 +20,8 @@ from test_adapter import aws, handler  # noqa: F401 - the adapter's modules, on 
 
 SLOT = "porth-dau"
 TABLES = {"tenants": "porth-tenants-dev", "roles": "porth-roles-dev", "permissions": "porth-permissions-dev",
-          "claims": "porth-claim-mapping-configs-dev", "users": "porth-users-dev", "org_units": "porth-org-units-dev"}
+          "claims": "porth-claim-mapping-configs-dev", "users": "porth-users-dev", "org_units": "porth-org-units-dev",
+          "sessions": "porth-sessions-dev"}
 AUDIT = "prawf-adapter-audit"  # prawf's own table - never one of Porth's
 ORG_ID = "0b7d3e52-9a51-4bd4-8a1e-3f0c2d1e9a77"
 #: The install's /porth/auth blob, as build_auth_blob.py writes it - synthetic values.
@@ -71,6 +72,9 @@ def porth(monkeypatch):
         _table(ddb, TABLES["claims"], "PK", "SK", [("gsi1", "gsi1pk", "gsi1sk")])
         _table(ddb, TABLES["users"], "PK", "SK", [("gsi3", "gsi3pk", "gsi3sk")])
         _table(ddb, TABLES["org_units"], "PK", "SK", [])
+        ddb.create_table(TableName=TABLES["sessions"], BillingMode="PAY_PER_REQUEST",
+                         KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+                         AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}])
         _table(ddb, AUDIT, "PK", "SK", [])
         events = boto3.client("events")
         events.create_event_bus(Name="porth-events")
@@ -103,6 +107,7 @@ def porth(monkeypatch):
         monkeypatch.setenv("PORTH_CLAIM_MAPPING_CONFIGS_TABLE", TABLES["claims"])
         monkeypatch.setenv("PORTH_USERS_TABLE", TABLES["users"])
         monkeypatch.setenv("PORTH_ORG_UNITS_TABLE", TABLES["org_units"])
+        monkeypatch.setenv("PORTH_SESSIONS_TABLE", TABLES["sessions"])
         monkeypatch.setenv("PRAWF_AUDIT_TABLE", AUDIT)
         monkeypatch.setenv("PORTH_STACK_NAME", "serverlessrepo-porth-components")
         monkeypatch.setenv("ADAPTER_VERSION", "test-build")

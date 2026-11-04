@@ -129,6 +129,11 @@ def tenants_table_arn() -> str:
     return f"arn:aws:dynamodb:{region}:{account}:table/{os.environ['PORTH_TENANTS_TABLE']}"
 
 
+def sessions_table_arn() -> str:
+    """Porth's sessions table, whose keys carry no environment, so LeadingKeys cannot hold it to a slot."""
+    return tenants_table_arn().rsplit("/", 1)[0] + f"/{os.environ['PORTH_SESSIONS_TABLE']}"
+
+
 def session_policy(env_scope: str) -> str:
     """The inline policy that narrows the data role to one slot for one call."""
     if not _SLOT_NAME.fullmatch(env_scope):
@@ -148,7 +153,10 @@ def session_policy(env_scope: str) -> str:
             },
             {"Sid": "PorthEvents", "Effect": "Allow", "Action": list(EVENT_ACTIONS), "Resource": "*"},
             {"Sid": "ScanTheTenantsTable", "Effect": "Allow", "Action": [SCAN], "Resource": tenants_table_arn()},
-            {"Sid": "ScanNothingElse", "Effect": "Deny", "Action": [SCAN], "NotResource": tenants_table_arn()},
+            # reset of porth-session clears the table. The one thing this session reaches beyond its
+            # slot, and only to find rows and delete them - it can't read a row's token, or write one.
+            {"Sid": "ClearTheSessionsTable", "Effect": "Allow", "Action": [SCAN, "dynamodb:DeleteItem", "dynamodb:DescribeTable"], "Resource": sessions_table_arn()},
+            {"Sid": "ScanNothingElse", "Effect": "Deny", "Action": [SCAN], "NotResource": [tenants_table_arn(), sessions_table_arn()]},
             {"Sid": "NeverPartiQL", "Effect": "Deny", "Action": list(NEVER), "Resource": "*"},
         ],
     }, separators=(",", ":"))
