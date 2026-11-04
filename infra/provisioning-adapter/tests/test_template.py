@@ -104,10 +104,11 @@ def test_the_data_role_reads_porth_writes_single_items_and_denies_partiql(tpl):
     assert {"dynamodb:Scan", "dynamodb:PartiQLSelect", "dynamodb:ExecuteStatement"} <= denied
 
 
-def test_the_data_role_writes_porths_four_tables_and_no_index(tpl):
+def test_the_data_role_writes_porths_six_tables_and_no_index(tpl):
     (writes,) = [st for n, st in _statements(tpl) if n == "DataRole" and st.get("Sid") == "WritePorthTables"]
     tables = {str(r) for r in writes["Resource"]}
-    assert len(tables) == 4
+    assert len(tables) == 6
+    assert any("Users" in t for t in tables) and any("OrgUnits" in t for t in tables), "reset removes what is keyed under a tenant"
     assert any("ClaimMapping" in t for t in tables), "bootstrap writes the platform claim mapping; reset removes others"
     assert not any("index" in t for t in tables), "writes go to tables; indexes are read"
 

@@ -13,7 +13,9 @@ resettable entity's baseline is therefore *none of its own rows*:
   platform, through Porth's own `delete_role`; the seeded `tenant-admin` stays, with its grants;
 * `porth-claim-mapping` - every claim-mapping version of every tenant except the platform's;
 * `porth-tenant` - every tenant except the platform, with its roles, grants and permissions (both
-  grant key shapes, PORTH-604) and its IdP config, which lives on the tenant row;
+  grant key shapes, PORTH-604), its IdP config, which lives on the tenant row, and everything keyed
+  under it: its users, their role assignments and its org units. Nothing is left pointing at a tenant
+  that has gone (Richard, 2026-11-04). The platform's users are baseline, and stay;
 * `porth-org` - every organisation except the platform's. Refused while tenants still belong to one:
   reset `porth-tenant` first, which reset with no entity does.
 
@@ -30,9 +32,9 @@ mappings are then reached by the tenant's own keys.
 disposable one the caller must say what it believes the slot to be (`confirm_environment_class`) and
 is refused on a mismatch - a mistake-detector, never an authorisation: the slot's class decides.
 
-**What it cannot reach** - Porth's users, org-units and sessions tables, which this adapter holds no
-grant on - is named in the response rather than passed over. A dry run lists what would go and
-removes nothing (C14).
+**What it cannot reach** - Porth's sessions, whose keys carry no environment, so a session held to one
+slot cannot touch them - is named in the response rather than passed over. A dry run lists what would
+go and removes nothing (C14).
 """
 from __future__ import annotations
 
@@ -50,7 +52,7 @@ ROLE = "porth-role"
 #: Ordered: claim mappings are found through their tenants, and tenants go before their organisations.
 ORDER = (ROLE, CLAIM_MAPPING, porth_tenant.ENTITY, porth_org.ENTITY)
 PLATFORM = "platform"
-UNREACHABLE = "Porth's users, org-units and sessions tables are outside this adapter's grant; any rows there for removed tenants remain"
+UNREACHABLE = "Porth's sessions carry no environment, so this adapter cannot reach them; a session held by a removed user is not removed here"
 
 
 def confirm(slot_cfg: dict, payload: object) -> None:
@@ -201,8 +203,11 @@ def _claim_mappings(slot: Slot, env_scope: str, dry_run: bool) -> str:
 def _tenants(slot: Slot, env_scope: str, dry_run: bool) -> str:
     gone = slot.fixture_tenants()
     rows = sum(len(slot.tenants[t]) for t in gone)
+    users = sum(len(porth_tenant.users_of(slot.porth, env_scope, t)) for t in gone)
+    units = sum(len(porth_tenant.org_units_of(slot.porth, env_scope, t)) for t in gone)
+    also = f"their roles, grants, permissions, {users} user(s) with their role assignments, and {units} org unit(s)"
     if dry_run:
-        return f"{porth_tenant.ENTITY}: would remove tenant(s) {gone or '(none)'} - {rows} tenant row(s), with their roles, grants and permissions"
+        return f"{porth_tenant.ENTITY}: would remove tenant(s) {gone or '(none)'} - {rows} tenant row(s), with {also}"
     table, roles_table, _ = porth_tenant._tables()
     for tenant_id in gone:
         # The legacy grant shape (pre PORTH-604) is keyed by role alone; find the roles first.
@@ -218,7 +223,7 @@ def _tenants(slot: Slot, env_scope: str, dry_run: bool) -> str:
                                      metadata={"tenant_id": tenant_id})
         slot.porth.publisher.publish_tenant_lifecycle(action="deleted", tenant_id=tenant_id)
     slot.forget(porth_tenant.ENTITY)
-    return f"{porth_tenant.ENTITY}: removed tenant(s) {gone or '(none)'} - {rows} tenant row(s), with their roles, grants and permissions"
+    return f"{porth_tenant.ENTITY}: removed tenant(s) {gone or '(none)'} - {rows} tenant row(s), with {also}"
 
 
 def _orgs(slot: Slot, env_scope: str, dry_run: bool) -> str:

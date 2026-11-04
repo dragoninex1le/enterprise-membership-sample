@@ -110,8 +110,8 @@ def _boundary(boot):
 def test_the_boundary_names_porth_tables_and_never_the_apps(boot):
     tables = [r for st in _boundary(boot) if st["Effect"] == "Allow" for r in resources(st) if ":table/" in r]
     families = sorted(r.rsplit(":table/", 1)[1] for r in tables)
-    assert families == ["porth-claim-mapping-configs-*", "porth-permissions-*", "porth-roles-*", "porth-tenants-*",
-                        "prawf-adapter-*"]
+    assert families == ["porth-claim-mapping-configs-*", "porth-org-units-*", "porth-permissions-*", "porth-roles-*",
+                        "porth-tenants-*", "porth-users-*", "prawf-adapter-*"]
     assert not any(f in ("porth-*", "prawf-*", "*") for f in families)
 
 
@@ -181,6 +181,7 @@ def test_the_execution_role_can_read_the_lambda_code_and_nothing_more_of_s3(boot
 _RESOLVED = {"AWS::Region": "us-east-1", "AWS::AccountId": "195950944420", "PorthStackName": "serverlessrepo-porth-components",
              "PorthTenantsTable": "porth-tenants-dev", "PorthRolesTable": "porth-roles-dev",
              "PorthPermissionsTable": "porth-permissions-dev", "PorthClaimMappingConfigsTable": "porth-claim-mapping-configs-dev",
+             "PorthUsersTable": "porth-users-dev", "PorthOrgUnitsTable": "porth-org-units-dev",
              "PorthEventBus": "porth-events-dev"}
 
 
