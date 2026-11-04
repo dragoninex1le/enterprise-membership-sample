@@ -38,7 +38,7 @@ from pathlib import Path
 VERBS = ("bootstrap", "seed", "reset", "ensure", "absent", "teardown", "status")
 ENTITIES = (
     "porth-platform", "porth-org", "porth-tenant", "porth-claim-mapping",
-    "porth-app-permission", "porth-role-grant", "porth-role", "porth-idp",
+    "porth-app-permission", "porth-role-grant", "porth-role", "porth-idp", "porth-session",
 )
 #: common.schema.json $defs/reasonCode - the closed list (§9).
 REASON_CODES = {
@@ -52,7 +52,7 @@ IMPLEMENTED = {
     ("seed", "porth-org"), ("reset", "porth-org"), ("teardown", "porth-org"),
     ("seed", "porth-tenant"), ("reset", "porth-tenant"), ("teardown", "porth-tenant"),
     ("seed", "porth-claim-mapping"), ("reset", "porth-claim-mapping"), ("teardown", "porth-claim-mapping"),
-    ("seed", "porth-role"), ("reset", "porth-role"), ("teardown", "porth-role"),
+    ("reset", "porth-session"), ("seed", "porth-role"), ("reset", "porth-role"), ("teardown", "porth-role"),
 }
 INSTALL_VERBS = ["capabilities", "bootstrap", "seed", "reset", "teardown"]
 EXTENSION_TYPES = ["porth.org", "porth.permission", "porth.role", "porth.role-grant", "porth.claim-mapping"]

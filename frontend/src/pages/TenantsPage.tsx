@@ -1,132 +1,18 @@
-// PORTH-128 — Flat tenant list with org filter, New Org, New Tenant (incl. IdP), Edit Tenant (incl. IdP)
+// PORTH-128 — Flat tenant list with org filter, New Tenant (incl. IdP), Edit Tenant (incl. IdP)
+//
 // PORTH-595 — Announce: re-emit a tenant's lifecycle event so a service deployed after it can catch up
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { organizationsApi } from '../api/organizations'
 import { tenantsApi } from '../api/tenants'
-import type { Organization, Tenant, CreateOrganizationRequest, CreateTenantRequest, UpdateTenantRequest, TenantIdpConfig, TenantTier } from '../api/types'
-
-const TIERS: readonly TenantTier[] = ['production', 'staging', 'development', 'sandbox']
+import { EMPTY_IDP, IdpFields, idpFormOf, idpFromForm, type IdpForm } from '../components/IdpFields'
+import NewTenantWizard from '../components/NewTenantWizard'
+import type { Organization, Tenant, UpdateTenantRequest } from '../api/types'
 
 interface TenantRow extends Tenant { org_name: string }
 
-interface NewOrgForm { name: string; slug: string; admin_role_source_key: string }
-interface NewTenantForm {
-  org_id: string; tenant_id: string; display_name: string; tenant_tier: TenantTier
-  admin_role_source_key: string
-  idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string; idp_org_id: string
-}
-interface EditTenantForm {
+interface EditTenantForm extends IdpForm {
   display_name: string
-  idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string; idp_org_id: string
-}
-
-const EMPTY_ORG: NewOrgForm = { name: '', slug: '', admin_role_source_key: 'tenant-admin' }
-const EMPTY_TENANT: NewTenantForm = { org_id: '', tenant_id: '', display_name: '', tenant_tier: 'production', admin_role_source_key: 'tenant-admin', idp_enabled: false, idp_domain: '', idp_client_id: '', idp_audience: '', idp_org_id: '' }
-
-/** The Auth0 domain an operator typed, reduced to the host it names. */
-function hostOf(domain: string): string {
-  return domain.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
-}
-
-/** Porth's neutral OIDC config, built from the form's Auth0 fields.
- *
- * Porth replaced `{ provider, domain }` with `{ issuer, jwks_uri, client_id,
- * protocol }` (PORTH-488/S5) and ignores fields it does not know. The old body
- * therefore lost its IdP silently and the create failed 422 on the fields that
- * were missing.
- *
- * `protocol` is not optional in practice: the server defaults it to "oidc",
- * which would store an Auth0 tenant as generic OIDC without the authorize and
- * token endpoints its login needs. The create would succeed; the first login
- * would not. `issuer` keeps its trailing slash — it has to equal the token's
- * `iss`, and Auth0 issues `https://{domain}/`.
- *
- * `provider_org_id` is what makes a tenant login a TENANT login. Porth's auth
- * proxy maps the host a user logs in at to this id and sends it to Auth0 as the
- * organization; resolution then keys on (issuer, client_id, provider_org_id).
- * Left empty on a tenant that shares its Auth0 app with the platform tenant, the
- * login is unscoped and resolves to platform.
- *
- * `base` is the tenant's existing config when editing. PATCH replaces the whole
- * object, so fields this form never shows (explicit authorize and token
- * endpoints) are carried over rather than wiped by an edit to the audience.
- */
-function idpFromForm(
-  f: { idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string; idp_org_id: string },
-  base?: TenantIdpConfig,
-): TenantIdpConfig | undefined {
-  if (!f.idp_enabled) return undefined
-  const host = hostOf(f.idp_domain)
-  return {
-    ...base,
-    protocol: 'auth0',
-    issuer: `https://${host}/`,
-    jwks_uri: `https://${host}/.well-known/jwks.json`,
-    client_id: f.idp_client_id,
-    audience: f.idp_audience || undefined,
-    provider_org_id: f.idp_org_id.trim() || undefined,
-  }
-}
-
-/** The domain to show when editing: the issuer's host, or a pre-PORTH-488 record's `domain`. */
-function domainOf(cfg?: TenantIdpConfig): string {
-  if (!cfg) return ''
-  try {
-    if (cfg.issuer) return new URL(cfg.issuer).host
-  } catch {
-    // not a URL — fall through to the legacy field
-  }
-  return (cfg as unknown as { domain?: string }).domain ?? ''
-}
-
-function IdpFields<T extends { idp_enabled: boolean; idp_domain: string; idp_client_id: string; idp_audience: string; idp_org_id: string }>(
-  { prefix, form, setForm }: { prefix: string; form: T; setForm: (fn: (f: T) => T) => void }
-) {
-  return (
-    <div className="border-t border-gray-100 pt-4">
-      <label className="flex items-center gap-2 cursor-pointer">
-        <input type="checkbox" checked={form.idp_enabled}
-          onChange={e => setForm(f => ({ ...f, idp_enabled: e.target.checked }))}
-          className="rounded" />
-        <span className="text-sm font-medium text-gray-700">Identity Provider</span>
-      </label>
-      {form.idp_enabled && (
-        <div className="mt-3 space-y-3">
-          <div>
-            <label htmlFor={`${prefix}-domain`} className="block text-sm font-medium text-gray-700 mb-1">Domain</label>
-            <input id={`${prefix}-domain`} type="text" required value={form.idp_domain}
-              onChange={e => setForm(f => ({ ...f, idp_domain: e.target.value }))}
-              placeholder="your-tenant.auth0.com"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-          </div>
-          <div>
-            <label htmlFor={`${prefix}-cid`} className="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
-            <input id={`${prefix}-cid`} type="text" required value={form.idp_client_id}
-              onChange={e => setForm(f => ({ ...f, idp_client_id: e.target.value }))}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-          </div>
-          <div>
-            <label htmlFor={`${prefix}-aud`} className="block text-sm font-medium text-gray-700 mb-1">Audience <span className="text-gray-400 font-normal">(optional)</span></label>
-            <input id={`${prefix}-aud`} type="text" value={form.idp_audience}
-              onChange={e => setForm(f => ({ ...f, idp_audience: e.target.value }))}
-              placeholder="https://your-api.example.com"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-          </div>
-          <div>
-            <label htmlFor={`${prefix}-idp-org`} className="block text-sm font-medium text-gray-700 mb-1">Auth0 Organization ID</label>
-            <input id={`${prefix}-idp-org`} type="text" value={form.idp_org_id}
-              onChange={e => setForm(f => ({ ...f, idp_org_id: e.target.value }))}
-              placeholder="org_…"
-              pattern="org_[A-Za-z0-9]+"
-              title="An Auth0 Organization ID, e.g. org_AbC123"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-            <p className="mt-1 text-xs text-gray-400">Needed when this Auth0 app is shared with other tenants. Without it, logging in at this tenant's address lands in the platform tenant.</p>
-          </div>
-        </div>
-      )}
-    </div>
-  )
 }
 
 export default function TenantsPage() {
@@ -137,17 +23,9 @@ export default function TenantsPage() {
   const [error, setError] = useState<string | null>(null)
   const [filterOrgId, setFilterOrgId] = useState('')
 
-  // New Org
-  const [orgOpen, setOrgOpen] = useState(false)
-  const [orgForm, setOrgForm] = useState<NewOrgForm>(EMPTY_ORG)
-  const [orgSaving, setOrgSaving] = useState(false)
-  const [orgError, setOrgError] = useState<string | null>(null)
-
   // New Tenant
   const [tenantOpen, setTenantOpen] = useState(false)
-  const [tenantForm, setTenantForm] = useState<NewTenantForm>(EMPTY_TENANT)
-  const [tenantSaving, setTenantSaving] = useState(false)
-  const [tenantError, setTenantError] = useState<string | null>(null)
+  const [tenantWarning, setTenantWarning] = useState<string | null>(null)
 
   // Announce — re-emit a tenant's lifecycle event so consuming services that
   // were deployed after it existed can catch up (PORTH-595).
@@ -156,7 +34,7 @@ export default function TenantsPage() {
 
   // Edit Tenant
   const [editing, setEditing] = useState<TenantRow | null>(null)
-  const [editForm, setEditForm] = useState<EditTenantForm>({ display_name: '', idp_enabled: false, idp_domain: '', idp_client_id: '', idp_audience: '', idp_org_id: '' })
+  const [editForm, setEditForm] = useState<EditTenantForm>({ ...EMPTY_IDP, display_name: '' })
   const [editSaving, setEditSaving] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
 
@@ -184,54 +62,6 @@ export default function TenantsPage() {
   useEffect(() => { loadAll() }, [])
 
   const visible = filterOrgId ? tenants.filter(t => t.org_id === filterOrgId) : tenants
-
-  async function submitOrg(e: React.FormEvent) {
-    e.preventDefault()
-    setOrgSaving(true); setOrgError(null)
-    const body: CreateOrganizationRequest = {
-      name: orgForm.name, slug: orgForm.slug,
-      tenant: { tenant_id: orgForm.slug, display_name: orgForm.name, tenant_tier: 'production', admin_role_source_key: orgForm.admin_role_source_key },
-    }
-    try {
-      await organizationsApi.create(body)
-      setOrgOpen(false); setOrgForm(EMPTY_ORG); loadAll()
-    } catch (e: unknown) { setOrgError(e instanceof Error ? e.message : 'Failed') }
-    finally { setOrgSaving(false) }
-  }
-
-  async function submitTenant(e: React.FormEvent) {
-    e.preventDefault()
-    setTenantSaving(true); setTenantError(null)
-    const body: CreateTenantRequest = {
-      org_id: tenantForm.org_id, tenant_id: tenantForm.tenant_id,
-      display_name: tenantForm.display_name, tenant_tier: tenantForm.tenant_tier,
-      admin_role_source_key: tenantForm.admin_role_source_key,
-      idp_config_override: idpFromForm(tenantForm),
-    }
-    try {
-      await tenantsApi.create(body)
-    } catch (e: unknown) {
-      setTenantError(e instanceof Error ? e.message : 'Failed')
-      setTenantSaving(false)
-      return
-    }
-    // Porth's create accepts idp_config_override and does not store it:
-    // TenantRepository.create writes an explicit field list that omits it, so
-    // the tenant comes back with no IdP and nobody can log in to it. PATCH does
-    // store it, so set it straight away. Harmless once Porth's create is fixed —
-    // this writes the same config a second time.
-    if (body.idp_config_override) {
-      try {
-        await tenantsApi.update(body.tenant_id, { idp_config_override: body.idp_config_override })
-      } catch (e: unknown) {
-        setTenantError(`Tenant created, but its identity provider was not saved: ${e instanceof Error ? e.message : 'Failed'}. Use Edit to set it.`)
-        setTenantSaving(false)
-        loadAll()
-        return
-      }
-    }
-    setTenantOpen(false); setTenantForm(EMPTY_TENANT); setTenantSaving(false); loadAll()
-  }
 
   async function submitEdit(e: React.FormEvent) {
     e.preventDefault()
@@ -280,11 +110,7 @@ export default function TenantsPage() {
     setEditing(t)
     setEditForm({
       display_name: t.display_name,
-      idp_enabled: !!t.idp_config_override,
-      idp_domain: domainOf(t.idp_config_override),
-      idp_client_id: t.idp_config_override?.client_id ?? '',
-      idp_audience: t.idp_config_override?.audience ?? '',
-      idp_org_id: t.idp_config_override?.provider_org_id ?? '',
+      ...idpFormOf(t.idp_config_override),
     })
     setEditError(null)
   }
@@ -306,16 +132,14 @@ export default function TenantsPage() {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Tenants</h1>
         <div className="flex gap-2">
-          <button onClick={() => { setOrgForm(EMPTY_ORG); setOrgError(null); setOrgOpen(true) }}
-            className="px-4 py-2 bg-white border border-gray-300 text-gray-700 text-sm rounded-lg hover:bg-gray-50">
-            + New Organization
-          </button>
-          <button onClick={() => { setTenantForm({ ...EMPTY_TENANT, org_id: filterOrgId }); setTenantError(null); setTenantOpen(true) }}
+          <button onClick={() => setTenantOpen(true)}
             className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700">
             + New Tenant
           </button>
         </div>
       </div>
+
+      {tenantWarning && <div role="alert" className="mb-4 rounded-md bg-amber-50 border border-amber-200 px-3 py-2 text-sm text-amber-800">{tenantWarning}</div>}
 
       <div className="mb-4 flex items-center gap-3">
         <span className="text-sm text-gray-500">Filter by organization:</span>
@@ -394,104 +218,12 @@ export default function TenantsPage() {
         </table>
       )}
 
-      {/* New Organization Modal */}
-      {orgOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-1">New Organization</h2>
-            <p className="text-xs text-gray-400 mb-4">An initial tenant is created automatically using the slug as its ID.</p>
-            {orgError && <div className="mb-3 rounded-md bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">{orgError}</div>}
-            <form onSubmit={submitOrg} className="space-y-4">
-              <div>
-                <label htmlFor="org-name" className="block text-sm font-medium text-gray-700 mb-1">Organization Name</label>
-                <input id="org-name" type="text" required value={orgForm.name}
-                  onChange={e => setOrgForm(f => ({ ...f, name: e.target.value }))}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-              </div>
-              <div>
-                <label htmlFor="org-slug" className="block text-sm font-medium text-gray-700 mb-1">Slug</label>
-                <input id="org-slug" type="text" required value={orgForm.slug}
-                  onChange={e => setOrgForm(f => ({ ...f, slug: e.target.value }))}
-                  placeholder="e.g. acme"
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-                {orgForm.slug && <p className="mt-1 text-xs text-gray-400">Initial tenant ID: <span className="font-mono">{orgForm.slug}</span></p>}
-              </div>
-              <div>
-                <label htmlFor="org-arsk" className="block text-sm font-medium text-gray-700 mb-1">Admin Role Source Key</label>
-                <input id="org-arsk" type="text" required value={orgForm.admin_role_source_key}
-                  onChange={e => setOrgForm(f => ({ ...f, admin_role_source_key: e.target.value }))}
-                  placeholder="e.g. tenant-admin"
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-                <p className="mt-1 text-xs text-gray-400">JWT claim value your IdP places in the roles claim for admin users.</p>
-              </div>
-              <div className="flex justify-end gap-3 pt-2">
-                <button type="button" onClick={() => setOrgOpen(false)} className="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
-                <button type="submit" disabled={orgSaving} className="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50">
-                  {orgSaving ? 'Creating…' : 'Create'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* New Tenant Modal */}
       {tenantOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">New Tenant</h2>
-            {tenantError && <div className="mb-3 rounded-md bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">{tenantError}</div>}
-            <form onSubmit={submitTenant} className="space-y-4">
-              <div>
-                <label htmlFor="nt-org" className="block text-sm font-medium text-gray-700 mb-1">Organization</label>
-                <select id="nt-org" required value={tenantForm.org_id}
-                  onChange={e => setTenantForm(f => ({ ...f, org_id: e.target.value }))}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
-                  <option value="">Select an organization…</option>
-                  {orgs.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
-                </select>
-              </div>
-              <div>
-                <label htmlFor="nt-tid" className="block text-sm font-medium text-gray-700 mb-1">Tenant ID</label>
-                <input id="nt-tid" type="text" required value={tenantForm.tenant_id}
-                  onChange={e => setTenantForm(f => ({ ...f, tenant_id: e.target.value }))}
-                  placeholder="e.g. acme-prod"
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-                <p className="mt-1 text-xs text-gray-400">Cannot be changed after creation.</p>
-              </div>
-              <div>
-                <label htmlFor="nt-dn" className="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
-                <input id="nt-dn" type="text" required value={tenantForm.display_name}
-                  onChange={e => setTenantForm(f => ({ ...f, display_name: e.target.value }))}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-              </div>
-              <div>
-                <label htmlFor="nt-arsk" className="block text-sm font-medium text-gray-700 mb-1">Admin Role Source Key</label>
-                <input id="nt-arsk" type="text" required value={tenantForm.admin_role_source_key}
-                  onChange={e => setTenantForm(f => ({ ...f, admin_role_source_key: e.target.value }))}
-                  placeholder="e.g. tenant-admin"
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-                <p className="mt-1 text-xs text-gray-400">JWT claim value your IdP places in the roles claim for admin users.</p>
-              </div>
-              <div>
-                <label htmlFor="nt-env" className="block text-sm font-medium text-gray-700 mb-1">Tenant Tier</label>
-                <select id="nt-env" value={tenantForm.tenant_tier}
-                  onChange={e => setTenantForm(f => ({ ...f, tenant_tier: e.target.value as TenantTier }))}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
-                  {TIERS.map(t => <option key={t} value={t}>{t}</option>)}
-                </select>
-                <p className="mt-1 text-xs text-gray-400">A label on the tenant — not the environment it lives in, which comes from the host.</p>
-              </div>
-              <IdpFields prefix="nt" form={tenantForm} setForm={setTenantForm} />
-              <div className="flex justify-end gap-3 pt-2">
-                <button type="button" onClick={() => setTenantOpen(false)} className="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
-                <button type="submit" disabled={tenantSaving} className="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50">
-                  {tenantSaving ? 'Creating…' : 'Create'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <NewTenantWizard orgs={orgs} initialOrgId={filterOrgId} onClose={warning => {
+          setTenantOpen(false)
+          setTenantWarning(warning)
+          loadAll()
+        }} />
       )}
 
       {/* Edit Tenant Modal */}

@@ -77,8 +77,18 @@ ENTITIES: tuple[Entity, ...] = (
             "tenants: PK=ENV#{s}#TENANT#{tid} SK=METADATA (in an existing porth-org)",
             "roles: pk=ENV#{s}#TENANT#{tid} sk=ROLE#{uuid} (tenant-admin) + pk=...#ROLE#{uuid} sk=PERM#{key}",
             "permissions: pk=ENV#{s}#TENANT#{tid}#NS#porth-tenant sk=PERM#{key}",
+            "users: PK=ENV#{s}#TENANT#{tid}#USER#{uuid}, removed by reset and teardown (Porth creates them at login)",
+            "roles: pk=ENV#{s}#TENANT#{tid}#USER#{uuid} sk=ROLE#{uuid} (a user's role assignment), removed with the user",
+            "org-units: PK=ENV#{s}#TENANT#{tid} sk=ORG_UNIT#{uuid}, removed by reset and teardown",
         ),
         verbs=("seed", "reset", "teardown"),
+    ),
+    Entity(
+        id="porth-session",
+        description="Porth's login sessions. Reset clears the whole table, in every environment.",
+        destructive=True,
+        resources=("sessions: the whole table. Its keys carry no environment, so this is not held to a slot",),
+        verbs=("reset",),
     ),
     Entity(
         id="porth-org",

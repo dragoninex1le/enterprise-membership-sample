@@ -150,7 +150,7 @@ jobs:
             aws cloudformation describe-stacks --stack-name "$PORTH_STACK_NAME" --region "$AWS_REGION" \
               --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text
           }
-          for key in TenantsTableName RolesTableName PermissionsTableName ClaimMappingConfigsTableName EventBusName; do
+          for key in TenantsTableName RolesTableName PermissionsTableName ClaimMappingConfigsTableName UsersTableName OrgUnitsTableName SessionsTableName EventBusName; do
             value=$(out "$key")
             if [ -z "$value" ] || [ "$value" = "None" ]; then
               echo "::error::$PORTH_STACK_NAME has no $key output"
@@ -169,6 +169,9 @@ jobs:
           ROLES: ${{ steps.porth.outputs.RolesTableName }}
           PERMISSIONS: ${{ steps.porth.outputs.PermissionsTableName }}
           CLAIMS: ${{ steps.porth.outputs.ClaimMappingConfigsTableName }}
+          USERS: ${{ steps.porth.outputs.UsersTableName }}
+          ORG_UNITS: ${{ steps.porth.outputs.OrgUnitsTableName }}
+          SESSIONS: ${{ steps.porth.outputs.SessionsTableName }}
           BUS: ${{ steps.porth.outputs.EventBusName }}
         run: |
           set -euo pipefail
@@ -178,6 +181,9 @@ jobs:
           check porth-roles- "$ROLES"
           check porth-permissions- "$PERMISSIONS"
           check porth-claim-mapping-configs- "$CLAIMS"
+          check porth-users- "$USERS"
+          check porth-org-units- "$ORG_UNITS"
+          check porth-sessions- "$SESSIONS"
           check porth-events- "$BUS"
           exit $bad
 
@@ -283,6 +289,9 @@ jobs:
                 "PorthRolesTable=${{ steps.porth.outputs.RolesTableName }}" \
                 "PorthPermissionsTable=${{ steps.porth.outputs.PermissionsTableName }}" \
                 "PorthClaimMappingConfigsTable=${{ steps.porth.outputs.ClaimMappingConfigsTableName }}" \
+                "PorthUsersTable=${{ steps.porth.outputs.UsersTableName }}" \
+                "PorthOrgUnitsTable=${{ steps.porth.outputs.OrgUnitsTableName }}" \
+                "PorthSessionsTable=${{ steps.porth.outputs.SessionsTableName }}" \
                 "PorthEventBus=${{ steps.porth.outputs.EventBusName }}" \
                 "AdapterVersion=${GITHUB_SHA::12}" \
                 "$@"

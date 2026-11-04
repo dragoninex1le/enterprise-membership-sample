@@ -105,7 +105,7 @@ def test_reset_leaves_exactly_the_installs_baseline(testbed):
     assert platform_rows(SLOT) == testbed["baseline"], "the baseline, row for row - the app's grant included"
     assert tenants_in() == {"platform"}
     messages = " ".join(response["diagnostics"]["messages"])
-    assert "acme-test" in messages and "ems-test" in messages and "outside this adapter's grant" in messages
+    assert "acme-test" in messages and "ems-test" in messages
 
 
 def test_after_reset_the_platform_is_still_bootstrapped(testbed):
@@ -288,5 +288,102 @@ def test_a_full_reset_takes_arranged_roles_first_and_still_leaves_the_baseline(t
     _arrange_controller()
     response = reset()
     assert response["outcome"] == "ok", response
-    assert response["diagnostics"]["messages"][0].startswith("porth-role:")
+    assert [m.split(":")[0] for m in response["diagnostics"]["messages"][:2]] == ["porth-session", "porth-role"]
     assert platform_rows(SLOT) == testbed["baseline"]
+
+
+# ---------------------------------------------------------------- nothing left pointing at a removed tenant
+
+def add_user(tenant_id, user_id, scope=SLOT, role_id="role-1"):
+    """A user as Porth writes one at login, with a role assignment and an org unit beside it."""
+    base = f"ENV#{scope}#TENANT#{tenant_id}"
+    db = boto3.resource("dynamodb")
+    db.Table(TABLES["users"]).put_item(Item={"PK": f"{base}#USER#{user_id}", "SK": "METADATA", "id": user_id, "tenant_id": tenant_id,
+                                             "gsi3pk": base, "gsi3sk": f"USER#{user_id}"})
+    db.Table(TABLES["roles"]).put_item(Item={"pk": f"{base}#USER#{user_id}", "sk": f"ROLE#{role_id}"})
+    db.Table(TABLES["org_units"]).put_item(Item={"PK": base, "SK": f"ORG_UNIT#{user_id}"})
+
+
+def people(scope=SLOT):
+    db = boto3.resource("dynamodb")
+    users = {i["PK"].split("#USER#")[1] for i in db.Table(TABLES["users"]).scan()["Items"] if i["PK"].startswith(f"ENV#{scope}#")}
+    assignments = {i["pk"].split("#USER#")[1] for i in db.Table(TABLES["roles"]).scan()["Items"]
+                   if i["pk"].startswith(f"ENV#{scope}#") and "#USER#" in i["pk"]}
+    units = {i["SK"].removeprefix("ORG_UNIT#") for i in db.Table(TABLES["org_units"]).scan()["Items"] if i["PK"].startswith(f"ENV#{scope}#")}
+    return users, assignments, units
+
+
+def test_reset_removes_a_removed_tenants_users_assignments_and_org_units(testbed):
+    add_user("acme-test", "u-acme"); add_user("ems-test", "u-ems")
+    response = reset()
+    assert response["outcome"] == "ok", response
+    assert people() == (set(), set(), set())
+    assert "2 user(s)" in " ".join(response["diagnostics"]["messages"])
+
+
+def test_the_platforms_users_stay_because_they_are_baseline(testbed):
+    add_user("platform", "u-platform"); add_user("ems-test", "u-ems")
+    reset()
+    assert people() == ({"u-platform"}, {"u-platform"}, {"u-platform"})
+
+
+def test_another_slots_users_are_never_touched(testbed):
+    add_user("ems-test", "u-other", scope="porth-sample"); add_user("ems-test", "u-ems")
+    reset()
+    assert people("porth-sample") == ({"u-other"}, {"u-other"}, {"u-other"})
+    assert people() == (set(), set(), set())
+
+
+def test_a_dry_run_counts_the_users_and_removes_none(testbed):
+    add_user("ems-test", "u-ems")
+    response = reset(dry_run=True)
+    assert "1 user(s)" in " ".join(response["diagnostics"]["messages"])
+    assert people() == ({"u-ems"}, {"u-ems"}, {"u-ems"})
+
+
+def test_a_removed_user_is_announced(testbed, porth):
+    add_user("ems-test", "u-ems")
+    reset()
+    assert "User.deleted" in porth["published"]()
+
+
+# ---------------------------------------------------------------- sessions, an entity in its own right
+
+def add_sessions(*ids):
+    table = boto3.resource("dynamodb").Table(TABLES["sessions"])
+    for i in ids:
+        table.put_item(Item={"pk": i, "environment": "porth-sample", "access_token": "a-token"})
+
+
+def sessions():
+    return {i["pk"] for i in boto3.resource("dynamodb").Table(TABLES["sessions"]).scan()["Items"]}
+
+
+def test_resetting_sessions_alone_clears_the_whole_table_and_nothing_else(testbed):
+    add_sessions("s1", "s2")
+    before = tenants_in()
+    response = reset("porth-session")
+    assert response["outcome"] == "ok", response
+    assert sessions() == set()
+    assert tenants_in() == before, "C16: resetting one entity leaves the others alone"
+    messages = " ".join(response["diagnostics"]["messages"])
+    assert "removed 2 session(s)" in messages and "every environment" in messages
+
+
+def test_a_full_reset_clears_sessions_too(testbed):
+    add_sessions("s1")
+    assert reset()["outcome"] == "ok"
+    assert sessions() == set()
+
+
+def test_a_dry_run_counts_sessions_and_removes_none_and_never_shows_a_token(testbed):
+    add_sessions("s1", "s2")
+    response = reset("porth-session", dry_run=True)
+    messages = " ".join(response["diagnostics"]["messages"])
+    assert "would remove 2 session(s)" in messages and "a-token" not in str(response)
+    assert sessions() == {"s1", "s2"}
+
+
+def test_clearing_an_empty_sessions_table_is_ok(testbed):
+    response = reset("porth-session")
+    assert response["outcome"] == "ok" and "removed 0 session(s)" in " ".join(response["diagnostics"]["messages"])

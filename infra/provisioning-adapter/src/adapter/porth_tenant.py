@@ -241,25 +241,47 @@ def teardown(env_scope: str, run_id: str, target_run: str) -> tuple[list[dict], 
     return [], [f"run {target_run}: removed tenant(s) {', '.join(removed) or '(none left)'} and everything under them"]
 
 
+def _query_all(porth: Porth, table: str, pk_attr: str, value: str, index: str | None = None) -> list[dict]:
+    kwargs = {"TableName": table, "KeyConditionExpression": f"{pk_attr} = :v",
+              "ExpressionAttributeValues": {":v": {"S": value}}}
+    if index:
+        kwargs["IndexName"] = index
+    items, start = [], None
+    while True:
+        if start:
+            kwargs["ExclusiveStartKey"] = start
+        page = porth.db.query(**kwargs)
+        items += page.get("Items", [])
+        start = page.get("LastEvaluatedKey")
+        if not start:
+            return items
+
+
+def users_of(porth: Porth, env_scope: str, tenant_id: str) -> list[dict]:
+    return _query_all(porth, os.environ["PORTH_USERS_TABLE"], "gsi3pk", f"ENV#{env_scope}#TENANT#{tenant_id}", index="gsi3")
+
+
+def org_units_of(porth: Porth, env_scope: str, tenant_id: str) -> list[dict]:
+    return _query_all(porth, os.environ["PORTH_ORG_UNITS_TABLE"], "PK", f"ENV#{env_scope}#TENANT#{tenant_id}")
+
+
 def _sweep_tenant(porth: Porth, env_scope: str, tenant_id: str) -> None:
-    """Every role, grant and permission row under a tenant this run created."""
+    """Every row keyed under a tenant: its roles, grants and permissions, its users with their role
+    assignments, and its org units. Nothing is left pointing at a tenant that has gone."""
     _, roles_table, permissions_table = _tables()
     base = f"ENV#{env_scope}#TENANT#{tenant_id}"
 
     def query(table: str, pk_attr: str, value: str, index: str | None = None) -> list[dict]:
-        kwargs = {"TableName": table, "KeyConditionExpression": f"{pk_attr} = :v",
-                  "ExpressionAttributeValues": {":v": {"S": value}}}
-        if index:
-            kwargs["IndexName"] = index
-        items, start = [], None
-        while True:
-            if start:
-                kwargs["ExclusiveStartKey"] = start
-            page = porth.db.query(**kwargs)
-            items += page.get("Items", [])
-            start = page.get("LastEvaluatedKey")
-            if not start:
-                return items
+        return _query_all(porth, table, pk_attr, value, index)
+
+    for user in users_of(porth, env_scope, tenant_id):
+        user_id = user["id"]["S"]
+        for assignment in query(roles_table, "pk", f"{base}#USER#{user_id}"):
+            porth.db.delete_item(TableName=roles_table, Key={"pk": assignment["pk"], "sk": assignment["sk"]})
+        porth.db.delete_item(TableName=os.environ["PORTH_USERS_TABLE"], Key={"PK": user["PK"], "SK": user["SK"]})
+        porth.publisher.publish(entity_type="User", action="deleted", entity_id=user_id, metadata={"tenant_id": tenant_id})
+    for unit in org_units_of(porth, env_scope, tenant_id):
+        porth.db.delete_item(TableName=os.environ["PORTH_ORG_UNITS_TABLE"], Key={"PK": unit["PK"], "SK": unit["SK"]})
 
     for role in query(roles_table, "pk", base):
         if not role["sk"]["S"].startswith("ROLE#"):
