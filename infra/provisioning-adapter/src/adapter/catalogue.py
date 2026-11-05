@@ -8,13 +8,19 @@ drifts from it.
 **An entity declares only the verbs it implements.** Conformance C1: whatever is declared must be
 genuinely implemented. PRF-9 declared `verbs: []` everywhere, with `["capabilities"]` the honest
 install list (the schema's `minItems: 1`). Each slice flips one cell of the verb x entity matrix
-from `[]` to implemented - PRF-12 and PRF-15 flipped `porth-tenant`'s `seed` and `teardown`, PRF-11
-`porth-platform`'s `bootstrap`, and PRF-14 `reset` on the three entities that can return to it. `planned` records which
+from `[]` to implemented - PRF-12 and PRF-15 flipped `porth-tenant`'s `seed` and `teardown`, and PRF-20
+`porth`'s `bootstrap`, `reset` and `prune`. `planned` records which
 slice, and `ruled_out` records every verb that will never apply, with its reason — a verb ruled out
 with a reason is a finding; a verb ruled out silently is a gap.
 
 Key shapes: `{s}` is the slot's env_scope (ADR-Z8), `{tid}` a tenant id. Partition keys carry the
 scope; sort keys never do. Attribute case differs by table and is part of the shape.
+
+**`porth` is the install's baseline** (contract 1.1, PRF-20): every row of the slot in Porth's
+tables, captured by `bootstrap` and restored by `reset` (snapshot.py). It is the only entity with a
+`baseline_kind`, and the seed entities declare none - they hold only what prawf seeds, so no piece of
+state is covered by two baselines. Reset is `porth`'s alone: returning the slot to its baseline is
+what clears every seeded entity (Richard, 2026-11-05), so they no longer reset one by one.
 
 **`porth-org` is its own entity** - the porth-org ruling, Option A (Richard, 2026-10-23). An
 organisation is seeded before the tenants that belong to it, and torn down after them.
@@ -26,8 +32,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-#: Install-level verbs actually implemented. Grows one verb at a time, with the slice that adds it.
-INSTALL_VERBS: tuple[str, ...] = ("capabilities", "bootstrap", "seed", "reset", "teardown")
+#: Install-level verbs actually implemented, per contract version. A 1.0 call can bootstrap nothing:
+#: the baseline needs an installed version, which only 1.1 can carry. Reset in 1.0 is porth-session's.
+INSTALL_VERBS: tuple[str, ...] = ("capabilities", "seed", "reset", "teardown")
+INSTALL_VERBS_1_1: tuple[str, ...] = ("capabilities", "bootstrap", "seed", "reset", "teardown", "prune")
+VERBS_1_1_ONLY = ("prune",)
 
 
 @dataclass(frozen=True)
@@ -39,35 +48,40 @@ class Entity:
     planned: dict[str, str] = field(default_factory=dict)
     ruled_out: dict[str, str] = field(default_factory=dict)
     verbs: tuple[str, ...] = ()
+    #: Contract 1.1: `snapshot`, `definition`, or None for an entity holding only seeded data.
+    baseline_kind: str | None = None
+    #: Usable only in contract 1.1; a 1.0 answer declares it with no verbs.
+    only_1_1: bool = False
 
-    def declared(self) -> dict:
-        return {
-            "id": self.id,
-            "description": self.description,
-            "verbs": list(self.verbs),
-            "destructive": self.destructive,
-        }
+    def declared(self, is_1_1: bool = False) -> dict:
+        if is_1_1:
+            verbs = list(self.verbs)
+        elif self.only_1_1:
+            verbs = []
+        else:
+            verbs = [v for v in self.verbs if v not in VERBS_1_1_ONLY]
+        out = {"id": self.id, "description": self.description, "verbs": verbs, "destructive": self.destructive}
+        if is_1_1 and self.baseline_kind:
+            out["baseline_kind"] = self.baseline_kind
+        return out
 
 
 ENTITIES: tuple[Entity, ...] = (
     Entity(
-        id="porth-platform",
-        description="Porth's platform baseline. Checked, and completed from Porth's own install definition.",
-        destructive=False,
-        resources=(
-            "tenants: PK=ENV#{s}#ORG#{uuid} SK=METADATA (platform org)",
-            "tenants: PK=ENV#{s}#TENANT#platform SK=METADATA (role_type=platform-admin is load-bearing, PORTH-585)",
-            "permissions: pk=ENV#{s}#TENANT#platform#NS#porth-platform sk=PERM#{key}",
-            "roles: pk=ENV#{s}#TENANT#platform sk=ROLE#{uuid} (platform-admin)",
-            "roles: pk=ENV#{s}#TENANT#platform#ROLE#{uuid} sk=PERM#{key} (grants)",
-            "claim-mapping-configs: PK=ENV#{s}#TENANT#platform SK=VERSION#{n:06d}",
+        id="porth",
+        description="The install's own Porth data in this slot, as the deploy left it. Contract 1.1.",
+        destructive=True,
+        resources=tuple(
+            f"{t}: every row whose partition key starts ENV#{{s}}#, verbatim"
+            for t in ("tenants", "roles", "permissions", "claim-mapping-configs", "users", "org-units")
         ),
+        verbs=("bootstrap", "reset", "prune"),
+        baseline_kind="snapshot",
+        only_1_1=True,
         ruled_out={
-            "reset": "resetting the platform tenant breaks every subsequent sign-in, including the one that would report it",
-            "seed": "the baseline is the target's to define (D7); bootstrap writes it",
+            "seed": "an override of the baseline; not built yet",
             "teardown": "the baseline is no run's fixture; nothing here is labelled with a run",
         },
-        verbs=("bootstrap",),
     ),
     Entity(
         id="porth-tenant",
@@ -81,7 +95,7 @@ ENTITIES: tuple[Entity, ...] = (
             "roles: pk=ENV#{s}#TENANT#{tid}#USER#{uuid} sk=ROLE#{uuid} (a user's role assignment), removed with the user",
             "org-units: PK=ENV#{s}#TENANT#{tid} sk=ORG_UNIT#{uuid}, removed by reset and teardown",
         ),
-        verbs=("seed", "reset", "teardown"),
+        verbs=("seed", "teardown"),
     ),
     Entity(
         id="porth-session",
@@ -95,7 +109,7 @@ ENTITIES: tuple[Entity, ...] = (
         description="An organisation for fixture tenants. Seeded before them, torn down after them.",
         destructive=True,
         resources=("tenants: PK=ENV#{s}#ORG#{uuid} SK=METADATA, gsi1pk=ENV#{s}#ORG_SLUG#{slug}",),
-        verbs=("seed", "reset", "teardown"),
+        verbs=("seed", "teardown"),
     ),
     Entity(
         id="porth-claim-mapping",
@@ -104,7 +118,7 @@ ENTITIES: tuple[Entity, ...] = (
         resources=(
             "claim-mapping-configs: PK=ENV#{s}#TENANT#{tid} SK=VERSION#{n:06d} (compiled_hash computed, never supplied)",
         ),
-        verbs=("seed", "reset", "teardown"),
+        verbs=("seed", "teardown"),
     ),
     Entity(
         id="porth-app-permission",
@@ -129,9 +143,8 @@ ENTITIES: tuple[Entity, ...] = (
         description="Arranged roles, such as a role with no grants for a denial test.",
         destructive=True,
         resources=("roles: pk=ENV#{s}#TENANT#{tid} sk=ROLE#{uuid} (not a system role)",),
-        # PRF-18 seeds arranged roles (never system roles); PRF-14's reset removes every one of them,
-        # and the seeded tenant-admin - a system role - stays.
-        verbs=("seed", "reset", "teardown"),
+        # PRF-18 seeds arranged roles (never system roles); reset of `porth` removes them with the rest.
+        verbs=("seed", "teardown"),
     ),
     Entity(
         id="porth-idp",
@@ -148,6 +161,6 @@ ENTITIES: tuple[Entity, ...] = (
 IDS: frozenset[str] = frozenset(e.id for e in ENTITIES)
 
 
-def declared() -> list[dict]:
-    """The catalogue as `capabilities` reports it."""
-    return [e.declared() for e in ENTITIES]
+def declared(is_1_1: bool = False) -> list[dict]:
+    """The catalogue as `capabilities` reports it, in the contract version it is answered in."""
+    return [e.declared(is_1_1) for e in ENTITIES]

@@ -5,7 +5,8 @@ Each of these has cost a deploy somewhere in this system, or would have:
 * **aws:SourceAccount** in a resource policy for a role principal denies every call (the key only
   exists for service-to-service requests). PROVISIONING-CONTRACT §1.1's own example carries it.
 * **Scan through a LeadingKeys condition** reads every slot: ForAllValues over an absent key is true.
-  So Scan is granted on the tenants table alone, for reset (PRF-14), and denied on everything else.
+  So Scan is granted on Porth's six data tables alone, for bootstrap and reset of `porth` (PRF-20),
+  and on the sessions table to clear it - and denied on everything else.
 * **porth-* as a table wildcard** also matches the sample app's own table on main.
 * **Non-ASCII** in an IAM description once rolled back the whole ffug stack.
 """
@@ -79,23 +80,45 @@ def test_the_execution_role_has_no_data_access(tpl):
             assert not any(a.startswith("dynamodb:") for a in _actions(st)), st
 
 
-def test_only_the_tenants_table_may_ever_be_scanned(tpl):
+DATA_TABLES = ["PorthTenantsTable", "PorthRolesTable", "PorthPermissionsTable", "PorthClaimMappingConfigsTable",
+               "PorthUsersTable", "PorthOrgUnitsTable"]
+
+
+def test_only_porths_tables_may_ever_be_scanned(tpl):
     for name, st in _statements(tpl):
         if st["Effect"] != "Allow":
             continue
         assert not {"dynamodb:*", "*"} & set(_actions(st)), st
         if "dynamodb:Scan" in _actions(st):
-            assert name == "DataRole" and st.get("Sid") in ("ScanTheTenantsTable", "ClearTheSessionsTable"), st
-            if st["Sid"] == "ScanTheTenantsTable":
+            assert name == "DataRole" and st.get("Sid") in ("ScanPorthTables", "ClearTheSessionsTable"), st
+            if st["Sid"] == "ScanPorthTables":
                 assert _actions(st) == ["dynamodb:Scan"], "the scan grant carries nothing else"
-                assert "table/${PorthTenantsTable}" in str(st["Resource"])
+                assert all(f"table/${{{t}}}" in str(st["Resource"]) for t in DATA_TABLES)
+                assert len(st["Resource"]) == 6 and "Sessions" not in str(st["Resource"]) and "Audit" not in str(st["Resource"])
             else:
                 assert sorted(_actions(st)) == ["dynamodb:DeleteItem", "dynamodb:DescribeTable", "dynamodb:Scan"], "find and delete, nothing else"
                 assert "table/${PorthSessionsTable}" in str(st["Resource"])
             assert "index" not in str(st["Resource"])
     (deny,) = [st for n, st in _statements(tpl) if n == "DataRole" and st.get("Sid") == "ScanNothingElse"]
     assert deny["Effect"] == "Deny" and _actions(deny) == ["dynamodb:Scan"]
-    assert "table/${PorthTenantsTable}" in str(deny["NotResource"]) and "table/${PorthSessionsTable}" in str(deny["NotResource"])
+    assert all(f"table/${{{t}}}" in str(deny["NotResource"]) for t in DATA_TABLES + ["PorthSessionsTable"])
+    assert len(deny["NotResource"]) == 7
+
+
+def test_snapshots_go_to_prawfs_own_private_encrypted_bucket(tpl):
+    bucket = tpl["Resources"]["SnapshotBucket"]
+    assert bucket["DeletionPolicy"] == "RetainExceptOnCreate" and bucket["UpdateReplacePolicy"] == "Retain"
+    props = bucket["Properties"]
+    assert str(props["BucketName"]).startswith("{'Sub': 'prawf-adapter-"), "inside the boundary's family"
+    assert all(props["PublicAccessBlockConfiguration"].values())
+    assert props["BucketEncryption"]["ServerSideEncryptionConfiguration"][0]["ServerSideEncryptionByDefault"]["SSEAlgorithm"] == "AES256"
+    (tls,) = tpl["Resources"]["SnapshotBucketPolicy"]["Properties"]["PolicyDocument"]["Statement"]
+    assert tls["Effect"] == "Deny" and tls["Condition"] == {"Bool": {"aws:SecureTransport": "false"}}
+    (objects,) = [st for n, st in _statements(tpl) if n == "DataRole" and st.get("Sid") == "SnapshotObjects"]
+    assert sorted(_actions(objects)) == ["s3:DeleteObject", "s3:GetObject", "s3:PutObject"]
+    assert str(objects["Resource"]).endswith("/*'}"), "objects, never the bucket's configuration"
+    fn = tpl["Resources"]["AdapterFunction"]["Properties"]["Environment"]["Variables"]
+    assert fn["PRAWF_SNAPSHOT_BUCKET"] == {"Ref": "SnapshotBucket"}
 
 
 def test_the_data_role_reads_porth_writes_single_items_and_denies_partiql(tpl):
@@ -112,15 +135,15 @@ def test_the_data_role_writes_porths_six_tables_and_no_index(tpl):
     (writes,) = [st for n, st in _statements(tpl) if n == "DataRole" and st.get("Sid") == "WritePorthTables"]
     tables = {str(r) for r in writes["Resource"]}
     assert len(tables) == 6
-    assert any("Users" in t for t in tables) and any("OrgUnits" in t for t in tables), "reset removes what is keyed under a tenant"
-    assert any("ClaimMapping" in t for t in tables), "bootstrap writes the platform claim mapping; reset removes others"
+    assert any("Users" in t for t in tables) and any("OrgUnits" in t for t in tables), "reset restores every table of the slot"
+    assert any("ClaimMapping" in t for t in tables), "the claim-mapping seed writes it; reset restores it"
     assert not any("index" in t for t in tables), "writes go to tables; indexes are read"
 
 
-def test_the_execution_role_reads_the_install_auth_record_and_writes_no_parameter(tpl):
-    (auth,) = [st for n, st in _statements(tpl) if n == "ExecutionRole" and st.get("Sid") == "ReadPorthAuth"]
-    assert _actions(auth) == ["ssm:GetParameter"]
-    assert str(auth["Resource"]).rstrip("'}").endswith(":parameter/porth/auth")
+def test_the_execution_role_reads_no_install_record_and_writes_no_parameter(tpl):
+    """/porth/auth was read to rebuild the platform baseline (PRF-11). Bootstrap now captures what the
+    install wrote, so the adapter holds no reason to read the install's own records."""
+    assert not any("/porth/auth" in str(st.get("Resource")) for _, st in _statements(tpl))
     assert not any(a.startswith("ssm:Put") or a.startswith("ssm:Delete") for _, st in _statements(tpl) for a in _actions(st))
 
 

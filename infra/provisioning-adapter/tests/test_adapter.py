@@ -13,12 +13,15 @@ What is pinned, and why:
 * **C15 — an unknown entity is `refused` with `unknown_entity`,** never a silent no-op.
 * **R8 — one adapter per target, slot chosen per call, and no default slot.** Omission resolves only
   on a single-slot map. A slot is looked up, never interpolated, so `*` is refused, not matched.
-* **Identity from ground truth.** A slot the target lists but has not bootstrapped is refused — the
-  adapter does not report back whatever slot it was asked about.
+* **Identity from the target's own map.** The slot must be in it, and what is reported is that
+  entry, never the caller's words. Whether a slot is bootstrapped is prawf's record, not a guess here.
 * **D5 — environment_class is the target's.** A request field claiming a class is ignored.
 * **Isolation by IAM.** Data calls use credentials from an AssumeRole whose session policy admits
-  one slot's keys, with Scan on the tenants table alone (reset, PRF-14) and denied everywhere else;
-  `ENV#porth-dau#*` must not match `ENV#porth-dau-probe#...`.
+  one slot's keys, Scan on Porth's tables alone (bootstrap and reset of `porth`, PRF-20), and the
+  snapshot bucket under the slot's own prefix; `ENV#porth-dau#*` must not match `ENV#porth-dau-probe#...`.
+* **Contract 1.1** only when the caller asks for it: `environment` on every answer, a slot on every
+  write, `baseline_kind` and `prune` in capabilities. The published schemas are 1.0, so 1.1 answers
+  are checked by shape here until prawf-schemas 1.1 publishes.
 """
 import copy
 import fnmatch
@@ -40,6 +43,10 @@ import slots  # noqa: E402
 
 TENANTS = "porth-tenants-test"
 SESSIONS = "porth-sessions-test"
+PORTH_TABLES = {"PORTH_ROLES_TABLE": "porth-roles-test", "PORTH_PERMISSIONS_TABLE": "porth-permissions-test",
+                "PORTH_CLAIM_MAPPING_CONFIGS_TABLE": "porth-claim-mapping-configs-test",
+                "PORTH_USERS_TABLE": "porth-users-test", "PORTH_ORG_UNITS_TABLE": "porth-org-units-test"}
+BUCKET = "prawf-adapter-snapshots-111111111111"
 FAKE_CREDS = {"AccessKeyId": "FAKEKEYID", "SecretAccessKey": "FAKE-SECRET-VALUE", "SessionToken": "FAKE-TOKEN"}
 
 ONE_SLOT = {"slots": {"porth-dau": {"environment_id": "ems-porth-dau", "environment_class": "disposable"}}}
@@ -49,7 +56,7 @@ TWO_SLOTS = {"slots": {
 }}
 
 AGREED_ENTITIES = {
-    "porth-platform", "porth-org", "porth-tenant", "porth-claim-mapping",
+    "porth", "porth-org", "porth-tenant", "porth-claim-mapping",
     "porth-app-permission", "porth-role-grant", "porth-role", "porth-idp", "porth-session",
 }
 OTHER_VERBS = ["bootstrap", "seed", "reset", "ensure", "absent", "teardown", "status"]
@@ -125,6 +132,10 @@ def world(monkeypatch):
     monkeypatch.setenv("DATA_ROLE_ARN", "arn:aws:iam::111111111111:role/porth-provisioning-adapter-DataRole-X")
     monkeypatch.setenv("PORTH_TENANTS_TABLE", TENANTS)
     monkeypatch.setenv("PORTH_SESSIONS_TABLE", SESSIONS)
+    for k, v in PORTH_TABLES.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("PRAWF_SNAPSHOT_BUCKET", BUCKET)
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
     monkeypatch.setenv("PORTH_STACK_NAME", "serverlessrepo-porth-components")
     monkeypatch.setenv("ADAPTER_VERSION", "test-build")
     return state
@@ -166,29 +177,44 @@ def test_capabilities_validates_against_the_real_schemas(world):
 
 def test_exactly_the_implemented_cells_are_declared(world):
     caps = assert_valid_capabilities(capabilities())
-    assert caps["verbs"] == ["capabilities", "bootstrap", "seed", "reset", "teardown"]
+    assert caps["verbs"] == ["capabilities", "seed", "reset", "teardown"]
     declared = {e["id"]: e["verbs"] for e in caps["entities"]}
-    assert declared.pop("porth-platform") == ["bootstrap"]
-    assert declared.pop("porth-tenant") == ["seed", "reset", "teardown"]
-    assert declared.pop("porth-org") == ["seed", "reset", "teardown"]
-    assert declared.pop("porth-claim-mapping") == ["seed", "reset", "teardown"]
-    assert declared.pop("porth-role") == ["seed", "reset", "teardown"]
+    assert declared.pop("porth-tenant") == ["seed", "teardown"]
+    assert declared.pop("porth-org") == ["seed", "teardown"]
+    assert declared.pop("porth-claim-mapping") == ["seed", "teardown"]
+    assert declared.pop("porth-role") == ["seed", "teardown"]
     assert declared.pop("porth-session") == ["reset"]
-    assert caps["extension_types"] == ["porth.org", "porth.permission", "porth.role", "porth.role-grant", "porth.claim-mapping"]
+    assert declared.pop("porth") == [], "the snapshot baseline is contract 1.1: a 1.0 call cannot use it"
+    assert caps["extension_types"] == ["porth.org", "porth.role", "porth.claim-mapping"]
     assert all(v == [] for v in declared.values()), declared
     assert caps["dataset_forms"] == ["enumerated"]
     assert caps["resource_types"] == ["tenant"]
+    assert not any("baseline_kind" in e for e in caps["entities"]), "1.0 has no such field"
 
 
-def test_c1_every_declared_verb_is_actually_implemented(world):
+def test_in_1_1_porth_is_the_one_snapshot_entity(world):
+    response = call(contract_version="1.1", verb="capabilities", slot="porth-dau")
+    assert response["contract_version"] == "1.1" and response["outcome"] == "ok", response
+    assert response["environment"] == {"id": "ems-porth-dau", "slot": "porth-dau"}
+    caps = response["results"][0]
+    assert caps["contract_versions"] == ["1.0", "1.1"]
+    assert caps["verbs"] == ["capabilities", "bootstrap", "seed", "reset", "teardown", "prune"]
+    porth = next(e for e in caps["entities"] if e["id"] == "porth")
+    assert porth["verbs"] == ["bootstrap", "reset", "prune"] and porth["baseline_kind"] == "snapshot"
+    assert [e["id"] for e in caps["entities"] if "baseline_kind" in e] == ["porth"], "no state under two baselines"
+
+
+@pytest.mark.parametrize("contract, slot", [("1.0.0", None), ("1.1", "porth-dau")])
+def test_c1_every_declared_verb_is_actually_implemented(world, contract, slot):
     """C1, checked by behaviour rather than by a constant: nothing the adapter declares may answer
     `unsupported`. Stays correct as slices add verbs - and fails the moment one is declared early."""
-    caps = assert_valid_capabilities(capabilities())
+    where = {"slot": slot} if slot else {}
+    caps = call(contract_version=contract, verb="capabilities", **where)["results"][0]
     for verb in caps["verbs"]:
-        assert call(contract_version="1.0.0", verb=verb)["outcome"] != "unsupported", verb
+        assert call(contract_version=contract, verb=verb, **where)["outcome"] != "unsupported", verb
     for entity in caps["entities"]:
         for verb in entity["verbs"]:
-            response = call(contract_version="1.0.0", verb=verb, run={"run_id": "run-c1"}, entity=entity["id"])
+            response = call(contract_version=contract, verb=verb, run={"run_id": "run-c1"}, entity=entity["id"], **where)
             assert response["outcome"] != "unsupported", (entity["id"], verb)
 
 
@@ -198,10 +224,10 @@ def test_the_catalogue_uses_the_agreed_names(world):
     assert catalogue.IDS == AGREED_ENTITIES
 
 
-def test_platform_and_idp_are_not_destructive(world):
+def test_the_idp_is_not_destructive_and_the_baseline_is(world):
     caps = assert_valid_capabilities(capabilities())
     destructive = {e["id"]: e["destructive"] for e in caps["entities"]}
-    assert destructive["porth-platform"] is False, "resetting the platform tenant breaks every sign-in"
+    assert destructive["porth"] is True, "reset rewrites every row of the slot"
     assert destructive["porth-idp"] is False, "the adapter cannot reach it at all"
 
 
@@ -253,6 +279,28 @@ def test_an_unknown_slot_is_refused(world):
     assert (response["outcome"], response["reason_code"]) == ("refused", "scope_violation")
 
 
+def test_in_1_1_the_slot_has_its_own_reason_codes(world):
+    unknown = call(contract_version="1.1", verb="capabilities", slot="porth-nope")
+    assert (unknown["outcome"], unknown["reason_code"]) == ("refused", "unknown_slot")
+    assert "environment" not in unknown, "a slot that did not resolve has no environment to report"
+    world["ssm"] = FakeSSM(json.dumps(TWO_SLOTS))
+    missing = call(contract_version="1.1", verb="capabilities")
+    assert (missing["outcome"], missing["reason_code"]) == ("refused", "slot_required")
+
+
+@pytest.mark.parametrize("verb", ["bootstrap", "seed", "reset", "ensure", "absent", "teardown", "prune"])
+def test_in_1_1_every_write_names_its_slot_even_on_a_one_slot_target(world, verb):
+    response = call(contract_version="1.1", verb=verb, run={"run_id": "run-x"}, entity="porth-tenant")
+    assert (response["outcome"], response["reason_code"]) == ("refused", "slot_required")
+    assert world["sts"].calls == [], "refused before any credentials are issued"
+
+
+def test_in_1_1_every_answer_says_where_it_acted(world):
+    for verb in ("capabilities", "status", "seed"):
+        response = call(contract_version="1.1", verb=verb, slot="porth-dau", run={"run_id": "run-x"}, entity="porth-idp")
+        assert response["environment"] == {"id": "ems-porth-dau", "slot": "porth-dau"}, verb
+
+
 @pytest.mark.parametrize("slot", ["*", "porth-*", "porth-dau#*", "", 3])
 def test_a_slot_is_looked_up_never_matched(world, slot):
     response = capabilities(slot=slot)
@@ -261,19 +309,12 @@ def test_a_slot_is_looked_up_never_matched(world, slot):
     assert world["sts"].calls == [], "no credentials are issued for a slot that did not resolve"
 
 
-def test_identity_is_not_echoed_an_unbootstrapped_slot_is_refused(world):
-    world["dynamodb"] = FakeDynamo(bootstrapped_scopes=set())
-    response = capabilities()
-    assert_speaks_the_contract(response)
-    assert (response["outcome"], response["reason_code"]) == ("refused", "scope_violation")
-    assert "not bootstrapped" in response["diagnostics"]["messages"][0]
-
-
-def test_a_failed_read_is_a_loud_upstream_failure(world):
-    world["dynamodb"] = FakeDynamo({"porth-dau"}, fail=True)
-    response = capabilities()
-    assert_speaks_the_contract(response)
-    assert (response["outcome"], response["reason_code"]) == ("failed", "upstream_error")
+def test_capabilities_judges_no_install_and_reads_no_porth_data(world):
+    """Whether a slot is bootstrapped is prawf's record of its baselines - not "the platform tenant row
+    exists", which is a guess about what an install contains (Richard, 2026-11-05)."""
+    caps = assert_valid_capabilities(capabilities())
+    assert caps["environment"]["id"] == "ems-porth-dau"
+    assert world["sts"].calls == [] and world["dynamodb"].reads == []
 
 
 def test_environment_class_comes_from_the_target_not_the_caller(world):
@@ -304,7 +345,7 @@ def iam_string_like(pattern: str, value: str) -> bool:
 
 
 def test_data_calls_run_on_a_one_slot_session(world):
-    assert_valid_capabilities(capabilities())
+    slots.data_session("porth-dau")
     (call_,) = world["sts"].calls
     assert call_["RoleArn"] == os.environ["DATA_ROLE_ARN"]
     assert call_["Policy"] == slots.session_policy("porth-dau")
@@ -321,31 +362,42 @@ def test_the_session_policy_admits_one_slot_and_not_its_prefix_extension(world):
     assert not iam_string_like(pattern, "TENANT#platform"), "an unscoped key is another slot's, not ours"
 
 
-def test_the_session_policy_writes_single_items_in_one_slot_and_scans_only_the_tenants_table(world):
+def test_the_session_policy_writes_single_items_in_one_slot_and_scans_only_porths_tables(world):
     policy = json.loads(slots.session_policy("porth-dau"))
     (one_slot,) = [s for s in policy["Statement"] if s["Sid"] == "OneSlotOnly"]
     assert set(one_slot["Action"]) == set(slots.READ_ACTIONS + slots.WRITE_ACTIONS)
     assert "dynamodb:LeadingKeys" in one_slot["Condition"]["ForAllValues:StringLike"], "every write is held to the slot"
     allowed = {a for s in policy["Statement"] if s["Effect"] == "Allow" for a in s["Action"]}
     denied = {a for s in policy["Statement"] if s["Effect"] == "Deny" for a in s["Action"]}
-    assert allowed == set(slots.READ_ACTIONS + slots.WRITE_ACTIONS + slots.EVENT_ACTIONS + ("dynamodb:Scan",))
+    assert allowed == set(slots.READ_ACTIONS + slots.WRITE_ACTIONS + slots.EVENT_ACTIONS
+                          + slots.SNAPSHOT_ACTIONS + ("dynamodb:Scan",))
     assert not any(a.startswith(("dynamodb:BatchWrite", "dynamodb:Transact")) for a in allowed)
     assert {"dynamodb:PartiQLSelect", "dynamodb:ExecuteStatement"} <= denied
 
-    # Scan: the tenants table and the sessions table, exactly - not an index, not another table -
-    # and denied everywhere else. Sessions are the one thing reached beyond the slot, and only to
-    # find and delete rows: no read of a row's contents, no write.
-    tenants = f"arn:aws:dynamodb:us-east-1:111111111111:table/{TENANTS}"
-    sessions = f"arn:aws:dynamodb:us-east-1:111111111111:table/{SESSIONS}"
-    scans = [s for s in policy["Statement"] if "dynamodb:Scan" in s["Action"]]
-    allows = {s["Sid"]: s for s in scans if s["Effect"] == "Allow"}
-    (deny,) = [s for s in scans if s["Effect"] == "Deny"]
-    assert set(allows) == {"ScanTheTenantsTable", "ClearTheSessionsTable"}
-    assert allows["ScanTheTenantsTable"]["Action"] == ["dynamodb:Scan"] and allows["ScanTheTenantsTable"]["Resource"] == tenants
-    clear = allows["ClearTheSessionsTable"]
-    assert sorted(clear["Action"]) == ["dynamodb:DeleteItem", "dynamodb:DescribeTable", "dynamodb:Scan"] and clear["Resource"] == sessions
-    assert not any("Condition" in s for s in allows.values())
-    assert deny["NotResource"] == [tenants, sessions]
+    # Scan: Porth's six data tables and the sessions table, exactly - not an index, not the audit
+    # table. Sessions are the one thing reached beyond the slot, and only to find and delete rows.
+    arn = "arn:aws:dynamodb:us-east-1:111111111111:table/{}"
+    data = sorted(arn.format(t) for t in [TENANTS, *PORTH_TABLES.values()])
+    scans = {s["Sid"]: s for s in policy["Statement"] if "dynamodb:Scan" in s["Action"]}
+    assert set(scans) == {"ScanTheSlotsTables", "ClearTheSessionsTable"}
+    assert scans["ScanTheSlotsTables"]["Action"] == ["dynamodb:Scan"]
+    assert sorted(scans["ScanTheSlotsTables"]["Resource"]) == data
+    clear = scans["ClearTheSessionsTable"]
+    assert sorted(clear["Action"]) == ["dynamodb:DeleteItem", "dynamodb:DescribeTable", "dynamodb:Scan"]
+    assert clear["Resource"] == arn.format(SESSIONS)
+    assert not any("Condition" in s for s in scans.values())
+
+    # The snapshot bucket: this slot's prefix, its delimiter included.
+    (own,) = [s for s in policy["Statement"] if s["Sid"] == "OwnSnapshots"]
+    assert own["Resource"] == f"arn:aws:s3:::{BUCKET}/porth-dau/*"
+    assert not iam_string_like(own["Resource"].split(":::", 1)[1], f"{BUCKET}/porth-dau-probe/porth/x")
+
+
+def test_the_session_policy_fits_sts_with_room_to_spare(world, monkeypatch):
+    """AssumeRole refuses a session policy over 2,048 characters. Real names are longer than these."""
+    for var in ("PORTH_TENANTS_TABLE", "PORTH_SESSIONS_TABLE", *PORTH_TABLES):
+        monkeypatch.setenv(var, "porth-" + var.lower().replace("_", "-") + "-porth-components-production-x")
+    assert len(slots.session_policy("porth-sample-long-name")) < 1900
 
 
 @pytest.mark.parametrize("scope", ["*", "porth-*", "a#b", "Porth", ""])
@@ -370,7 +422,7 @@ def test_every_unimplemented_verb_is_unsupported_not_failed(world, verb):
     assert (response["outcome"], response["reason_code"]) == ("unsupported", "not_implemented")
 
 
-@pytest.mark.parametrize("verb", ["bootstrap", "seed", "ensure", "absent"])
+@pytest.mark.parametrize("verb", ["bootstrap", "seed", "ensure", "absent", "reset", "prune"])
 def test_c17_omitting_the_entity_on_a_verb_that_writes_to_one_is_refused(world, verb):
     response = call(contract_version="1.0.0", verb=verb, run={"run_id": "run-x"})
     assert_speaks_the_contract(response)
@@ -397,14 +449,21 @@ def test_unknown_entity_outranks_unsupported(world):
 
 # ---------------------------------------------------------------- versions and envelopes
 
-@pytest.mark.parametrize("requested,answered", [("1.0.0", "1.0.0"), ("1.4.2", "1.0.0")])
-def test_a_shared_major_is_answered_in_a_version_we_speak(world, requested, answered):
+@pytest.mark.parametrize("requested,answered", [("1.0.0", "1.0.0"), ("1.4.2", "1.0.0"), ("1.1.0", "1.0.0")])
+def test_a_three_part_caller_speaks_the_1_0_schemas_and_is_answered_in_1_0_0(world, requested, answered):
     response = call(contract_version=requested, verb="capabilities")
     assert_speaks_the_contract(response)
     assert response["contract_version"] == answered
+    assert "environment" not in response
 
 
-@pytest.mark.parametrize("requested", ["2.0.0", "0.9.0", "1.0", "latest", 1])
+@pytest.mark.parametrize("requested,answered", [("1.0", "1.0"), ("1.1", "1.1"), ("1.9", "1.1")])
+def test_a_two_part_caller_is_answered_in_the_highest_minor_we_share(world, requested, answered):
+    response = call(contract_version=requested, verb="capabilities", slot="porth-dau")
+    assert (response["outcome"], response["contract_version"]) == ("ok", answered)
+
+
+@pytest.mark.parametrize("requested", ["2.0.0", "0.9.0", "2.0", "1", "latest", 1])
 def test_no_common_version_is_refused_at_run_start(world, requested):
     response = call(contract_version=requested, verb="capabilities")
     assert_speaks_the_contract(response)

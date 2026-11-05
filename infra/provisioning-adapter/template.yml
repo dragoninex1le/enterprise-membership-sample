@@ -2,8 +2,9 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
   prawf provisioning adapter for EMS (PRF-9). One adapter per target; the slot is chosen per call.
-  Invoked directly by ARN, with no HTTP surface. Answers capabilities; seed and teardown on
-  porth-org and porth-tenant (PRF-12, PRF-15); bootstrap on porth-platform (PRF-11); and reset (PRF-14).
+  Invoked directly by ARN, with no HTTP surface. Answers capabilities; seed and teardown on Porth's
+  fixture entities (PRF-12, PRF-13, PRF-15, PRF-18); and, in contract 1.1, bootstrap, reset and prune
+  on porth - the install's snapshot baseline (PRF-20).
 
 # A standalone stack, like infra/qa-tools and for the same reasons: it writes Porth's tables, which
 # the sample-app stack does not own, and it is prawf's backdoor rather than part of the application.
@@ -13,10 +14,12 @@ Description: >
 # call assumes DataRole with an inline session policy that admits only partition keys under
 # ENV#{slot}#, so a request routed to the wrong slot is denied by AWS rather than avoided by code.
 # DataRole's policy is the ceiling: the seven Porth tables named explicitly (never porth-*, which on
-# main also matches the sample app's own table), single-item writes, and Scan on the tenants table
-# alone - ForAllValues over the absent LeadingKeys of a Scan evaluates true, so a Scan reads every
-# slot's rows there; reset needs it (PRF-14) and the code filters to the slot. Porth's own repositories publish an event for every write and raise if they
-# cannot, so DataRole may also put events on Porth's bus - that bus and no other.
+# main also matches the sample app's own table), single-item writes, and Scan on those tables alone -
+# ForAllValues over the absent LeadingKeys of a Scan evaluates true, so a Scan may read every slot's
+# rows; bootstrap and reset of porth need it (PRF-20) and the scan's filter drops other slots' rows
+# before anything is returned. Writes stay held to the slot. Porth's own repositories publish an event
+# for every write and raise if they cannot, so DataRole may also put events on Porth's bus - that bus
+# and no other. Snapshots too big for an audit item go to prawf's own bucket, under the slot's prefix.
 
 Parameters:
   SlotMap:
@@ -100,12 +103,6 @@ Resources:
                 Effect: Allow
                 Action: cloudformation:DescribeStacks
                 Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${PorthStackName}/*
-              # PRF-11: the platform baseline's IdP config and roles-claim namespace are the install's
-              # own record of its IdP. Read, never written.
-              - Sid: ReadPorthAuth
-                Effect: Allow
-                Action: ssm:GetParameter
-                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/auth
 
   DataRole:
     Type: AWS::IAM::Role
@@ -144,10 +141,9 @@ Resources:
                   - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthUsersTable}/index/*
                   - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthOrgUnitsTable}
                   - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthOrgUnitsTable}/index/*
-              # PRF-12: porth-tenant writes the tenant row, its role and grants, and its permissions.
-              # PRF-11 and PRF-14: bootstrap writes the platform claim mapping; reset removes the others.
-              # Reset and teardown remove a tenant's users and org units, so nothing is left pointing at it.
-              # Single items only - no BatchWrite, no transactions; Porth's create path uses neither.
+              # PRF-12 and PRF-13: the seed entities write tenants, roles, grants, permissions and claim
+              # mappings. PRF-20: reset of porth removes every row of the slot and writes the baseline
+              # back, in all six. Single items only - no BatchWrite, no transactions.
               - Sid: WritePorthTables
                 Effect: Allow
                 Action:
@@ -161,14 +157,20 @@ Resources:
                   - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthClaimMappingConfigsTable}
                   - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthUsersTable}
                   - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthOrgUnitsTable}
-              # PRF-14 (Richard, 2026-10-24): reset finds every tenant as Porth's tenant directory does,
-              # by scanning the tenants table. That table only, never an index or another table. IAM
-              # cannot hold a Scan to one slot - it may READ other slots' rows there, never write them -
-              # and the adapter filters to the slot before it acts on a row.
-              - Sid: ScanTheTenantsTable
+              # PRF-20 (Richard, 2026-11-05): bootstrap captures every row of the slot in these tables and
+              # reset restores them. These tables only, never an index, the sessions or the audit table.
+              # IAM cannot hold a Scan to one slot - DynamoDB may READ other slots' rows, never write
+              # them - and the scan's filter drops them before anything reaches the adapter.
+              - Sid: ScanPorthTables
                 Effect: Allow
                 Action: dynamodb:Scan
-                Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthTenantsTable}
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthTenantsTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthRolesTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthPermissionsTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthClaimMappingConfigsTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthUsersTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthOrgUnitsTable}
               # reset of porth-session clears Porth's sessions, whose keys carry no environment, so
               # LeadingKeys can't hold them to a slot. Find rows and delete them; nothing else.
               - Sid: ClearTheSessionsTable
@@ -193,11 +195,24 @@ Resources:
                   - dynamodb:UpdateItem
                   - dynamodb:DeleteItem
                 Resource: !GetAtt AuditTable.Arn
+              # Baselines too big for an audit item. The session policy narrows this to the slot's prefix.
+              - Sid: SnapshotObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub ${SnapshotBucket.Arn}/*
               - Sid: ScanNothingElse
                 Effect: Deny
                 Action: dynamodb:Scan
                 NotResource:
                   - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthTenantsTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthRolesTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthPermissionsTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthClaimMappingConfigsTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthUsersTable}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthOrgUnitsTable}
                   - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthSessionsTable}
               - Sid: NeverPartiQL
                 Effect: Deny
@@ -232,6 +247,47 @@ Resources:
           KeyType: RANGE
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
+
+  # The install's baselines that are too big for an audit item (contract 1.1: "a prawf-created S3
+  # bucket in the adapter's stack"). One prefix per slot, {env_scope}/porth/...; the item in the audit
+  # table holds the key and the object's hash, re-checked on every load. Never public, always
+  # encrypted, TLS only. Retained like the audit table: it is the other half of the same record.
+  SnapshotBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub prawf-adapter-snapshots-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+
+  SnapshotBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SnapshotBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: TlsOnly
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt SnapshotBucket.Arn
+              - !Sub ${SnapshotBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
 
   # A separate policy, not an inline statement on ExecutionRole: DataRole's trust names
   # ExecutionRole, so granting AssumeRole inline would make each role depend on the other.
@@ -292,6 +348,7 @@ Resources:
           # not the bus Porth deploys - left unset, every seed would write a row and then fail.
           PORTH_EVENT_BUS: !Ref PorthEventBus
           PRAWF_AUDIT_TABLE: !Ref AuditTable
+          PRAWF_SNAPSHOT_BUCKET: !Ref SnapshotBucket
           ADAPTER_VERSION: !Ref AdapterVersion
 
   # The principal IS the restriction. No aws:SourceAccount condition: that key exists only when one
@@ -322,5 +379,8 @@ Outputs:
     Description: The target's own list of its slots.
     Value: !Ref SlotMapParameter
   AuditTableName:
-    Description: prawf's record of what each run wrote, and which dataset each entity carries.
+    Description: prawf's record of what each run wrote, which dataset each entity carries, and the install's baselines.
     Value: !Ref AuditTable
+  SnapshotBucketName:
+    Description: Baselines too big for an audit item, one prefix per slot.
+    Value: !Ref SnapshotBucket

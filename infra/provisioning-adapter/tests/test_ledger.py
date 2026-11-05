@@ -2,14 +2,15 @@
 
 A test tool's rows in the application's tables are state the application never agreed to hold, read
 by code that never expected them. So: seed, teardown and reset write nothing of prawf's to any Porth
-table; the audit table holds which run wrote what and which dataset each entity carries; and a full
-reset clears the rows an earlier adapter left in Porth's tenants table before it had a table of its own.
+table; the audit table holds which run wrote what, which dataset each entity carries, and the
+install's baselines; and a reset clears the seed entities' records with their rows, keeps the
+baselines, and removes anything an earlier adapter left in Porth's tenants table after the capture.
 """
 import boto3
 
 from test_porth_org import ems_org
-from test_porth_platform import install
 from test_porth_tenant import AUDIT, ORG_ID, SLOT, TABLES, call, ems_test, porth  # noqa: F401 - porth is a fixture
+from porth_install import install
 
 
 def porth_rows_of_prawf():
@@ -52,13 +53,15 @@ def test_teardown_clears_the_runs_audit_record_and_nothing_else(porth):
     assert porth_rows_of_prawf() == []
 
 
-def _install_and_seed(monkeypatch):
-    """A slot as the install leaves it, with a prawf fixture seeded."""
+def _install_and_capture(monkeypatch):
+    """A slot as the install leaves it, captured as its baseline."""
     t = boto3.resource("dynamodb").Table(TABLES["tenants"])
     t.delete_item(Key={"PK": f"ENV#{SLOT}#TENANT#platform", "SK": "METADATA"})
     t.delete_item(Key={"PK": f"ENV#{SLOT}#ORG#{ORG_ID}", "SK": "METADATA"})
     install(monkeypatch)
-    seed_both()
+    boot = call("bootstrap", {"installed_version": "0.3.1"}, entity="porth", contract="1.1", slot=SLOT)
+    assert boot["outcome"] == "ok", boot
+    return {"installed_version": "0.3.1", "content_digest": boot["results"][0]["content_digest"]}
 
 
 def _strays():
@@ -72,33 +75,12 @@ def _strays():
     return rows
 
 
-def reset(entity=None, dry_run=False):
-    return call("reset", {"confirm_environment_class": "disposable"}, run_id="run-reset-1", dry_run=dry_run, entity=entity)
-
-
-def test_a_full_reset_clears_the_audit_record_and_the_rows_an_earlier_adapter_left_in_porth(porth, monkeypatch):
-    _install_and_seed(monkeypatch)
+def test_reset_clears_the_seed_records_and_the_strays_and_keeps_the_baseline(porth, monkeypatch):
+    baseline = _install_and_capture(monkeypatch)
+    seed_both()
     _strays()
-    response = reset()
-    assert response["outcome"] == "ok"
+    response = call("reset", {"confirm_environment_class": "disposable", "baseline": baseline},
+                    run_id="run-reset-1", entity="porth", contract="1.1", slot=SLOT)
+    assert response["outcome"] == "ok", response
     assert porth_rows_of_prawf() == []
-    assert audit() == set()
-    assert any("removed 3 prawf row(s)" in m for m in response["diagnostics"]["messages"])
-
-
-def test_a_dry_run_reset_lists_the_strays_and_removes_nothing(porth, monkeypatch):
-    _install_and_seed(monkeypatch)
-    _strays()
-    response = reset(dry_run=True)
-    assert len(porth_rows_of_prawf()) == 3
-    assert any("would remove 3 prawf row(s)" in m for m in response["diagnostics"]["messages"])
-
-
-def test_a_scoped_reset_clears_its_own_audit_record_and_leaves_the_strays(porth, monkeypatch):
-    """C16: the strays are every entity's, so only a full reset takes them."""
-    _install_and_seed(monkeypatch)
-    _strays()
-    reset(entity="porth-claim-mapping")
-    reset(entity="porth-tenant")
-    assert len(porth_rows_of_prawf()) == 3
-    assert {pk for pk, _ in audit()} == {f"ENV#{SLOT}#ENTITY#porth-org"}, "porth-org's record stays with its rows"
+    assert audit() == {(f"ENV#{SLOT}#ENTITY#porth", f"BASELINE#0.3.1#{baseline['content_digest']}")}

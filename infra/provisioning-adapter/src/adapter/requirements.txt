@@ -1,3 +1,5 @@
-# The Porth that EMS runs is SAR 0.3.1, which shipped porth-common 0.0.9. The adapter writes Porth's
-# rows with Porth's own code, so this pin follows the deployed Porth - move both together.
+# The Porth that EMS runs is SAR 0.3.1, which shipped porth-common 0.0.9. The seed entities write
+# Porth's rows with Porth's own code. Move this pin when a Porth change affects what they write - a
+# minor porth-common release does not always need an adapter change (Richard, 2026-11-05).
+# bootstrap, reset and prune of `porth` use none of it: they copy rows, whatever Porth wrote.
 porth-common==0.0.9

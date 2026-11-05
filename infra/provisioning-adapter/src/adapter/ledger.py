@@ -25,8 +25,11 @@ import os
 from datetime import datetime, timezone
 
 
-def _table() -> str:
+def table() -> str:
     return os.environ["PRAWF_AUDIT_TABLE"]
+
+
+_table = table
 
 
 def _pk(env_scope: str, entity: str) -> dict:

@@ -7,9 +7,9 @@ Run locally, with credentials for the EMS account, against the live function:
 
 Each case is one `aws lambda invoke`, so this exercises the deployed adapter exactly as a caller
 would, including requests prawf itself would refuse to build (a malformed envelope, a foreign major
-version). Read-only: `capabilities` reads the slot map and one tenants row; every other case is
-refused or unsupported before it reads Porth's data - the `seed` cases are dry runs that fail
-validation, `bootstrap` is sent a payload it refuses, and `reset` lacks or contradicts the slot's
+version). Read-only: `capabilities` reads the slot map and the Porth stack's tags; every other case
+is refused or unsupported before it reads Porth's data - the `seed` cases are dry runs that fail
+validation, `bootstrap` and `prune` lack what they need, and `reset` lacks or contradicts the slot's
 class - so nothing is ever written. Safe against a live slot.
 
 What each case asserts:
@@ -17,10 +17,12 @@ What each case asserts:
       envelope -> contract version -> slot -> entity -> verb
   * the §9 invariants on every response: ok carries no reason code; a non-ok carries one from the
     closed list, no results, and a message saying why
-  * on `capabilities`, the declaration itself: the served slot, contract 1.0.0, the implemented
-    verbs, the eight catalogue entities, and exactly the implemented cells (C1): `bootstrap` on
-    porth-platform; `seed`, `reset` and `teardown` on porth-org, porth-tenant and porth-claim-mapping
-  * if `prawf_schemas` is importable, every response against the canonical response schema
+  * on `capabilities`, the declaration itself: the served slot, the contract version, the implemented
+    verbs, the catalogue entities, and exactly the implemented cells (C1). In 1.0: `seed` and
+    `teardown` on porth-org, porth-tenant, porth-claim-mapping and porth-role, and `reset` on
+    porth-session. In 1.1 also `bootstrap`, `reset` and `prune` on porth, declared `snapshot`
+  * if `prawf_schemas` is importable, every 1.0 response against the canonical response schema (the
+    published schemas are 1.0; 1.1 answers are checked by shape until 1.1 publishes)
 
 Exit status is 0 only when every case passes. --report writes each request and response as JSON.
 """
@@ -35,9 +37,9 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-VERBS = ("bootstrap", "seed", "reset", "ensure", "absent", "teardown", "status")
+VERBS = ("bootstrap", "seed", "reset", "ensure", "absent", "teardown", "status", "prune")
 ENTITIES = (
-    "porth-platform", "porth-org", "porth-tenant", "porth-claim-mapping",
+    "porth", "porth-org", "porth-tenant", "porth-claim-mapping",
     "porth-app-permission", "porth-role-grant", "porth-role", "porth-idp", "porth-session",
 )
 #: common.schema.json $defs/reasonCode - the closed list (§9).
@@ -45,19 +47,28 @@ REASON_CODES = {
     "environment_protected", "scope_violation", "dataset_conflict", "version_incompatible",
     "unknown_entity", "limit_exceeded", "not_implemented", "upstream_error", "timeout",
 }
+#: Contract 1.1's reason codes, which a 1.0 answer never carries.
+REASON_CODES_1_1 = REASON_CODES | {"unknown_slot", "slot_required", "installed_version_required",
+                                   "baseline_drift", "snapshot_invalid", "unknown_key_id", "sealed_value_invalid"}
 CONTRACT = "1.0.0"
-#: Implemented cells of the verb x entity matrix (C1). Everything else is unsupported.
+CONTRACT_1_1 = "1.1"
+#: Implemented cells of the verb x entity matrix in 1.0 (C1). Everything else is unsupported.
 IMPLEMENTED = {
-    ("bootstrap", "porth-platform"),
-    ("seed", "porth-org"), ("reset", "porth-org"), ("teardown", "porth-org"),
-    ("seed", "porth-tenant"), ("reset", "porth-tenant"), ("teardown", "porth-tenant"),
-    ("seed", "porth-claim-mapping"), ("reset", "porth-claim-mapping"), ("teardown", "porth-claim-mapping"),
-    ("reset", "porth-session"), ("seed", "porth-role"), ("reset", "porth-role"), ("teardown", "porth-role"),
+    ("seed", "porth-org"), ("teardown", "porth-org"),
+    ("seed", "porth-tenant"), ("teardown", "porth-tenant"),
+    ("seed", "porth-claim-mapping"), ("teardown", "porth-claim-mapping"),
+    ("seed", "porth-role"), ("teardown", "porth-role"),
+    ("reset", "porth-session"),
 }
-INSTALL_VERBS = ["capabilities", "bootstrap", "seed", "reset", "teardown"]
-EXTENSION_TYPES = ["porth.org", "porth.permission", "porth.role", "porth.role-grant", "porth.claim-mapping"]
-#: §3.4, C17: verbs whose payload is entity-specific, so omitting the entity is refused.
-NEEDS_ENTITY = ("bootstrap", "seed", "ensure", "absent")
+#: The install's snapshot baseline: contract 1.1 only. A 1.0 call is refused, version_incompatible.
+BASELINE = {("bootstrap", "porth"), ("reset", "porth"), ("prune", "porth")}
+IMPLEMENTED_1_1 = IMPLEMENTED | BASELINE
+INSTALL_VERBS = ["capabilities", "seed", "reset", "teardown"]
+INSTALL_VERBS_1_1 = ["capabilities", "bootstrap", "seed", "reset", "teardown", "prune"]
+EXTENSION_TYPES = ["porth.org", "porth.role", "porth.claim-mapping"]
+#: §3.4, C17: verbs whose payload is entity-specific, so omitting the entity is refused. Reset too:
+#: `porth` declares a baseline, so the every-entity form is refused (contract 1.1).
+NEEDS_ENTITY = ("bootstrap", "seed", "ensure", "absent", "reset", "prune")
 UNKNOWN_ENTITY = "porth-tables"  # the contract's own example entity; EMS never declares it
 OTHER_SLOT = "porth-sample"      # a real Porth slot this adapter does not serve
 
@@ -85,25 +96,31 @@ def envelope(verb: str, entity: str | None = None, *, version: object = CONTRACT
     return req
 
 
-def declares_the_target(slot: str):
+def declares_the_target(slot: str, v11: bool = False):
     def check(resp: dict) -> list[str]:
         problems = []
         body = (resp.get("results") or [{}])[0]
         env = body.get("environment") or {}
         if env.get("slot") != slot:
             problems.append(f"environment.slot is {env.get('slot')!r}, expected {slot!r}")
-        if body.get("contract_versions") != [CONTRACT]:
-            problems.append(f"contract_versions is {body.get('contract_versions')!r}")
+        versions = ["1.0", "1.1"] if v11 else [CONTRACT]
+        if body.get("contract_versions") != versions:
+            problems.append(f"contract_versions is {body.get('contract_versions')!r}, expected {versions!r}")
         if body.get("extension_types") != EXTENSION_TYPES:
             problems.append(f"extension_types is {body.get('extension_types')!r}, expected {EXTENSION_TYPES!r}")
-        if body.get("verbs") != INSTALL_VERBS:
-            problems.append(f"verbs is {body.get('verbs')!r}, expected {INSTALL_VERBS!r}")
+        verbs = INSTALL_VERBS_1_1 if v11 else INSTALL_VERBS
+        if body.get("verbs") != verbs:
+            problems.append(f"verbs is {body.get('verbs')!r}, expected {verbs!r}")
         ids = [e.get("id") for e in body.get("entities", [])]
         if sorted(ids) != sorted(ENTITIES):
             problems.append(f"entities are {ids!r}")
         declared = {(v, e.get("id")) for e in body.get("entities", []) for v in e.get("verbs", [])}
-        if declared != IMPLEMENTED:
-            problems.append(f"entities declare {sorted(declared)}, expected {sorted(IMPLEMENTED)} (C1)")
+        want = IMPLEMENTED_1_1 if v11 else IMPLEMENTED
+        if declared != want:
+            problems.append(f"entities declare {sorted(declared)}, expected {sorted(want)} (C1)")
+        kinds = {e.get("id"): e["baseline_kind"] for e in body.get("entities", []) if "baseline_kind" in e}
+        if kinds != ({"porth": "snapshot"} if v11 else {}):
+            problems.append(f"baseline kinds are {kinds!r} (one snapshot entity, porth, and only in 1.1)")
         if body.get("dataset_forms") != ["enumerated"]:
             problems.append(f"dataset_forms is {body.get('dataset_forms')!r}, expected ['enumerated']")
         if body.get("environment_class") not in ("disposable", "protected"):
@@ -138,12 +155,16 @@ def cases(slot: str) -> list[Case]:
              "refused", "version_incompatible"),
         Case("version", "0.9.0 has no common version", envelope("capabilities", version="0.9.0"),
              "refused", "version_incompatible"),
-        Case("version", "'1.0' is not semver", envelope("capabilities", version="1.0"),
-             "refused", "version_incompatible"),
-        Case("version", "a number is not semver", envelope("capabilities", version=1),
+        Case("version", "'1.0' is answered in 1.0", envelope("capabilities", version="1.0"),
+             "ok", None, [answered_in("1.0")]),
+        Case("version", "'1.1' is answered in 1.1", envelope("capabilities", version="1.1", slot=slot),
+             "ok", None, [declares_the_target(slot, v11=True), answered_in("1.1")]),
+        Case("version", "'1.7' is answered in 1.1", envelope("capabilities", version="1.7", slot=slot),
+             "ok", None, [answered_in("1.1")]),
+        Case("version", "a number is no version", envelope("capabilities", version=1),
              "refused", "version_incompatible"),
 
-        # 3. The slot. 1.0.0 cannot send one (PRF-19 adds it); the adapter already resolves it.
+        # 3. The slot. A 1.0.0 caller may omit it on a one-slot target; in 1.1 every write names it.
         Case("slot", "omitted, one slot served", envelope("capabilities"), "ok", None, [target]),
         Case("slot", f"{slot}, the served slot", envelope("capabilities", slot=slot), "ok", None, [target]),
         Case("slot", f"{OTHER_SLOT}, not served", envelope("capabilities", slot=OTHER_SLOT),
@@ -180,10 +201,8 @@ def cases(slot: str) -> list[Case]:
                 out.append(Case(f"verb:{verb}", f"{entity}, no run_id", envelope(verb, entity), "refused", "scope_violation"))
             elif (verb, entity) in IMPLEMENTED and verb == "reset":
                 out.append(Case(f"verb:{verb}", f"{entity}, no confirmation", envelope(verb, entity), "refused", "scope_violation"))
-            elif (verb, entity) in IMPLEMENTED and verb == "bootstrap":
-                # bootstrap takes no payload (D7); one is refused before anything is read.
-                out.append(Case(f"verb:{verb}", f"{entity}, with a payload", envelope(verb, entity, payload={"x": 1}),
-                                "refused", "dataset_conflict"))
+            elif (verb, entity) in BASELINE:
+                out.append(Case(f"verb:{verb}", f"{entity}, in 1.0", envelope(verb, entity), "refused", "version_incompatible"))
             else:
                 out.append(Case(f"verb:{verb}", entity, envelope(verb, entity), "unsupported", "not_implemented"))
         out.append(Case(f"verb:{verb}", f"{UNKNOWN_ENTITY} (unknown)", envelope(verb, UNKNOWN_ENTITY),
@@ -192,10 +211,31 @@ def cases(slot: str) -> list[Case]:
     # 6. reset: the caller's belief about the slot is checked before anything is read. The served slot
     #    is disposable; a caller who believes otherwise is refused, and nothing is reset.
     out.append(Case("reset", "a caller who believes the slot protected",
-                    envelope("reset", "porth-tenant", payload={"confirm_environment_class": "protected"}),
+                    envelope("reset", "porth-session", payload={"confirm_environment_class": "protected"}),
                     "refused", "scope_violation"))
 
-    # 7. seed: every way a dataset is turned away. All dry runs, all rejected before
+    # 7. contract 1.1. Every case is refused before anything is read or written.
+    def v11(verb: str, entity: str | None = "porth", **extra) -> dict:
+        return envelope(verb, entity, version=CONTRACT_1_1, **extra)
+
+    out += [
+        Case("1.1", "a write with no slot", v11("bootstrap", payload={"installed_version": "0.0.0"}),
+             "refused", "slot_required"),
+        Case("1.1", "a slot not served", v11("bootstrap", slot=OTHER_SLOT), "refused", "unknown_slot"),
+        Case("1.1", "bootstrap with no installed_version", v11("bootstrap", slot=slot),
+             "refused", "installed_version_required"),
+        Case("1.1", "an installed_version that cannot be a key", v11("bootstrap", slot=slot, payload={"installed_version": "a/b"}),
+             "refused", "installed_version_required"),
+        Case("1.1", "reset with no confirmation", v11("reset", slot=slot), "refused", "scope_violation"),
+        Case("1.1", "reset naming no entity", v11("reset", None, slot=slot, payload={"confirm_environment_class": "disposable"}),
+             "refused", "unknown_entity"),
+        Case("1.1", "reset naming no baseline",
+             v11("reset", slot=slot, payload={"confirm_environment_class": "disposable"}),
+             "refused", "installed_version_required"),
+        Case("1.1", "prune naming no baselines", v11("prune", slot=slot), "refused", "installed_version_required"),
+    ]
+
+    # 8. seed: every way a dataset is turned away. All dry runs, all rejected before
     #    the adapter reads or writes a row - so these are safe against a live slot.
     def seed(dataset: dict) -> dict:
         return envelope("seed", "porth-tenant", payload={"dataset": dataset})
@@ -264,13 +304,14 @@ def invoke(function: str, request: object, aws: list[str]) -> tuple[dict | None,
 def invariants(resp: dict) -> list[str]:
     problems = []
     outcome, reason = resp.get("outcome"), resp.get("reason_code")
+    v11 = str(resp.get("contract_version", "")).count(".") == 1
     if not resp.get("adapter_version"):
         problems.append("no adapter_version")
     if outcome == "ok":
         if reason is not None:
             problems.append(f"ok carries a reason code ({reason})")
     else:
-        if reason not in REASON_CODES:
+        if reason not in (REASON_CODES_1_1 if v11 else REASON_CODES):
             problems.append(f"reason code {reason!r} is not in the closed list")
         if resp.get("results"):
             problems.append("a non-ok answer carries results")
@@ -287,7 +328,7 @@ def judge(c: Case, resp: dict, validate) -> list[str]:
         want = c.outcome + (f"/{c.reason}" if c.reason else "")
         problems.append(f"expected {want}, got {got[0]}" + (f"/{got[1]}" if got[1] else ""))
     problems += invariants(resp)
-    if validate:
+    if validate and str(resp.get("contract_version", "")).count(".") == 2:
         problems += validate(resp)
     if not problems:
         for check in c.checks:
