@@ -138,7 +138,20 @@ SCOPE = {
     "dynamodb": {"dynamodb:DescribeTable", "dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:Query",
                  "dynamodb:Scan", "dynamodb:ConditionCheckItem", "dynamodb:PutItem", "dynamodb:UpdateItem",
                  "dynamodb:DeleteItem", "dynamodb:BatchWriteItem"},
+    "s3": {"s3:GetObject", "s3:PutObject", "s3:DeleteObject"},
 }
+
+
+def test_the_boundary_reaches_objects_in_prawfs_buckets_and_no_other(boot):
+    s3 = [st for st in _boundary(boot) if any(a.startswith("s3:") for a in actions(st))]
+    (st,) = s3
+    assert resources(st) == ["arn:aws:s3:::prawf-adapter-*/*"], "objects only, in prawf's own buckets"
+
+
+def test_the_pipeline_creates_prawfs_buckets_and_reads_or_writes_no_object(boot):
+    (st,) = [st for st in statements(boot["ExecutionRole"]) if st.get("Sid") == "TheAdapterBuckets"]
+    assert resources(st) == ["arn:aws:s3:::prawf-adapter-*"], "the bucket, never its objects"
+    assert not {"s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:*"} & set(actions(st))
 
 
 def test_the_boundary_is_a_deploy_scope_with_no_runtime_detail_and_no_iam(boot):
@@ -169,8 +182,10 @@ def test_the_deploy_role_has_no_iam_power_beyond_passing_the_execution_role(boot
 
 def test_the_execution_role_can_read_the_lambda_code_and_nothing_more_of_s3(boot):
     """CloudFormation creates the function as the execution role, and Lambda reads the code from S3
-    with that role's permissions - so it needs read on SAM's artifacts, and only read."""
-    s3 = [st for st in statements(boot["ExecutionRole"]) if any(a.startswith("s3:") for a in actions(st))]
+    with that role's permissions - so it needs read on SAM's artifacts, and only read. (Its bucket
+    administration, for prawf's own buckets, is pinned above.)"""
+    s3 = [st for st in statements(boot["ExecutionRole"])
+          if any(a.startswith("s3:") for a in actions(st)) and st.get("Sid") != "TheAdapterBuckets"]
     assert s3, "no S3 read: the first deploy would fail fetching the code"
     for st in s3:
         assert set(actions(st)) <= {"s3:GetObject", "s3:GetObjectVersion"}, st["Sid"]
@@ -183,7 +198,7 @@ _RESOLVED = {"AWS::Region": "us-east-1", "AWS::AccountId": "195950944420", "Port
              "PorthPermissionsTable": "porth-permissions-dev", "PorthClaimMappingConfigsTable": "porth-claim-mapping-configs-dev",
              "PorthUsersTable": "porth-users-dev", "PorthOrgUnitsTable": "porth-org-units-dev",
              "PorthSessionsTable": "porth-sessions-dev",
-             "PorthEventBus": "porth-events-dev"}
+             "PorthEventBus": "porth-events-dev", "SnapshotBucket.Arn": "arn:aws:s3:::prawf-adapter-snapshots-195950944420"}
 
 
 def _arn(x) -> str:
@@ -191,6 +206,8 @@ def _arn(x) -> str:
     if isinstance(x, dict) and "GetAtt" in x:
         if x["GetAtt"] == "AuditTable.Arn":
             return "arn:aws:dynamodb:us-east-1:195950944420:table/prawf-adapter-audit"
+        if x["GetAtt"] == "SnapshotBucket.Arn":
+            return "arn:aws:s3:::prawf-adapter-snapshots-195950944420"
         assert x["GetAtt"] in ("DataRole.Arn", "RunnerLogs.Arn"), x
         return "arn:aws:iam::195950944420:role/porth-provisioning-adapter-DataRole-ABC123"
     if isinstance(x, dict) and "Ref" in x:

@@ -46,12 +46,17 @@ EVENT_ACTIONS = ("events:PutEvents",)
 #: and PartiQL is denied outright.
 NEVER = ("dynamodb:PartiQLSelect", "dynamodb:ExecuteStatement",
          "dynamodb:BatchExecuteStatement", "dynamodb:ExecuteTransaction")
-#: PRF-14 (Richard, 2026-10-24): reset finds every tenant in the slot the way Porth's tenant directory
-#: does - by scanning the tenants table - because a tenant without Porth's list index is still one
-#: every login loads. So Scan is granted on that one table and denied on every other. IAM cannot hold
-#: a Scan to one slot: it can READ other slots' rows in that table, never write them (writes stay
-#: LeadingKeys-bound), and reset.scan_slot filters to the slot before anything acts on a row.
+#: PRF-20 (Richard, 2026-11-05): bootstrap captures, and reset restores, every row of the slot in
+#: Porth's tables, so Scan is granted on those tables and on nothing else - not an index, not the
+#: audit table. IAM cannot hold a Scan to one slot: DynamoDB may read other slots' rows, but the
+#: scan's filter (snapshot.scan_slot) drops them before anything is returned, and no write can reach
+#: them - writes stay LeadingKeys-bound.
 SCAN = "dynamodb:Scan"
+#: The snapshot bucket: the session reaches its own slot's prefix and no other.
+SNAPSHOT_ACTIONS = ("s3:GetObject", "s3:PutObject", "s3:DeleteObject")
+#: Porth's tables whose rows bootstrap captures - snapshot.TABLES, by environment variable.
+SNAPSHOT_TABLES = ("PORTH_TENANTS_TABLE", "PORTH_ROLES_TABLE", "PORTH_PERMISSIONS_TABLE",
+                   "PORTH_CLAIM_MAPPING_CONFIGS_TABLE", "PORTH_USERS_TABLE", "PORTH_ORG_UNITS_TABLE")
 
 
 class SlotMapError(Exception):
@@ -96,27 +101,29 @@ def load() -> dict[str, dict]:
     return parse(raw)
 
 
-def resolve(slot_map: dict[str, dict], requested: object) -> tuple[str, dict]:
+def resolve(slot_map: dict[str, dict], requested: object, version: object = None) -> tuple[str, dict]:
     """Turn the caller's slot into one of the target's. There is no default slot.
 
     Omission resolves only when the target serves exactly one slot. Otherwise a silent default is
     precisely the failure TAM §2.2 exists to catch: tests passing against a different environment
     from the one intended.
 
-    Reason code: `scope_violation` until PRF-19 publishes its own code for an unknown slot.
+    Reason codes: contract 1.1's `slot_required` and `unknown_slot`; a 1.0 answer has neither, so
+    it says `scope_violation`.
     """
+    is_1_1 = bool(getattr(version, "is_1_1", False))
     if requested is None:
         if len(slot_map) == 1:
             name = next(iter(slot_map))
             return name, slot_map[name]
         raise ContractError(
-            "refused", "scope_violation",
+            "refused", "slot_required" if is_1_1 else "scope_violation",
             f"this target serves {len(slot_map)} slots ({', '.join(sorted(slot_map))}); "
             "the call must name one. There is no default slot.",
         )
     if not isinstance(requested, str) or requested not in slot_map:
         raise ContractError(
-            "refused", "scope_violation",
+            "refused", "unknown_slot" if is_1_1 else "scope_violation",
             f"slot {requested!r} is not one this target serves ({', '.join(sorted(slot_map))})",
         )
     return requested, slot_map[requested]
@@ -129,9 +136,17 @@ def tenants_table_arn() -> str:
     return f"arn:aws:dynamodb:{region}:{account}:table/{os.environ['PORTH_TENANTS_TABLE']}"
 
 
+def table_arn(variable: str) -> str:
+    return tenants_table_arn().rsplit("/", 1)[0] + f"/{os.environ[variable]}"
+
+
 def sessions_table_arn() -> str:
     """Porth's sessions table, whose keys carry no environment, so LeadingKeys cannot hold it to a slot."""
-    return tenants_table_arn().rsplit("/", 1)[0] + f"/{os.environ['PORTH_SESSIONS_TABLE']}"
+    return table_arn("PORTH_SESSIONS_TABLE")
+
+
+def snapshot_tables() -> list[str]:
+    return [table_arn(v) for v in SNAPSHOT_TABLES]
 
 
 def session_policy(env_scope: str) -> str:
@@ -152,11 +167,14 @@ def session_policy(env_scope: str) -> str:
                 },
             },
             {"Sid": "PorthEvents", "Effect": "Allow", "Action": list(EVENT_ACTIONS), "Resource": "*"},
-            {"Sid": "ScanTheTenantsTable", "Effect": "Allow", "Action": [SCAN], "Resource": tenants_table_arn()},
+            # A session policy only narrows: Scan is allowed on these tables and on no other. The
+            # role's own ScanNothingElse denies the rest as well.
+            {"Sid": "ScanTheSlotsTables", "Effect": "Allow", "Action": [SCAN], "Resource": snapshot_tables()},
             # reset of porth-session clears the table. The one thing this session reaches beyond its
             # slot, and only to find rows and delete them - it can't read a row's token, or write one.
             {"Sid": "ClearTheSessionsTable", "Effect": "Allow", "Action": [SCAN, "dynamodb:DeleteItem", "dynamodb:DescribeTable"], "Resource": sessions_table_arn()},
-            {"Sid": "ScanNothingElse", "Effect": "Deny", "Action": [SCAN], "NotResource": [tenants_table_arn(), sessions_table_arn()]},
+            {"Sid": "OwnSnapshots", "Effect": "Allow", "Action": list(SNAPSHOT_ACTIONS),
+             "Resource": f"arn:aws:s3:::{os.environ['PRAWF_SNAPSHOT_BUCKET']}/{env_scope}/*"},
             {"Sid": "NeverPartiQL", "Effect": "Deny", "Action": list(NEVER), "Resource": "*"},
         ],
     }, separators=(",", ":"))

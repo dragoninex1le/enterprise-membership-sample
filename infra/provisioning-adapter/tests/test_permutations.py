@@ -46,6 +46,14 @@ def test_the_script_covers_every_verb_and_entity_in_the_catalogue():
             assert (f"verb:{verb}", entity) in covered
 
 
+def test_the_script_expects_what_the_catalogue_declares():
+    import catalogue
+
+    for is_1_1, cells in ((False, permutations.IMPLEMENTED), (True, permutations.IMPLEMENTED_1_1)):
+        declared = {(v, e["id"]) for e in catalogue.declared(is_1_1) for v in e["verbs"]}
+        assert declared == cells
+
+
 def test_the_reason_codes_are_the_schemas_closed_list():
     import json
     import prawf_schemas

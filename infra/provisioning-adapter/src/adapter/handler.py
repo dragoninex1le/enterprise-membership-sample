@@ -4,18 +4,19 @@ Invoked directly by ARN (PROVISIONING-CONTRACT §1.1). There is no HTTP surface:
 request envelope, and the return value IS the response envelope. No API-Gateway wrapping in either
 direction — one shape, so no caller ever has to double-decode.
 
-Implemented: `capabilities` (PRF-9); `seed` and `teardown` on `porth-org` and `porth-tenant`
-(PRF-12, PRF-15); `bootstrap` on `porth-platform` (PRF-11); and `reset` on `porth-claim-mapping`,
-`porth-tenant` and `porth-org` (PRF-14); `seed`/`teardown` on `porth-claim-mapping` (PRF-13);
-and `seed`/`teardown` on `porth-role` (PRF-18).
+Implemented: `capabilities` (PRF-9); `seed` and `teardown` on `porth-org`, `porth-tenant`,
+`porth-claim-mapping` and `porth-role` (PRF-12, PRF-13, PRF-15, PRF-18); `reset` on `porth-session`;
+and, in contract 1.1 only, `bootstrap`, `reset` and `prune` on `porth` - the install's snapshot
+baseline (PRF-20, snapshot.py).
 Every other verb x entity answers `unsupported` with `not_implemented`, which prawf reads as "skip",
 not "fail" (D3). That is the honest answer, and C1 forbids any other.
 
 Order of checks, each the stronger failure first:
   1. the request is an envelope, in a contract version we share      -> refused
-  2. the slot resolves to one this target serves                     -> refused
-  3. a named entity is in the catalogue                               -> refused / unknown_entity
-  4. the verb is implemented                                          -> unsupported
+  2. in 1.1, a verb that writes names its slot                        -> refused / slot_required
+  3. the slot resolves to one this target serves                     -> refused
+  4. a named entity is in the catalogue                               -> refused / unknown_entity
+  5. the verb is implemented                                          -> unsupported
 """
 from __future__ import annotations
 
@@ -26,12 +27,12 @@ import capabilities
 import catalogue
 import porth_claim_mapping
 import porth_org
-import porth_platform
 import porth_role
 import porth_tenant
 import reset
 import slots
-from envelope import CONTRACT_VERSIONS, VERBS, ContractError, negotiate, not_ok, ok
+import snapshot
+from envelope import V1_0, VERBS, WRITE_VERBS, ContractError, Version, negotiate, not_ok, ok
 
 
 def _envelope(event: object) -> dict:
@@ -64,11 +65,14 @@ TEARDOWNS = {porth_role.ENTITY: porth_role.teardown, porth_claim_mapping.ENTITY:
              porth_tenant.ENTITY: porth_tenant.teardown, porth_org.ENTITY: porth_org.teardown}
 
 #: §3.4, C17: these carry entity-specific data, so omitting the entity is refused - there is nothing
-#: to infer a destination from. Only teardown and reset may omit it.
-NEEDS_ENTITY = ("bootstrap", "seed", "ensure", "absent")
+#: to infer a destination from. Only teardown may omit it. Reset may not: `porth` declares a baseline,
+#: and contract 1.1 refuses the every-entity form when any addressed entity does.
+NEEDS_ENTITY = ("bootstrap", "seed", "ensure", "absent", "reset", "prune")
+#: The snapshot baseline exists only in contract 1.1: a 1.0 call has no way to name a version or a baseline.
+BASELINE_VERBS = ("bootstrap", "reset", "prune")
 
 
-def _dispatch(verb: str, entity: str | None, request: dict, slot_cfg: dict) -> tuple[list, list[str]]:
+def _dispatch(verb: str, entity: str | None, request: dict, slot_cfg: dict, version: Version) -> tuple[list, list[str]]:
     """One implemented cell of the verb x entity matrix, or `unsupported` (C1, C2)."""
     if entity is None and verb in NEEDS_ENTITY:
         raise ContractError("refused", "unknown_entity", f"{verb} must name the entity it writes to (§3.4)")
@@ -76,11 +80,19 @@ def _dispatch(verb: str, entity: str | None, request: dict, slot_cfg: dict) -> t
     run = request.get("run") if isinstance(request.get("run"), dict) else {}
     run_id = run.get("run_id")
     payload = request.get("payload")
-    if verb == "bootstrap" and entity == porth_platform.ENTITY:
-        return porth_platform.bootstrap(env_scope, _run_id(run_id), bool(run.get("dry_run")), payload)
-    # §3.4: reset may omit the entity too - every resettable entity, in reset.ORDER.
-    if verb == "reset" and (entity is None or entity in reset.RESETS):
-        return reset.reset(entity, slot_cfg, _run_id(run_id), bool(run.get("dry_run")), payload)
+    dry_run = bool(run.get("dry_run"))
+    if entity == snapshot.ENTITY and verb in BASELINE_VERBS:
+        if not version.is_1_1:
+            raise ContractError(
+                "refused", "version_incompatible",
+                f"{verb} on {snapshot.ENTITY} is contract 1.1: a {version} call cannot name an installed version or a baseline",
+            )
+        if verb == "bootstrap":
+            return snapshot.bootstrap(env_scope, _run_id(run_id), dry_run, payload)
+        if verb == "prune":
+            return snapshot.prune(env_scope, _run_id(run_id), dry_run, payload)
+    if verb == "reset" and entity in reset.RESETS:
+        return reset.reset(entity, slot_cfg, _run_id(run_id), dry_run, payload)
     if verb == "seed" and entity in SEEDS:
         return SEEDS[entity](env_scope, _run_id(run_id), bool(run.get("dry_run")), payload)
     # §3.4: teardown may omit the entity, meaning every entity that supports it - in TEARDOWN order,
@@ -112,10 +124,17 @@ def _run_id(value: object) -> str:
 
 def handler(event, context):  # noqa: ARG001 - Lambda signature
     started = time.monotonic()
-    version = CONTRACT_VERSIONS[-1]
+    version = Version(V1_0, three_part=True)
+    environment = None
     try:
         request = _envelope(event)
         version = negotiate(request["contract_version"])
+        verb = request["verb"]
+        if version.is_1_1 and verb in WRITE_VERBS and request.get("slot") is None:
+            raise ContractError(
+                "refused", "slot_required",
+                f"{verb} writes or deletes, so it must name its slot - even on a target that serves one",
+            )
 
         try:
             slot_map = slots.load()
@@ -123,12 +142,12 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
             raise ContractError(
                 "failed", "upstream_error", f"the adapter's slot map is unusable: {e}",
             ) from e
-        slot_name, slot_cfg = slots.resolve(slot_map, request.get("slot"))
+        slot_name, slot_cfg = slots.resolve(slot_map, request.get("slot"), version)
+        environment = {"id": slot_cfg["environment_id"], "slot": slot_name}
 
-        verb = request["verb"]
         if verb == "capabilities":
-            result, notes = capabilities.answer(slot_name, slot_cfg)
-            response = ok(version, [result], started, notes)
+            result, notes = capabilities.answer(slot_name, slot_cfg, version)
+            response = ok(version, [result], started, notes, environment)
         else:
             entity = request.get("entity")
             if entity is not None and entity not in catalogue.IDS:
@@ -137,7 +156,7 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
                     f"entity {entity!r} is not in this target's catalogue",
                 )
             try:
-                results, notes = _dispatch(verb, entity, request, slot_cfg)
+                results, notes = _dispatch(verb, entity, request, slot_cfg, version)
             except ContractError:
                 raise
             except Exception as e:  # noqa: BLE001 - silence is never an outcome (§9)
@@ -149,9 +168,9 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
                     f"{verb} on {entity or 'every entity'} failed part way: {type(e).__name__}: {str(e)[:300]}. "
                     "Anything written is labelled with the run; tear it down to remove it.",
                 ) from e
-            response = ok(version, results, started, notes)
+            response = ok(version, results, started, notes, environment)
     except ContractError as e:
-        response = not_ok(version, e, started)
+        response = not_ok(version, e, started, environment)
 
     _log(event, response)
     return response

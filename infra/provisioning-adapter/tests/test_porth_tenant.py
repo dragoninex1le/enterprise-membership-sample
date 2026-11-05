@@ -23,6 +23,7 @@ TABLES = {"tenants": "porth-tenants-dev", "roles": "porth-roles-dev", "permissio
           "claims": "porth-claim-mapping-configs-dev", "users": "porth-users-dev", "org_units": "porth-org-units-dev",
           "sessions": "porth-sessions-dev"}
 AUDIT = "prawf-adapter-audit"  # prawf's own table - never one of Porth's
+SNAPSHOTS = "prawf-adapter-snapshots-123456789012"  # where a baseline too big for its item goes
 ORG_ID = "0b7d3e52-9a51-4bd4-8a1e-3f0c2d1e9a77"
 #: The install's /porth/auth blob, as build_auth_blob.py writes it - synthetic values.
 AUTH = {"issuer": "https://idp.synthetic.test/", "jwks_uri": "https://idp.synthetic.test/.well-known/jwks.json",
@@ -76,6 +77,7 @@ def porth(monkeypatch):
                          KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
                          AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}])
         _table(ddb, AUDIT, "PK", "SK", [])
+        boto3.client("s3").create_bucket(Bucket=SNAPSHOTS)
         events = boto3.client("events")
         events.create_event_bus(Name="porth-events")
         sqs = boto3.client("sqs")
@@ -109,6 +111,7 @@ def porth(monkeypatch):
         monkeypatch.setenv("PORTH_ORG_UNITS_TABLE", TABLES["org_units"])
         monkeypatch.setenv("PORTH_SESSIONS_TABLE", TABLES["sessions"])
         monkeypatch.setenv("PRAWF_AUDIT_TABLE", AUDIT)
+        monkeypatch.setenv("PRAWF_SNAPSHOT_BUCKET", SNAPSHOTS)
         monkeypatch.setenv("PORTH_STACK_NAME", "serverlessrepo-porth-components")
         monkeypatch.setenv("ADAPTER_VERSION", "test-build")
 
@@ -125,15 +128,25 @@ def porth(monkeypatch):
         yield {"published": published}
 
 
-def call(verb, payload=None, run_id="run-seed-1", dry_run=False, entity="porth-tenant"):
-    request = {"contract_version": "1.0.0", "verb": verb, "run": {"run_id": run_id, "dry_run": dry_run}}
+def call(verb, payload=None, run_id="run-seed-1", dry_run=False, entity="porth-tenant", contract="1.0.0", slot=None):
+    request = {"contract_version": contract, "verb": verb, "run": {"run_id": run_id, "dry_run": dry_run}}
     if entity:
         request["entity"] = entity
     if payload is not None:
         request["payload"] = payload
+    if slot is not None:
+        request["slot"] = slot
     response = handler.handler(copy.deepcopy(request), None)
-    result = validate_contract_response(response)
-    assert result.valid, [str(e) for e in result.errors]
+    if contract.count(".") == 2:
+        # The published prawf-schemas are 1.0; a 1.1 answer is checked by shape until 1.1 publishes.
+        result = validate_contract_response(response)
+        assert result.valid, [str(e) for e in result.errors]
+    else:
+        assert response["contract_version"] == contract
+        assert response["outcome"] == "ok" or response["reason_code"]
+        if response["outcome"] == "ok" or response.get("reason_code") not in ("slot_required", "unknown_slot", "version_incompatible"):
+            where = slot or SLOT
+            assert response["environment"] == {"id": f"ems-{where}", "slot": where}, response
     return response
 
 

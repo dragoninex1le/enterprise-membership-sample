@@ -2,7 +2,7 @@
 
 What the denial test needs from the data is a role a user can hold that grants nothing. So the tests
 assert exactly that through Porth's own repository - the role exists, answers to its claim value, is
-not a system role (so reset can take it), and holds no grants.
+not a system role, and holds no grants. Reset of `porth` removes it with everything else seeded.
 """
 import boto3
 
@@ -36,10 +36,10 @@ def test_no_access_is_a_role_a_user_can_hold_that_grants_nothing(porth):
     assert roles().get_role_permissions("ems-test", role.id) == [], "no grants - the denial test's premise"
 
 
-def test_a_seeded_role_is_one_reset_takes_and_tenant_admin_survives(porth):
+def test_roles_no_longer_reset_one_by_one_reset_of_porth_takes_them(porth):
     seed_tenant_then_role()
-    call("reset", {"confirm_environment_class": "disposable"}, run_id="run-reset", entity="porth-role")
-    assert sorted(r.name for r in roles().list_roles("ems-test")) == ["tenant-admin"]
+    response = call("reset", {"confirm_environment_class": "disposable"}, run_id="run-reset", entity="porth-role")
+    assert (response["outcome"], response["reason_code"]) == ("unsupported", "not_implemented")
 
 
 def test_grants_are_refused_a_seeded_role_holds_none(porth):

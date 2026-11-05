@@ -314,11 +314,11 @@ jobs:
       # not implemented answered honestly - and three DRY RUNS, each writing nothing:
       #   * seed of a probe tenant: porth-common loads and reads Porth's tables on the one-slot
       #     session. It may be refused (no `ems` org in the slot, say); it must not fail.
-      #   * bootstrap porth-platform: reads /porth/auth and every platform table, the claim mapping's
-      #     included - the grants PRF-11 added. Must be ok.
-      #   * reset of every entity: the one Scan of the tenants table - PRF-14's grant, through the
-      #     session policy. Must be ok. Only its outcome is reported: its messages name the slot's
-      #     tenants, and this repository is public.
+      #   * bootstrap porth (contract 1.1): describes and scans the slot's rows in Porth's six data
+      #     tables - PRF-20's Scan grant, through the session policy. Must be ok. Only row counts are
+      #     reported: this repository is public.
+      #   * reset porth-session: the scan of the sessions table. Must be ok.
+      # reset of porth needs a baseline prawf names, so the deploy cannot prove it without writing one.
       - name: Prove it in-account
         run: |
           set -euo pipefail
@@ -327,6 +327,8 @@ jobs:
               --cli-binary-format raw-in-base64-out --payload "$1" "$2" > /dev/null
           }
           invoke '{"contract_version":"1.0.0","verb":"capabilities"}' caps.json
+          SLOT=$(python -c 'import json; print(json.load(open("caps.json"))["results"][0]["environment"]["slot"])')
+          invoke "{\"contract_version\":\"1.1\",\"verb\":\"capabilities\",\"slot\":\"$SLOT\"}" caps11.json
           invoke '{"contract_version":"1.0.0","verb":"seed","run":{"run_id":"deploy-proof"},"entity":"porth-app-permission"}' unsupported.json
           invoke '{"contract_version":"1.0.0","verb":"seed","run":{"run_id":"deploy-proof"},"entity":"porth-tables"}' unknown.json
           python - <<'PY' > dryrun-request.json
@@ -341,8 +343,8 @@ jobs:
                             "payload": {"dataset": {**body, "digest": digest}}}))
           PY
           invoke "$(cat dryrun-request.json)" dryrun.json
-          invoke '{"contract_version":"1.0.0","verb":"bootstrap","entity":"porth-platform","run":{"run_id":"deploy-proof","dry_run":true}}' bootstrap.json
-          invoke '{"contract_version":"1.0.0","verb":"reset","run":{"run_id":"deploy-proof","dry_run":true},"payload":{"confirm_environment_class":"disposable"}}' reset.json
+          invoke "{\"contract_version\":\"1.1\",\"verb\":\"bootstrap\",\"entity\":\"porth\",\"slot\":\"$SLOT\",\"run\":{\"run_id\":\"deploy-proof\",\"dry_run\":true},\"payload\":{\"installed_version\":\"deploy-proof\"}}" bootstrap.json
+          invoke '{"contract_version":"1.0.0","verb":"reset","entity":"porth-session","run":{"run_id":"deploy-proof","dry_run":true},"payload":{"confirm_environment_class":"disposable"}}' reset.json
 
           python - <<'PY'
           import json, os
@@ -359,11 +361,18 @@ jobs:
           result = validate_capabilities(caps["results"][0])
           assert result.valid, [str(e) for e in result.errors]
           body = caps["results"][0]
-          assert body["verbs"] == ["capabilities", "bootstrap", "seed", "reset", "teardown"], body["verbs"]
+          assert body["verbs"] == ["capabilities", "seed", "reset", "teardown"], body["verbs"]
           declared = {e["id"]: e["verbs"] for e in body["entities"]}
-          assert declared["porth-tenant"] == ["seed", "reset", "teardown"], declared
-          assert declared["porth-platform"] == ["bootstrap"], declared
+          assert declared["porth-tenant"] == ["seed", "teardown"], declared
+          assert declared["porth"] == [], declared
           assert body["environment"].get("slot"), "environment.slot must be populated"
+
+          # Contract 1.1: no published schema yet, so the shape is checked here.
+          caps11 = json.load(open("caps11.json"))
+          assert (caps11["outcome"], caps11["contract_version"]) == ("ok", "1.1"), caps11
+          assert caps11["environment"]["slot"] == body["environment"]["slot"], caps11["environment"]
+          kinds = {e["id"]: e.get("baseline_kind") for e in caps11["results"][0]["entities"] if e.get("baseline_kind")}
+          assert kinds == {"porth": "snapshot"}, kinds
 
           unsupported = load("unsupported.json")
           assert (unsupported["outcome"], unsupported["reason_code"]) == ("unsupported", "not_implemented"), unsupported
@@ -375,9 +384,9 @@ jobs:
           assert dryrun["outcome"] in ("ok", "refused"), dryrun
           dry_note = dryrun["outcome"] + (f" / {dryrun['reason_code']}" if dryrun.get("reason_code") else "")
 
-          bootstrap = load("bootstrap.json")
+          bootstrap = json.load(open("bootstrap.json"))
           assert bootstrap["outcome"] == "ok", (bootstrap.get("reason_code"), bootstrap["diagnostics"]["messages"])
-          baseline = ", ".join(f"{h['type']} {h['outcome']}" for h in bootstrap["results"])
+          counts = bootstrap["diagnostics"]["messages"][0]
 
           reset = load("reset.json")
           assert reset["outcome"] == "ok", reset.get("reason_code")
@@ -388,14 +397,14 @@ jobs:
               "",
               f"- **environment**: `{env['id']}`, slot `{env['slot']}`, Porth `{env.get('candidate_version', 'unknown')}`",
               f"- **environment_class**: `{body['environment_class']}`",
-              f"- **adapter**: `{body['adapter_version']}`, contract {', '.join(body['contract_versions'])}",
-              f"- **verbs**: {', '.join(body['verbs'])}",
+              f"- **adapter**: `{body['adapter_version']}`, contract {', '.join(body['contract_versions'])} and 1.1",
+              f"- **verbs**: {', '.join(body['verbs'])} (1.1 adds bootstrap and prune on porth)",
               f"- **entities**: {', '.join(e['id'] for e in body['entities'])}",
               "- `seed porth-app-permission` -> `unsupported / not_implemented`",
               "- `seed porth-tables` -> `refused / unknown_entity`",
               f"- dry-run `seed porth-tenant` (probe, nothing written) -> `{dry_note}`: {'; '.join(dryrun['diagnostics']['messages'])}",
-              f"- dry-run `bootstrap porth-platform` (nothing written) -> `ok`: {baseline}",
-              "- dry-run `reset` (every entity, nothing removed) -> `ok`",
+              f"- dry-run `bootstrap porth` (1.1, nothing stored) -> `ok`: {counts}",
+              "- dry-run `reset porth-session` (nothing removed) -> `ok`",
           ]
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
               f.write("\n".join(lines) + "\n")

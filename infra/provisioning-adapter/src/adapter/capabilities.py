@@ -1,13 +1,17 @@
 """`capabilities` — PROVISIONING-CONTRACT §4.1. The first call of every run.
 
-**Identity comes from ground truth, never from the request.** The caller names a slot; this module
-does not report that name back on the caller's say-so. The slot must exist in the target's own map,
-and it must actually be bootstrapped — its platform tenant row present under `ENV#{scope}#` — or
-the answer is `refused`. An adapter that echoed the requested slot would agree with the caller by
-construction, and TAM §2.2's run-start check would compare the request against itself.
-
-`environment_class` comes from the target's own map (D5). There is no request field for it, and
+**Identity comes from the target's own configuration, never from the request.** The caller names a
+slot; the slot must be in the target's own map, and what is reported is that entry - its
+environment id and class (D5) - not the caller's words. There is no request field for the class, and
 none is read.
+
+Whether a slot is *bootstrapped* is no longer judged here. That judgement used to be "the platform
+tenant row exists", which is a guess about what an install contains (Richard, 2026-11-05). A slot is
+bootstrapped for prawf when prawf holds a current baseline for its deployed version - prawf's record,
+not the adapter's.
+
+Contract 1.1 adds each entity's `baseline_kind` and the `prune` verb; a 1.0 answer carries neither,
+and declares the 1.1-only `porth` entity with no verbs (C1: nothing declared that a 1.0 call can use).
 """
 from __future__ import annotations
 
@@ -16,30 +20,7 @@ import os
 import aws
 import catalogue
 import datasets
-import slots
-from envelope import CONTRACT_VERSIONS, ContractError, adapter_version
-
-
-def _confirm_bootstrapped(env_scope: str) -> None:
-    table = os.environ["PORTH_TENANTS_TABLE"]
-    pk = f"ENV#{env_scope}#TENANT#platform"
-    try:
-        # Tenants uses UPPERCASE PK/SK; permissions and roles use lowercase. Part of the shape.
-        item = slots.data_session(env_scope).get_item(
-            TableName=table,
-            Key={"PK": {"S": pk}, "SK": {"S": "METADATA"}},
-            ProjectionExpression="PK",
-        ).get("Item")
-    except Exception as e:  # noqa: BLE001 - any failure to read is an upstream failure, loudly
-        raise ContractError(
-            "failed", "upstream_error",
-            f"could not read the platform tenant for scope {env_scope!r}: {type(e).__name__}",
-        ) from e
-    if not item:
-        raise ContractError(
-            "refused", "scope_violation",
-            f"scope {env_scope!r} is not bootstrapped: no {pk} in {table}",
-        )
+from envelope import adapter_version, spoken
 
 
 def _candidate_version() -> tuple[str | None, str | None]:
@@ -57,8 +38,8 @@ def _candidate_version() -> tuple[str | None, str | None]:
     return version, None
 
 
-def answer(slot_name: str, slot_cfg: dict) -> tuple[dict, list[str]]:
-    _confirm_bootstrapped(slot_cfg["env_scope"])
+def answer(slot_name: str, slot_cfg: dict, contract: object = None) -> tuple[dict, list[str]]:
+    is_1_1 = bool(getattr(contract, "is_1_1", False))
     version, note = _candidate_version()
 
     environment = {"id": slot_cfg["environment_id"], "slot": slot_name}
@@ -66,15 +47,15 @@ def answer(slot_name: str, slot_cfg: dict) -> tuple[dict, list[str]]:
         environment["candidate_version"] = version
 
     result = {
-        "contract_versions": list(CONTRACT_VERSIONS),
+        "contract_versions": spoken(three_part=not is_1_1),
         "adapter_version": adapter_version(),
         "environment": environment,
         "environment_class": slot_cfg["environment_class"],
-        "verbs": list(catalogue.INSTALL_VERBS),
-        "entities": catalogue.declared(),
+        "verbs": list(catalogue.INSTALL_VERBS_1_1 if is_1_1 else catalogue.INSTALL_VERBS),
+        "entities": catalogue.declared(is_1_1),
         "resource_types": ["tenant"],
-        # porth.org is seeded; the rest name the pieces of the platform baseline bootstrap reports.
-        "extension_types": ["porth.org", "porth.permission", "porth.role", "porth.role-grant", "porth.claim-mapping"],
+        # What the seed entities write, beyond the core `tenant`.
+        "extension_types": ["porth.org", "porth.role", "porth.claim-mapping"],
         "dataset_forms": list(datasets.FORMS),
         "async": False,
     }

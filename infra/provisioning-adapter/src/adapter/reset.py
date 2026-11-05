@@ -1,62 +1,46 @@
-"""`reset` (PRF-14) - return an entity to its bootstrapped state, whoever wrote what is there.
+"""`reset` - return the slot to what was bootstrapped (PRF-14, contract 1.1).
 
 PROVISIONING-CONTRACT §4.4: reset clears seeded data and anything the tests created, and leaves the
-entity bootstrapped, not empty (C12). It is what §8.4 sends a caller to when a seed meets data it did
-not write - which teardown cannot reach, because teardown removes only what a run labelled.
+install as it was bootstrapped, not empty (C12). Back to *seeded* is reset then seed of the same
+dataset (PRF-14, rewritten 2026-11-05).
 
-**What bootstrapped means here.** The platform baseline - the platform tenant, its organisation,
-roles, permissions and claim mapping (`porth-platform`, porth_platform.py). Reset never touches it:
-`porth-platform` is not resettable, and resetting one entity leaves the others alone (C16). Each
-resettable entity's baseline is therefore *none of its own rows*:
+Two entities reset:
 
-* `porth-role` - every role arranged after the seed (not a system role) in every tenant but the
-  platform, through Porth's own `delete_role`; the seeded `tenant-admin` stays, with its grants;
-* `porth-claim-mapping` - every claim-mapping version of every tenant except the platform's;
-* `porth-tenant` - every tenant except the platform, with its roles, grants and permissions (both
-  grant key shapes, PORTH-604), its IdP config, which lives on the tenant row, and everything keyed
-  under it: its users, their role assignments and its org units. Nothing is left pointing at a tenant
-  that has gone (Richard, 2026-11-04). The platform's users are baseline, and stay;
-* `porth-org` - every organisation except the platform's. Refused while tenants still belong to one:
-  reset `porth-tenant` first, which reset with no entity does.
+* `porth` - every row of the slot in Porth's tables goes, and the baseline prawf names comes back
+  (snapshot.py). Whatever a seed or a test changed - a tenant, a role, an IdP config on the platform
+  tenant - is gone, and anything a test still needs is seeded again (Richard, 2026-11-05). The seed
+  entities' ledgers go with their rows, so the same dataset seeded again is written, not `unchanged`.
 * `porth-session` - every row in Porth's sessions table. Sessions carry no environment in their keys,
   so this one is not held to the slot: it logs everyone out of every environment on this install
-  (Richard, 2026-11-04). Sessions are throwaway, and a login makes a new one. It is the only thing
-  reset reaches beyond the slot, it has its own entity so it can be reset alone, and it reads only
-  the keys of the rows it deletes - never a token.
+  (Richard, 2026-11-04). It reads only the keys of the rows it deletes - never a token.
 
-With no entity, all of them, in that order - claim mappings are found through the tenants they belong
-to, and an organisation cannot go while it has tenants.
+**What reset still knows about Porth: its events.** Porth's consumers hear that a tenant has gone
+only from Porth's `deleted` events - FFUG keeps a tenant's data until one arrives. A row removed
+without its event leaves them stale, so a tenant, organisation or user that reset removes, and does
+not write back, is announced the way Porth's own delete would announce it.
 
-**Finding what is there.** Porth's tenant directory finds tenants by scanning the tenants table, and
-so does this: a tenant written without Porth's list index (gsi2) - which the old testbed seeder never
-wrote - is still a tenant every login loads. The scan is the one-slot session's only Scan, on the
-tenants table alone, read-only, filtered to the slot (slots.py). Roles, permissions and claim
-mappings are then reached by the tenant's own keys.
+**Guarded twice.** A `protected` slot refuses reset outright (C8, D5). On a disposable one the
+caller must say what it believes the slot to be (`confirm_environment_class`) and is refused on a
+mismatch - a mistake-detector, never an authorisation: the slot's class decides.
 
-**Guarded twice.** A `protected` slot refuses reset outright, on every entity (C8, D5). On a
-disposable one the caller must say what it believes the slot to be (`confirm_environment_class`) and
-is refused on a mismatch - a mistake-detector, never an authorisation: the slot's class decides.
-
-A dry run lists what would
-go and removes nothing (C14).
+A dry run says what would go and changes nothing (C14).
 """
 from __future__ import annotations
 
 import os
-from collections import defaultdict
 
 import ledger
+import porth_claim_mapping
 import porth_org
+import porth_role
 import porth_tenant
+import snapshot
 from envelope import ContractError
 from porth_tenant import Porth
 
-CLAIM_MAPPING = "porth-claim-mapping"
 SESSION = "porth-session"
-ROLE = "porth-role"
-#: Ordered: claim mappings are found through their tenants, and tenants go before their organisations.
-ORDER = (SESSION, ROLE, CLAIM_MAPPING, porth_tenant.ENTITY, porth_org.ENTITY)
-PLATFORM = "platform"
+#: Their rows are the slot's rows: when the slot goes back to its baseline, their ledgers go too.
+SEEDED = (porth_org.ENTITY, porth_tenant.ENTITY, porth_role.ENTITY, porth_claim_mapping.ENTITY)
 
 
 def confirm(slot_cfg: dict, payload: object) -> None:
@@ -76,230 +60,73 @@ def confirm(slot_cfg: dict, payload: object) -> None:
         )
 
 
-def scan_slot(db, env_scope: str) -> list[dict]:
-    """Every row of the slot in the tenants table - what Porth's directory scan sees, and more."""
-    kwargs = {"TableName": os.environ["PORTH_TENANTS_TABLE"], "ConsistentRead": True,
-              "FilterExpression": "begins_with(PK, :p)",
-              "ExpressionAttributeValues": {":p": {"S": f"ENV#{env_scope}#"}}}
-    items, start = [], None
-    while True:
-        if start:
-            kwargs["ExclusiveStartKey"] = start
-        page = db.scan(**kwargs)
-        items += page.get("Items", [])
-        start = page.get("LastEvaluatedKey")
-        if not start:
-            return items
+def _announcer(porth: Porth, env_scope: str):
+    """Porth's `deleted` events for the rows reset removes and does not write back."""
+    prefix = f"ENV#{env_scope}#"
+    said = []
 
-
-class Slot:
-    """Every row of one slot in the tenants table, by what it belongs to."""
-
-    def __init__(self, porth: Porth, env_scope: str):
-        self.porth = porth
-        self.prefix = f"ENV#{env_scope}#"
-        self.tenants: dict[str, list[dict]] = defaultdict(list)
-        self.orgs: dict[str, list[dict]] = defaultdict(list)
-        #: prawf bookkeeping an earlier adapter wrote into Porth's table (PRF-12 to PRF-14), before it
-        #: had its own audit table. Reset removes it: it was never Porth's, and nothing writes it now.
-        self.strays: list[dict] = []
-        self.env_scope = env_scope
-        for item in scan_slot(porth.db, env_scope):
-            rest = item["PK"]["S"][len(self.prefix):]
+    def publish(table: str, row: dict) -> None:
+        if table == "tenants" and row.get("SK", {}).get("S") == "METADATA":
+            rest = row["PK"]["S"].removeprefix(prefix)
             if rest.startswith("TENANT#"):
-                self.tenants[rest[len("TENANT#"):].split("#", 1)[0]].append(item)
+                tid = rest.removeprefix("TENANT#")
+                porth.publisher.publish(entity_type="Tenant", action="deleted", entity_id=tid, metadata={"tenant_id": tid})
+                porth.publisher.publish_tenant_lifecycle(action="deleted", tenant_id=tid)
+                said.append(f"tenant {tid}")
             elif rest.startswith("ORG#"):
-                self.orgs[rest[len("ORG#"):].split("#", 1)[0]].append(item)
-            elif rest.startswith("PRAWF#"):
-                self.strays.append(item)
+                org_id = rest.removeprefix("ORG#")
+                porth.publisher.publish(entity_type="Organization", action="deleted", entity_id=org_id,
+                                        metadata={"organization_id": org_id})
+                said.append(f"organisation {org_id}")
+        elif table == "users" and "#USER#" in row.get("PK", {}).get("S", ""):
+            tid = row["PK"]["S"].removeprefix(prefix).removeprefix("TENANT#").split("#", 1)[0]
+            uid = row.get("id", {}).get("S") or row["PK"]["S"].rsplit("#USER#", 1)[1]
+            porth.publisher.publish(entity_type="User", action="deleted", entity_id=uid, metadata={"tenant_id": tid})
+            said.append("user")
 
-    def metadata(self, rows: list[dict]) -> dict | None:
-        return next((r for r in rows if r["SK"]["S"] == "METADATA"), None)
-
-    def platform_org(self) -> str | None:
-        row = self.metadata(self.tenants.get(PLATFORM, []))
-        return row["org_id"]["S"] if row and "org_id" in row else None
-
-    def fixture_tenants(self) -> list[str]:
-        return sorted(t for t in self.tenants if t != PLATFORM)
-
-    def fixture_orgs(self) -> list[str]:
-        platform = self.platform_org()
-        out = []
-        for org_id, rows in self.orgs.items():
-            meta = self.metadata(rows)
-            slug = meta.get("slug", {}).get("S") if meta else None
-            if org_id != platform and slug != PLATFORM:
-                out.append(org_id)
-        return sorted(out)
-
-    def org_label(self, org_id: str) -> str:
-        meta = self.metadata(self.orgs.get(org_id, []))
-        slug = meta.get("slug", {}).get("S") if meta else None
-        return f"{slug} ({org_id})" if slug else org_id
-
-    def forget(self, entity: str) -> int:
-        """The entity's prawf bookkeeping goes with its rows: every run's ledger for it, and its marker."""
-        return ledger.forget_entity(self.porth.db, self.env_scope, entity)
-
-    def clear_strays(self, dry_run: bool) -> str | None:
-        if not self.strays:
-            return None
-        if dry_run:
-            return f"would remove {len(self.strays)} prawf row(s) an earlier adapter left in Porth's tenants table"
-        table = os.environ["PORTH_TENANTS_TABLE"]
-        for row in self.strays:
-            self.porth.db.delete_item(TableName=table, Key={"PK": row["PK"], "SK": row["SK"]})
-        count, self.strays = len(self.strays), []
-        return f"removed {count} prawf row(s) an earlier adapter left in Porth's tenants table"
+    return publish, said
 
 
-def _query(db, table: str, attr: str, value: str, index: str | None = None) -> list[dict]:
-    kwargs = {"TableName": table, "KeyConditionExpression": f"{attr} = :v",
-              "ExpressionAttributeValues": {":v": {"S": value}}}
-    if index:
-        kwargs["IndexName"] = index
-    items, start = [], None
-    while True:
-        if start:
-            kwargs["ExclusiveStartKey"] = start
-        page = db.query(**kwargs)
-        items += page.get("Items", [])
-        start = page.get("LastEvaluatedKey")
-        if not start:
-            return items
-
-
-def _roles(slot: Slot, env_scope: str, dry_run: bool) -> str:
-    """Every role arranged after the seed - a role Porth did not make a system role - in every tenant
-    but the platform, through Porth's own `delete_role` (DELETE /roles/{id}): it refuses a system role,
-    and takes the role's grants (both key shapes) and its user assignments with it. The seeded
-    `tenant-admin` is a system role and stays, with its grants; permissions are never touched, so an
-    application's own registrations survive (PORTH-609)."""
-    gone = []
-    for tenant_id in slot.fixture_tenants():
-        for role in slot.porth.roles.list_roles(tenant_id):
-            if not role.is_system:
-                gone.append((tenant_id, role))
-    labels = [f"{t}/{r.name}" for t, r in gone]
+def _porth(slot_cfg: dict, run_id: str, dry_run: bool, payload: object) -> tuple[list[dict], list[str]]:
+    env_scope = slot_cfg["env_scope"]
     if dry_run:
-        return f"{ROLE}: would remove role(s) {labels or '(none)'}, with their grants and assignments"
-    for tenant_id, role in gone:
-        slot.porth.roles.delete_role(tenant_id, role.id)
-    slot.forget(ROLE)
-    return f"{ROLE}: removed role(s) {labels or '(none)'}, with their grants and assignments"
+        return snapshot.restore(env_scope, run_id, True, payload, lambda *_: None)
+    porth = Porth(env_scope, run_id)
+    publish, said = _announcer(porth, env_scope)
+    results, notes = snapshot.restore(env_scope, run_id, False, payload, publish)
+    forgotten = sum(ledger.forget_entity(porth.db, env_scope, e) for e in SEEDED)
+    users = said.count("user")
+    named = [s for s in said if s != "user"]
+    notes.append(f"announced deleted: {', '.join(named) or 'no tenant or organisation'}"
+                 + (f", {users} user(s)" if users else ""))
+    notes.append(f"forgot {forgotten} ledger record(s) of the seed entities")
+    return results, notes
 
 
-def _claim_mappings(slot: Slot, env_scope: str, dry_run: bool) -> str:
-    table = os.environ["PORTH_CLAIM_MAPPING_CONFIGS_TABLE"]
-    found = {t: _query(slot.porth.db, table, "PK", f"ENV#{env_scope}#TENANT#{t}") for t in slot.fixture_tenants()}
-    found = {t: rows for t, rows in found.items() if rows}
-    count = sum(len(rows) for rows in found.values())
-    if dry_run:
-        return f"{CLAIM_MAPPING}: would remove {count} claim-mapping version(s) of {sorted(found) or 'no tenant'}"
-    for rows in found.values():
-        for row in rows:
-            slot.porth.db.delete_item(TableName=table, Key={"PK": row["PK"], "SK": row["SK"]})
-    slot.forget(CLAIM_MAPPING)
-    return f"{CLAIM_MAPPING}: removed {count} claim-mapping version(s) of {sorted(found) or 'no tenant'}"
-
-
-def _tenants(slot: Slot, env_scope: str, dry_run: bool) -> str:
-    gone = slot.fixture_tenants()
-    rows = sum(len(slot.tenants[t]) for t in gone)
-    users = sum(len(porth_tenant.users_of(slot.porth, env_scope, t)) for t in gone)
-    units = sum(len(porth_tenant.org_units_of(slot.porth, env_scope, t)) for t in gone)
-    also = f"their roles, grants, permissions, {users} user(s) with their role assignments, and {units} org unit(s)"
-    if dry_run:
-        return f"{porth_tenant.ENTITY}: would remove tenant(s) {gone or '(none)'} - {rows} tenant row(s), with {also}"
-    table, roles_table, _ = porth_tenant._tables()
-    for tenant_id in gone:
-        # The legacy grant shape (pre PORTH-604) is keyed by role alone; find the roles first.
-        role_ids = [r["sk"]["S"].removeprefix("ROLE#") for r in _query(slot.porth.db, roles_table, "pk", f"ENV#{env_scope}#TENANT#{tenant_id}")
-                    if r["sk"]["S"].startswith("ROLE#")]
-        porth_tenant._sweep_tenant(slot.porth, env_scope, tenant_id)
-        for role_id in role_ids:
-            for grant in _query(slot.porth.db, roles_table, "pk", f"ENV#{env_scope}#ROLE#{role_id}"):
-                slot.porth.db.delete_item(TableName=roles_table, Key={"pk": grant["pk"], "sk": grant["sk"]})
-        for row in slot.tenants.pop(tenant_id):
-            slot.porth.db.delete_item(TableName=table, Key={"PK": row["PK"], "SK": row["SK"]})
-        slot.porth.publisher.publish(entity_type="Tenant", action="deleted", entity_id=tenant_id,
-                                     metadata={"tenant_id": tenant_id})
-        slot.porth.publisher.publish_tenant_lifecycle(action="deleted", tenant_id=tenant_id)
-    slot.forget(porth_tenant.ENTITY)
-    return f"{porth_tenant.ENTITY}: removed tenant(s) {gone or '(none)'} - {rows} tenant row(s), with {also}"
-
-
-def _sessions(slot: Slot, _env_scope: str, dry_run: bool) -> str:
+def _sessions(slot_cfg: dict, run_id: str, dry_run: bool) -> tuple[list[dict], list[str]]:
+    porth = Porth(slot_cfg["env_scope"], run_id)
     table = os.environ["PORTH_SESSIONS_TABLE"]
-    keys = [k["AttributeName"] for k in slot.porth.db.describe_table(TableName=table)["Table"]["KeySchema"]]
+    keys = [k["AttributeName"] for k in porth.db.describe_table(TableName=table)["Table"]["KeySchema"]]
     names = {f"#k{n}": k for n, k in enumerate(keys)}
     scan = {"TableName": table, "ProjectionExpression": ", ".join(names), "ExpressionAttributeNames": names}
     count, start = 0, None
     while True:
-        page = slot.porth.db.scan(**scan, **({"ExclusiveStartKey": start} if start else {}))
+        page = porth.db.scan(**scan, **({"ExclusiveStartKey": start} if start else {}))
         for row in page.get("Items", []):
             count += 1
             if not dry_run:
-                slot.porth.db.delete_item(TableName=table, Key=row)
+                porth.db.delete_item(TableName=table, Key=row)
         start = page.get("LastEvaluatedKey")
         if not start:
             break
-    return f"{SESSION}: {'would remove' if dry_run else 'removed'} {count} session(s), in every environment on this install"
+    return [], [f"{SESSION}: {'would remove' if dry_run else 'removed'} {count} session(s), in every environment on this install"]
 
 
-def _orgs(slot: Slot, env_scope: str, dry_run: bool) -> str:
-    gone = slot.fixture_orgs()
-    held = sorted({
-        meta["tenant_id"]["S"] for t, rows in slot.tenants.items() if t != PLATFORM
-        for meta in [slot.metadata(rows)] if meta and meta.get("org_id", {}).get("S") in gone
-    })
-    if held:
-        raise ContractError(
-            "refused", "dataset_conflict",
-            f"tenant(s) {held} still belong to the organisations a reset would remove; "
-            f"reset {porth_tenant.ENTITY} first (reset with no entity does)",
-        )
-    labels = [slot.org_label(o) for o in gone]
-    if dry_run:
-        return f"{porth_org.ENTITY}: would remove organisation(s) {labels or '(none)'}"
-    table = os.environ["PORTH_TENANTS_TABLE"]
-    for org_id in gone:
-        for row in slot.orgs.pop(org_id):
-            slot.porth.db.delete_item(TableName=table, Key={"PK": row["PK"], "SK": row["SK"]})
-        slot.porth.publisher.publish(entity_type="Organization", action="deleted", entity_id=org_id,
-                                     metadata={"organization_id": org_id})
-    slot.forget(porth_org.ENTITY)
-    return f"{porth_org.ENTITY}: removed organisation(s) {labels or '(none)'}"
+RESETS = (snapshot.ENTITY, SESSION)
 
 
-RESETS = {SESSION: _sessions, ROLE: _roles, CLAIM_MAPPING: _claim_mappings, porth_tenant.ENTITY: _tenants, porth_org.ENTITY: _orgs}
-
-
-def reset(entity: str | None, slot_cfg: dict, run_id: str, dry_run: bool, payload: object) -> tuple[list[dict], list[str]]:
+def reset(entity: str, slot_cfg: dict, run_id: str, dry_run: bool, payload: object) -> tuple[list[dict], list[str]]:
     confirm(slot_cfg, payload)
-    env_scope = slot_cfg["env_scope"]
-    porth = Porth(env_scope, run_id)
-    slot = Slot(porth, env_scope)
-    if PLATFORM not in slot.tenants:
-        raise ContractError(
-            "refused", "scope_violation",
-            f"{env_scope} has no platform tenant: it is not bootstrapped, so there is no baseline to reset to. "
-            "Bootstrap porth-platform first",
-        )
-
-    notes = []
-    if dry_run:
-        # A dry run of several entities reports each as if the ones before it had run.
-        for name in ORDER if entity is None else (entity,):
-            notes.append(RESETS[name](slot, env_scope, True))
-            if name == porth_tenant.ENTITY:
-                for t in slot.fixture_tenants():
-                    slot.tenants.pop(t)
-        stray = slot.clear_strays(True) if entity is None else None
-        return [], ["dry run: nothing removed", *notes, *([stray] if stray else [])]
-    for name in ORDER if entity is None else (entity,):
-        notes.append(RESETS[name](slot, env_scope, False))
-    # Only a full reset clears them: they are every entity's, and a scoped reset leaves the others be.
-    stray = slot.clear_strays(False) if entity is None else None
-    return [], [*notes, *([stray] if stray else []), "the platform baseline is untouched"]
+    if entity == SESSION:
+        return _sessions(slot_cfg, run_id, dry_run)
+    return _porth(slot_cfg, run_id, dry_run, payload)
