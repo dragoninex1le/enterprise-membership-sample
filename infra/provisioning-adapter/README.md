@@ -181,7 +181,8 @@ writes or deletes must name its slot even then (`slot_required`), and an unknown
 the slot must be in it — never whatever slot it was asked about. It no longer judges whether a slot is
 bootstrapped: "the platform tenant row exists" was a guess about what an install contains. A slot is
 bootstrapped for prawf when prawf holds a current baseline for its deployed version. `candidate_version`
-is the Porth SAR stack's `serverlessrepo:semanticVersion` tag.
+is the Porth stack's `ImageTag` parameter, which equals the release version (PORTH-657); a
+SAR-era stack without it falls back to its `serverlessrepo:semanticVersion` tag.
 
 ## Deploying
 

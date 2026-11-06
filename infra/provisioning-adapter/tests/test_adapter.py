@@ -101,14 +101,19 @@ class FakeDynamo:
 
 
 class FakeCFN:
-    def __init__(self, tags=None, fail=False):
+    def __init__(self, tags=None, fail=False, params=None):
         self.tags = tags if tags is not None else {"serverlessrepo:semanticVersion": "0.4.2"}
+        self.params = params or {}
         self.fail = fail
 
     def describe_stacks(self, StackName):
         if self.fail:
             raise RuntimeError("AccessDenied")
-        return {"Stacks": [{"StackName": StackName, "Tags": [{"Key": k, "Value": v} for k, v in self.tags.items()]}]}
+        return {"Stacks": [{
+            "StackName": StackName,
+            "Tags": [{"Key": k, "Value": v} for k, v in self.tags.items()],
+            "Parameters": [{"ParameterKey": k, "ParameterValue": v} for k, v in self.params.items()],
+        }]}
 
 
 @pytest.fixture
@@ -246,6 +251,14 @@ def test_every_ruled_out_verb_has_a_reason():
 def test_candidate_version_comes_from_the_sar_stack_tag(world):
     caps = assert_valid_capabilities(capabilities())
     assert caps["environment"]["candidate_version"] == "0.4.2"
+
+
+def test_candidate_version_prefers_the_image_tag_parameter(world):
+    # PORTH-657: an S3-release install never moves the SAR tag; ImageTag is the version.
+    world["cloudformation"] = FakeCFN(tags={"serverlessrepo:semanticVersion": "0.4.2"},
+                                      params={"ImageTag": "0.4.3"})
+    caps = assert_valid_capabilities(capabilities())
+    assert caps["environment"]["candidate_version"] == "0.4.3"
 
 
 def test_a_missing_version_tag_is_omitted_and_explained(world):

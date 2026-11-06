@@ -1,44 +1,51 @@
-name: Porth SAR-share security gate (report-only)
+name: Porth release security gate (report-only)
 
-# PORTH-526 / ADR-Z10 — the gate on the SAR *share* (not the publish).
+# PORTH-526 / ADR-Z10 — the security gate on promoting a Porth version.
 #
-# A candidate Porth version sits private in SAR until a black-box security run against the EMS
-# reference install is green on CRITICAL+HIGH; only then is it shared/promoted to consumer accounts.
+# PORTH-657: Porth no longer ships through SAR, so there is no SAR share for this gate to
+# perform. A version is promoted when the Components "Porth release" workflow writes its
+# manifest to s3://porth-releases-084847995635/porth/<version>/. The gate still runs the
+# black-box suites against the EMS reference install and reports a verdict; moving the
+# BLOCKING decision in front of that manifest write (so a red verdict stops promotion) is
+# follow-up work, not something this workflow can do from the EMS account.
+#
+# Originally: a candidate version sat private in SAR until this run was green on
+# CRITICAL+HIGH; only then was it shared to consumer accounts.
 # This workflow runs the NON-destructive gate suites (Suite 1 security posture + Suite 2 install
 # conformance) from the private `porth-security-testbed` package (Components repo), evaluates
-# report/summary.json with `porth-sectest-gate`, and — in blocking mode — performs the share.
+# report/summary.json with `porth-sectest-gate`.
 #
-# Ships REPORT-ONLY (ADR-Z10): the gate ALWAYS exits 0 and the `serverlessrepo put-application-policy`
-# share step is guarded off. The CRITICAL+HIGH blocking flip happens once the BFF posture (PORTH-484)
-# is live. The gate logic (skip != pass, min executed-coverage) lives in the Components package
+# Ships REPORT-ONLY (ADR-Z10): the gate ALWAYS exits 0. The CRITICAL+HIGH blocking flip happens
+# once the BFF posture (PORTH-484) is live — and, since PORTH-657, once the gate sits before the
+# release manifest is written. The gate logic (skip != pass, min executed-coverage) lives in the Components package
 # (testbed.gate, PORTH-519/527) so every consumer reuses it; this workflow only orchestrates.
 #
 # Destructive suites (3-7) and the pen test run separately against a network-contained ephemeral
 # slot (PORTH-456) under a Head-of-Security-signed RoE — NEVER from this reference-install gate.
 #
-# Prereq: run `porth-install.yml` for the candidate `sar_version` first (installs it into the EMS
-# reference install). This gate then validates that install and gates the share.
+# Prereq: run `porth-install.yml` for the candidate `porth_version` first (installs it into the
+# EMS reference install). This gate then validates that install.
 
 on:
   workflow_dispatch:
     inputs:
-      sar_version:
-        description: 'Candidate Porth SAR version being gated (for traceability)'
+      porth_version:
+        description: 'Candidate Porth version being gated (for traceability)'
         required: true
-        default: '0.0.6'
+        default: '0.4.2'
       components_ref:
         description: 'Components repo ref to install the testbed from'
         required: false
         default: 'main'
       gate_mode:
-        description: 'report-only (default; never blocks/shares) or blocking'
+        description: 'report-only (default; never blocks) or blocking'
         required: false
         default: 'report-only'
         type: choice
         options: [report-only, blocking]
   workflow_call:
     inputs:
-      sar_version:
+      porth_version:
         required: true
         type: string
       components_ref:
@@ -51,11 +58,10 @@ on:
         type: string
 
 permissions:
-  id-token: write      # only used by the (guarded) share step's AWS OIDC auth
   contents: read
 
 concurrency:
-  group: porth-sar-share-gate-${{ inputs.sar_version }}
+  group: porth-release-gate-${{ inputs.porth_version }}
   cancel-in-progress: false
 
 env:
@@ -66,7 +72,7 @@ env:
 
 jobs:
   security-gate:
-    name: Security gate ${{ inputs.sar_version }} (${{ inputs.gate_mode }})
+    name: Security gate ${{ inputs.porth_version }} (${{ inputs.gate_mode }})
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 20
@@ -150,7 +156,7 @@ jobs:
             --html=report/security.html --self-contained-html \
             --sectest-json report/summary.json || true
 
-      - name: Evaluate SAR-share gate
+      - name: Evaluate release gate
         id: gate
         run: |
           set -euo pipefail
@@ -166,46 +172,25 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: porth-sar-gate-${{ inputs.sar_version }}
+          name: porth-release-gate-${{ inputs.porth_version }}
           path: |
             components/security-testbed/report/security.html
             components/security-testbed/report/summary.json
           if-no-files-found: warn
 
-      # ── Share step — GUARDED. Inert in report-only; only a green blocking run reaches it. ──
-      - name: Configure AWS credentials (OIDC) for the share
-        if: ${{ inputs.gate_mode == 'blocking' && steps.gate.outputs.verdict == 'green' }}
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Share the SAR version (serverlessrepo put-application-policy)
-        if: ${{ inputs.gate_mode == 'blocking' && steps.gate.outputs.verdict == 'green' }}
-        env:
-          SAR_APP_ID: ${{ vars.PORTH_SAR_APP_ID }}
-          ORG_ID: ${{ vars.PORTH_SHARE_ORG_ID }}
-        run: |
-          set -euo pipefail
-          echo "Gate GREEN in blocking mode — sharing ${SAR_APP_ID} @ ${{ inputs.sar_version }}"
-          aws serverlessrepo put-application-policy \
-            --application-id "$SAR_APP_ID" \
-            --statements "Principals=*,PrincipalOrgIDs=${ORG_ID},Actions=Deploy DeployApplication UnshareApplication"
-          echo "✅ Shared."
-
       - name: Summary
         if: always()
         run: |
           {
-            echo "## Porth SAR-share security gate"
+            echo "## Porth release security gate"
             echo ""
-            echo "- **Candidate:** ${{ inputs.sar_version }}"
+            echo "- **Candidate:** ${{ inputs.porth_version }}"
             echo "- **Mode:** ${{ inputs.gate_mode || 'report-only' }}"
             echo "- **Verdict:** ${{ steps.gate.outputs.verdict }}"
             echo "- **Gate set:** \`${GATE_MARKERS}\` (non-destructive only)"
             echo ""
             if [ "${{ inputs.gate_mode || 'report-only' }}" = "report-only" ]; then
-              echo "> Report-only — the share step is guarded off and the job never blocks."
+              echo "> Report-only — the job never blocks."
               echo "> The blocking flip happens once the BFF posture (PORTH-484) is live."
             fi
             echo ""

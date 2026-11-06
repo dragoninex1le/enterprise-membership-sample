@@ -24,17 +24,29 @@ from envelope import adapter_version, spoken
 
 
 def _candidate_version() -> tuple[str | None, str | None]:
-    """The Porth release this slot is running, from the SAR stack's own tag."""
+    """The Porth release this slot is running, read off the Porth stack itself.
+
+    PORTH-657: Porth installs from versioned S3 releases, not SAR, so the stack's
+    ``serverlessrepo:semanticVersion`` tag stops moving at the last SAR install. The
+    ``ImageTag`` parameter is the release version by Porth's own invariant (a release
+    whose ImageTag differs from its version is refused at publish) and is set however
+    the stack was installed, so it is read first; the SAR tag is the fallback for an
+    install that predates the parameter.
+    """
     try:
         stack = aws.client("cloudformation").describe_stacks(
             StackName=os.environ["PORTH_STACK_NAME"],
         )["Stacks"][0]
     except Exception as e:  # noqa: BLE001 - optional field; say why it is missing
         return None, f"candidate_version unavailable: {type(e).__name__} reading the Porth stack"
+    params = {p["ParameterKey"]: p.get("ParameterValue") for p in stack.get("Parameters", [])}
     tags = {t["Key"]: t["Value"] for t in stack.get("Tags", [])}
-    version = tags.get("serverlessrepo:semanticVersion")
+    version = params.get("ImageTag") or tags.get("serverlessrepo:semanticVersion")
     if not version:
-        return None, "candidate_version unavailable: the Porth stack has no serverlessrepo:semanticVersion tag"
+        return None, (
+            "candidate_version unavailable: the Porth stack has neither an ImageTag parameter "
+            "nor a serverlessrepo:semanticVersion tag"
+        )
     return version, None
 
 

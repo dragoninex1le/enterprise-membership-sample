@@ -59,7 +59,7 @@ long-lived AWS credentials in this repo.
 | Workflow | Environment | Purpose |
 |---|---|---|
 | **Deploy Admin UI** | `sample-app-deploy` | Builds the SPA, deploys the sample-app stack, syncs S3, invalidates CloudFront |
-| **Porth components — install + upgrade** | `porth-install` | Installs/upgrades the Porth SAR app and bootstraps the platform tenant |
+| **Porth components — install + upgrade** | `porth-install` | Installs/upgrades Porth from its S3 release (`porth_version`; PORTH-657) and bootstraps the platform tenant |
 | **Deploy Porth QA Tools** | `porth-install` | Deploys the cleanup + seed Lambdas (`porth-qa-tools`) |
 | **Reset Dev Environment** | `porth-install` | Clears all tenant data, re-bootstraps the platform tenant |
 | **Porth — seed testbed tenants** | `porth-install` | Seeds the synthetic tenants used by Tier 2 e2e and the PORTH-494 lab |
