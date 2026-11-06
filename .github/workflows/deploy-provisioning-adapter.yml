@@ -87,7 +87,7 @@ jobs:
       # against an in-memory AWS, which is how the tests know the rows are Porth's own.
       - name: Install test dependencies
         run: |
-          python -m pip install --quiet 'prawf-schemas>=1.0.0,<2' pytest boto3 pyyaml \
+          python -m pip install --quiet 'prawf-schemas>=1.1.0,<2' pytest boto3 pyyaml \
             -r infra/provisioning-adapter/src/adapter/requirements.txt 'moto[dynamodb,events,sqs,ssm]'
 
 
@@ -308,7 +308,7 @@ jobs:
           aws codeartifact login --tool pip --region "$AWS_REGION" \
             --domain "$PRAWF_DOMAIN" --domain-owner "$PRAWF_DOMAIN_OWNER" \
             --repository estyn-prawf-py
-          python -m pip install --quiet 'prawf-schemas>=1.0.0,<2'
+          python -m pip install --quiet 'prawf-schemas>=1.1.0,<2'
 
       # The proof, from inside the account: capabilities in a form the real schemas accept, what is
       # not implemented answered honestly - and three DRY RUNS, each writing nothing:
@@ -367,9 +367,11 @@ jobs:
           assert declared["porth"] == [], declared
           assert body["environment"].get("slot"), "environment.slot must be populated"
 
-          # Contract 1.1: no published schema yet, so the shape is checked here.
-          caps11 = json.load(open("caps11.json"))
+          # Contract 1.1, against prawf-schemas 1.1 like the rest.
+          caps11 = load("caps11.json")
           assert (caps11["outcome"], caps11["contract_version"]) == ("ok", "1.1"), caps11
+          result = validate_capabilities(caps11["results"][0])
+          assert result.valid, [str(e) for e in result.errors]
           assert caps11["environment"]["slot"] == body["environment"]["slot"], caps11["environment"]
           kinds = {e["id"]: e.get("baseline_kind") for e in caps11["results"][0]["entities"] if e.get("baseline_kind")}
           assert kinds == {"porth": "snapshot"}, kinds
@@ -384,7 +386,7 @@ jobs:
           assert dryrun["outcome"] in ("ok", "refused"), dryrun
           dry_note = dryrun["outcome"] + (f" / {dryrun['reason_code']}" if dryrun.get("reason_code") else "")
 
-          bootstrap = json.load(open("bootstrap.json"))
+          bootstrap = load("bootstrap.json")
           assert bootstrap["outcome"] == "ok", (bootstrap.get("reason_code"), bootstrap["diagnostics"]["messages"])
           counts = bootstrap["diagnostics"]["messages"][0]
 

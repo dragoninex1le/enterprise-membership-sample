@@ -20,8 +20,8 @@ What is pinned, and why:
   one slot's keys, Scan on Porth's tables alone (bootstrap and reset of `porth`, PRF-20), and the
   snapshot bucket under the slot's own prefix; `ENV#porth-dau#*` must not match `ENV#porth-dau-probe#...`.
 * **Contract 1.1** only when the caller asks for it: `environment` on every answer, a slot on every
-  write, `baseline_kind` and `prune` in capabilities. The published schemas are 1.0, so 1.1 answers
-  are checked by shape here until prawf-schemas 1.1 publishes.
+  write, `baseline_kind` and `prune` in capabilities. Every answer, in either version, is validated
+  against prawf-schemas 1.1, which holds both.
 """
 import copy
 import fnmatch
@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from prawf_schemas import validate_capabilities, validate_contract_response
+from prawf_schemas import validate_capabilities, validate_contract_request, validate_contract_response
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "adapter"))
 
@@ -142,7 +142,11 @@ def world(monkeypatch):
 
 
 def call(**request):
-    return handler.handler(request, None)
+    """Every answer, whatever was asked and in whichever version, must be one the schemas accept."""
+    response = handler.handler(request, None)
+    result = validate_contract_response(response)
+    assert result.valid, (request, [str(e) for e in result.errors])
+    return response
 
 
 def capabilities(**extra):
@@ -197,6 +201,8 @@ def test_in_1_1_porth_is_the_one_snapshot_entity(world):
     assert response["contract_version"] == "1.1" and response["outcome"] == "ok", response
     assert response["environment"] == {"id": "ems-porth-dau", "slot": "porth-dau"}
     caps = response["results"][0]
+    result = validate_capabilities(caps)
+    assert result.valid, [str(e) for e in result.errors]
     assert caps["contract_versions"] == ["1.0", "1.1"]
     assert caps["verbs"] == ["capabilities", "bootstrap", "seed", "reset", "teardown", "prune"]
     porth = next(e for e in caps["entities"] if e["id"] == "porth")
@@ -299,6 +305,23 @@ def test_in_1_1_every_answer_says_where_it_acted(world):
     for verb in ("capabilities", "status", "seed"):
         response = call(contract_version="1.1", verb=verb, slot="porth-dau", run={"run_id": "run-x"}, entity="porth-idp")
         assert response["environment"] == {"id": "ems-porth-dau", "slot": "porth-dau"}, verb
+
+
+@pytest.mark.parametrize("request_", [
+    {"contract_version": "1.1", "slot": "porth-dau", "verb": "bootstrap", "entity": "porth",
+     "run": {"run_id": "r"}, "payload": {"installed_version": "0.3.1"}},
+    {"contract_version": "1.1", "slot": "porth-dau", "verb": "reset", "entity": "porth", "run": {"run_id": "r"},
+     "payload": {"confirm_environment_class": "disposable",
+                 "baseline": {"installed_version": "0.3.1", "content_digest": "sha256:" + "a" * 64}}},
+    {"contract_version": "1.1", "slot": "porth-dau", "verb": "prune", "entity": "porth", "run": {"run_id": "r"},
+     "payload": {"baselines": [{"installed_version": "0.3.1"}]}},
+    {"contract_version": "1.1", "slot": "porth-dau", "verb": "reset", "entity": "porth-session", "run": {"run_id": "r"},
+     "payload": {"confirm_environment_class": "disposable"}},
+])
+def test_the_1_1_requests_this_adapter_documents_are_ones_the_schemas_accept(request_):
+    """What the README and the deploy proof send - prawf will build exactly these."""
+    result = validate_contract_request(request_)
+    assert result.valid, [str(e) for e in result.errors]
 
 
 @pytest.mark.parametrize("slot", ["*", "porth-*", "porth-dau#*", "", 3])

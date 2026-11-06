@@ -21,8 +21,8 @@ What each case asserts:
     verbs, the catalogue entities, and exactly the implemented cells (C1). In 1.0: `seed` and
     `teardown` on porth-org, porth-tenant, porth-claim-mapping and porth-role, and `reset` on
     porth-session. In 1.1 also `bootstrap`, `reset` and `prune` on porth, declared `snapshot`
-  * if `prawf_schemas` is importable, every 1.0 response against the canonical response schema (the
-    published schemas are 1.0; 1.1 answers are checked by shape until 1.1 publishes)
+  * if `prawf_schemas` (1.1 or later) is importable, every response against the canonical response
+    schema, which holds 1.0 and 1.1 alike
 
 Exit status is 0 only when every case passes. --report writes each request and response as JSON.
 """
@@ -328,7 +328,7 @@ def judge(c: Case, resp: dict, validate) -> list[str]:
         want = c.outcome + (f"/{c.reason}" if c.reason else "")
         problems.append(f"expected {want}, got {got[0]}" + (f"/{got[1]}" if got[1] else ""))
     problems += invariants(resp)
-    if validate and str(resp.get("contract_version", "")).count(".") == 2:
+    if validate:
         problems += validate(resp)
     if not problems:
         for check in c.checks:
