@@ -256,7 +256,7 @@ Parameters:
   # One slot at a time. Off (the default), this slot keeps the same-origin
   # shape: CloudFront serves the UI and forwards /auth, /porth and /sample.
   # On, CloudFront serves the UI only, and the API is its own host one `api`
-  # label deeper: acme.porth-tenant.… is the page, acme.api.porth-tenant.… the
+  # label deeper: acme.porth-dau.… is the page, acme.api.porth-dau.… the
   # API, with this app at the root and Porth under the `porth` mapping key.
   TenantApiHosts:
     Type: String

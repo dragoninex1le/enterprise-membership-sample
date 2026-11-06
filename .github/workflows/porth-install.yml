@@ -213,7 +213,7 @@ jobs:
           # rather than required, so the environments EMS actually deploys are
           # written down in the repo instead of in repository settings; the
           # variable still overrides.
-          ENVIRONMENTS_VAR: ${{ vars.PORTH_AUTH_ENVIRONMENTS || 'porth-sample,porth-dau,porth-tenant' }}
+          ENVIRONMENTS_VAR: ${{ vars.PORTH_AUTH_ENVIRONMENTS || 'porth-sample,porth-dau' }}
         run: |
           set -euo pipefail
           # Custom domain: dispatch input wins, then the canonical var, then the legacy name.

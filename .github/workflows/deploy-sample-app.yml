@@ -19,14 +19,13 @@ on:
   workflow_dispatch:
     inputs:
       # PORTH-656. Empty keeps the ref rule (main → porth-sample, any other
-      # branch → porth-dau). porth-tenant is the tenant-named-host slot
-      # (INSTALL.md §4a) and is only ever deployed by asking for it.
+      # branch → porth-dau); naming one deploys that environment from any ref.
       slot:
         description: Environment slot to deploy (empty = from the ref)
         required: false
         default: ''
         type: choice
-        options: ['', porth-sample, porth-dau, porth-tenant]
+        options: ['', porth-sample, porth-dau]
 
 # Serialise deploy runs per branch so concurrent runs don't race on the
 # shared sample-app stack.
@@ -69,9 +68,12 @@ env:
   #
   # `ENVIRONMENT: dev` used to sit here and was read by nothing.
   ENVIRONMENT_SLOT: ${{ inputs.slot || (github.ref == 'refs/heads/main' && 'porth-sample' || 'porth-dau') }}
-  # PORTH-656 — slots on the tenant-named-host shape (INSTALL.md §4a): the UI
-  # on CloudFront only, the API on {tenant}.api.{slot}.{zone}. Space-separated.
-  TENANT_API_HOST_SLOTS: porth-tenant
+  # PORTH-656 — environments moving to the tenant-named-host shape (INSTALL.md
+  # §4a): the UI on CloudFront only, the API on {tenant}.api.{slot}.{zone}.
+  # Space-separated. A listed environment switches over on the first deploy
+  # that finds its tenant-host certificate (porth-install-once); until then it
+  # stays on the shared-host shape and says so.
+  TENANT_API_HOST_SLOTS: porth-sample porth-dau
   NODE_VERSION: '20'
 
 jobs:
@@ -210,30 +212,32 @@ jobs:
         env:
           CERT_PORTH_SAMPLE: ${{ vars.ACM_CERTIFICATE_ARN }}
           CERT_PORTH_DAU: ${{ vars.ACM_CERTIFICATE_ARN_PORTH_DAU }}
-          CERT_PORTH_TENANT: ${{ vars.ACM_CERTIFICATE_ARN_PORTH_TENANT }}
         run: |
           set -euo pipefail
           SLOT="${{ env.ENVIRONMENT_SLOT }}"
           case "$SLOT" in
             porth-sample) ARN="${CERT_PORTH_SAMPLE:-}" ;;
             porth-dau)    ARN="${CERT_PORTH_DAU:-}" ;;
-            porth-tenant) ARN="${CERT_PORTH_TENANT:-}" ;;
             *)            ARN="" ;;
           esac
-          # PORTH-656: a tenant-API-host slot's certificate also covers
-          # *.api.{slot}.{zone}. porth-install-once issues it and publishes it
-          # at /porth/{branch}/infra/tenant-host-certificate-arn/{slot}; the
-          # variable above wins when set.
-          if [ -z "$ARN" ] && [ "${TENANT_API_HOSTS}" = "true" ]; then
+          # PORTH-656: on the tenant-named-host shape the certificate must also
+          # cover *.api.{slot}.{zone}, which the variables above do not. That one
+          # is porth-install-once's, published at
+          # /porth/{branch}/infra/tenant-host-certificate-arn/{slot}, and it wins.
+          # Not there yet → this deploy stays on the shared-host shape with the
+          # certificate above, rather than failing the environment's deploys.
+          if [ "${TENANT_API_HOSTS}" = "true" ]; then
             BRANCH=$(aws cloudformation describe-stacks --stack-name "$PORTH_STACK_NAME" \
               --query "Stacks[0].Parameters[?ParameterKey=='Environment'].ParameterValue" --output text)
             PARAM="/porth/${BRANCH}/infra/tenant-host-certificate-arn/${SLOT}"
-            ARN=$(aws ssm get-parameter --name "$PARAM" --query Parameter.Value --output text 2>/dev/null || true)
-            if [ -z "$ARN" ] || [ "$ARN" = "None" ]; then
-              echo "::error::No certificate for ${SLOT}: set vars.ACM_CERTIFICATE_ARN_PORTH_TENANT, or apply porth-install-once with tenant_host_slots including ${SLOT} (it writes ${PARAM})."
-              exit 1
+            TENANT_HOST_ARN=$(aws ssm get-parameter --name "$PARAM" --query Parameter.Value --output text 2>/dev/null || true)
+            if [ -n "$TENANT_HOST_ARN" ] && [ "$TENANT_HOST_ARN" != "None" ]; then
+              ARN="$TENANT_HOST_ARN"
+              echo "certificate read from ${PARAM} (tenant API hosts)"
+            else
+              echo "::warning::${SLOT} is listed for tenant API hosts but ${PARAM} does not exist. Staying on the shared-host shape. Apply porth-install-once with tenant_host_slots including ${SLOT}."
+              echo "TENANT_API_HOSTS=false" >> "$GITHUB_ENV"
             fi
-            echo "certificate read from ${PARAM}"
           fi
           echo "ACM_CERTIFICATE_ARN_RESOLVED=$ARN" >> "$GITHUB_ENV"
           echo "certificate for ${{ env.ENVIRONMENT_SLOT }}: ${ARN:-'(none — the deploy will say so)'}"
