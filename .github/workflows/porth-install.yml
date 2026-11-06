@@ -75,7 +75,9 @@ on:
         #
         # PORTH-657: 0.4.2 is the first version published to the S3 release bucket
         # (backfilled from SAR so the switch-over can be tested at the same code).
-        default: '0.4.2'
+        # PORTH-656: 0.4.3 serves tenant API hosts ({tenant}.api.{slot}.{zone}) —
+        # host-bound credentials, the `porth` mapping key and per-host CORS.
+        default: '0.4.3'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
@@ -141,7 +143,7 @@ env:
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.2' }}
+    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.3' }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
@@ -169,7 +171,7 @@ jobs:
       # also works when triggered by the push shim (inputs are empty on push).
       - name: Resolve effective inputs
         run: |
-          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.2' }}" >> "$GITHUB_ENV"
+          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.3' }}" >> "$GITHUB_ENV"
           echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
           # The configured mode, overridable for one run. Empty IS the mode
@@ -211,7 +213,7 @@ jobs:
           # rather than required, so the environments EMS actually deploys are
           # written down in the repo instead of in repository settings; the
           # variable still overrides.
-          ENVIRONMENTS_VAR: ${{ vars.PORTH_AUTH_ENVIRONMENTS || 'porth-sample,porth-dau' }}
+          ENVIRONMENTS_VAR: ${{ vars.PORTH_AUTH_ENVIRONMENTS || 'porth-sample,porth-dau,porth-tenant' }}
         run: |
           set -euo pipefail
           # Custom domain: dispatch input wins, then the canonical var, then the legacy name.

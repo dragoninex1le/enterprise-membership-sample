@@ -1,3 +1,5 @@
+import { authBaseUrl as resolveAuthBaseUrl } from './apiHost'
+
 // Dead-session recovery (PORTH-531). Ported from the Style Classifier admin app,
 // the proven consumer of this contract: a 401 from the API means the http-only
 // session cookie no longer maps to a live session, and the only recovery is a
@@ -9,7 +11,7 @@ let redirecting = false
 export function redirectToLogin(): void {
   if (redirecting) return
   redirecting = true
-  const authBaseUrl = (import.meta.env.VITE_AUTH_BASE_URL ?? '').replace(/\/$/, '')
+  const authBaseUrl = resolveAuthBaseUrl()
   const params = new URLSearchParams()
   params.set('return_to', window.location.href)
   window.location.assign(`${authBaseUrl}/auth/login?${params.toString()}`)

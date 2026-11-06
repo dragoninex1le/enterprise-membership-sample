@@ -8,6 +8,8 @@ interface ImportMetaEnv {
   readonly VITE_AUTH_BASE_URL?: string
   readonly VITE_ROLES_NAMESPACE?: string
   readonly VITE_E2E_AUTH?: string
+  /** PORTH-656: 'true' on a tenant-API-host slot — see src/lib/apiHost.ts. */
+  readonly VITE_TENANT_API_HOSTS?: string
 }
 
 interface ImportMeta {

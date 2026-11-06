@@ -1,12 +1,14 @@
 import axios, { type InternalAxiosRequestConfig } from 'axios'
 import { applyCookieAuth } from './client'
 import { onAuthError } from '../lib/sessionExpiry'
+import { sampleApiBaseUrl } from '../lib/apiHost'
 
 // Sample-app API client. Same cookie/BFF contract as the Porth client
 // (PORTH-531): the browser holds no token, the http-only session cookie
 // authenticates, and mutating requests carry the session CSRF secret.
 export const sampleApiClient = axios.create({
-  baseURL: import.meta.env.VITE_SAMPLE_APP_API_URL ?? import.meta.env.VITE_API_BASE_URL,
+  // PORTH-656: the API host's root on a tenant-API-host slot (lib/apiHost.ts).
+  baseURL: sampleApiBaseUrl(),
   withCredentials: true,
   headers: { 'Content-Type': 'application/json' },
 })

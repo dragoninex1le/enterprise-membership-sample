@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { PorthAuthProvider } from '@estyn/porth-admin/auth'
 import { useTenantConfig } from './hooks/useTenantConfig'
+import { authBaseUrl as resolveAuthBaseUrl } from './lib/apiHost'
 import App from './App'
 import './index.css'
 
@@ -19,7 +20,11 @@ const E2E_AUTH = import.meta.env.VITE_E2E_AUTH === 'true'
 // host directly is refused by the browser before the request is even sent. Serving
 // the routes same-origin removes the cross-origin hop and makes the session cookie
 // host-only. Override with VITE_AUTH_BASE_URL only for local dev against a proxy.
-const authBaseUrl = import.meta.env.VITE_AUTH_BASE_URL ?? ''
+//
+// PORTH-656: on a tenant-API-host slot the routes are on the API host instead
+// ({tenant}.api.{slot}.{zone}/porth/auth/*), which answers credentialed CORS for
+// this page's origin only. lib/apiHost.ts decides.
+const authBaseUrl = resolveAuthBaseUrl()
 
 function TenantBootstrap() {
   const { config, loading, error } = useTenantConfig()

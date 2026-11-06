@@ -1,5 +1,6 @@
 import axios, { type InternalAxiosRequestConfig } from 'axios'
 import { onAuthError } from '../lib/sessionExpiry'
+import { authBaseUrl, porthApiBaseUrl } from '../lib/apiHost'
 
 // Porth API client — cookie/BFF mode (ADR-Z9, PORTH-531). The browser holds no
 // token, only the http-only session cookie the Porth BFF set; `withCredentials`
@@ -11,7 +12,8 @@ import { onAuthError } from '../lib/sessionExpiry'
 // admin app, the proven consumer of this contract. Deviating here is how you
 // get a UI that reads but cannot write.
 export const apiClient = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL,
+  // PORTH-656: the API host's /porth on a tenant-API-host slot (lib/apiHost.ts).
+  baseURL: porthApiBaseUrl(),
   withCredentials: true,
   headers: { 'Content-Type': 'application/json' },
 })
@@ -33,7 +35,7 @@ let _csrf: string | null = null
 async function getCsrf(): Promise<string | null> {
   if (_csrf) return _csrf
   try {
-    const r = await fetch('/auth/me', {
+    const r = await fetch(`${authBaseUrl()}/auth/me`, {
       credentials: 'include',
       headers: { Accept: 'application/json' },
     })

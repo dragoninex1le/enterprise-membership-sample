@@ -17,6 +17,16 @@ on:
       - 'infra/qa-tools/**'
       - '.github/workflows/deploy-qa-tools.yml'
   workflow_dispatch:
+    inputs:
+      # PORTH-656. Empty keeps the ref rule (main → porth-sample, any other
+      # branch → porth-dau). porth-tenant is the tenant-named-host slot
+      # (INSTALL.md §4a) and is only ever deployed by asking for it.
+      slot:
+        description: Environment slot to deploy (empty = from the ref)
+        required: false
+        default: ''
+        type: choice
+        options: ['', porth-sample, porth-dau, porth-tenant]
 
 # Serialise deploy runs per branch so concurrent runs don't race on the
 # shared sample-app stack.
@@ -43,7 +53,7 @@ on:
 # turn rather than be discarded, or main silently stops matching what is
 # deployed.
 concurrency:
-  group: deploy-sample-app-${{ github.ref == 'refs/heads/main' && 'porth-sample' || 'porth-dau' }}
+  group: deploy-sample-app-${{ inputs.slot || (github.ref == 'refs/heads/main' && 'porth-sample' || 'porth-dau') }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
@@ -58,7 +68,10 @@ env:
   # from ref to environment is written down.
   #
   # `ENVIRONMENT: dev` used to sit here and was read by nothing.
-  ENVIRONMENT_SLOT: ${{ github.ref == 'refs/heads/main' && 'porth-sample' || 'porth-dau' }}
+  ENVIRONMENT_SLOT: ${{ inputs.slot || (github.ref == 'refs/heads/main' && 'porth-sample' || 'porth-dau') }}
+  # PORTH-656 — slots on the tenant-named-host shape (INSTALL.md §4a): the UI
+  # on CloudFront only, the API on {tenant}.api.{slot}.{zone}. Space-separated.
+  TENANT_API_HOST_SLOTS: porth-tenant
   NODE_VERSION: '20'
 
 jobs:
@@ -107,6 +120,14 @@ jobs:
             echo "CLOUDFRONT_APEX=${SLOT}.${ROOT}"
             echo "DNS_ROOT=${ROOT}."
           } >> "$GITHUB_ENV"
+
+          # PORTH-656: is this slot on the tenant-named-host shape?
+          TENANT_API_HOSTS=false
+          for s in ${{ env.TENANT_API_HOST_SLOTS }}; do
+            [ "$s" = "$SLOT" ] && TENANT_API_HOSTS=true
+          done
+          echo "TENANT_API_HOSTS=${TENANT_API_HOSTS}" >> "$GITHUB_ENV"
+          echo "tenant api   : ${TENANT_API_HOSTS} (*.api.${SLOT}.${ROOT}, api.${SLOT}.${ROOT})"
 
           echo "environment  : ${SLOT}"
           echo "stack        : ${STACK}"
@@ -189,13 +210,31 @@ jobs:
         env:
           CERT_PORTH_SAMPLE: ${{ vars.ACM_CERTIFICATE_ARN }}
           CERT_PORTH_DAU: ${{ vars.ACM_CERTIFICATE_ARN_PORTH_DAU }}
+          CERT_PORTH_TENANT: ${{ vars.ACM_CERTIFICATE_ARN_PORTH_TENANT }}
         run: |
           set -euo pipefail
-          case "${{ env.ENVIRONMENT_SLOT }}" in
+          SLOT="${{ env.ENVIRONMENT_SLOT }}"
+          case "$SLOT" in
             porth-sample) ARN="${CERT_PORTH_SAMPLE:-}" ;;
             porth-dau)    ARN="${CERT_PORTH_DAU:-}" ;;
+            porth-tenant) ARN="${CERT_PORTH_TENANT:-}" ;;
             *)            ARN="" ;;
           esac
+          # PORTH-656: a tenant-API-host slot's certificate also covers
+          # *.api.{slot}.{zone}. porth-install-once issues it and publishes it
+          # at /porth/{branch}/infra/tenant-host-certificate-arn/{slot}; the
+          # variable above wins when set.
+          if [ -z "$ARN" ] && [ "${TENANT_API_HOSTS}" = "true" ]; then
+            BRANCH=$(aws cloudformation describe-stacks --stack-name "$PORTH_STACK_NAME" \
+              --query "Stacks[0].Parameters[?ParameterKey=='Environment'].ParameterValue" --output text)
+            PARAM="/porth/${BRANCH}/infra/tenant-host-certificate-arn/${SLOT}"
+            ARN=$(aws ssm get-parameter --name "$PARAM" --query Parameter.Value --output text 2>/dev/null || true)
+            if [ -z "$ARN" ] || [ "$ARN" = "None" ]; then
+              echo "::error::No certificate for ${SLOT}: set vars.ACM_CERTIFICATE_ARN_PORTH_TENANT, or apply porth-install-once with tenant_host_slots including ${SLOT} (it writes ${PARAM})."
+              exit 1
+            fi
+            echo "certificate read from ${PARAM}"
+          fi
           echo "ACM_CERTIFICATE_ARN_RESOLVED=$ARN" >> "$GITHUB_ENV"
           echo "certificate for ${{ env.ENVIRONMENT_SLOT }}: ${ARN:-'(none — the deploy will say so)'}"
 
@@ -254,6 +293,18 @@ jobs:
             exit 1
           fi
           echo "PORTH_AUTHORIZER_ARN=$PORTH_AUTHORIZER_ARN" >> $GITHUB_ENV
+
+          # PORTH-656: a tenant-API-host slot maps Porth's API under `porth` on
+          # its own API domains, so it needs the API's id.
+          if [ "${TENANT_API_HOSTS}" = "true" ]; then
+            PORTH_HTTP_API_ID=$(get_output HttpApiId)
+            if [ -z "$PORTH_HTTP_API_ID" ] || [ "$PORTH_HTTP_API_ID" == "None" ]; then
+              echo "❌ Could not resolve HttpApiId from the $STACK stack outputs."
+              exit 1
+            fi
+            echo "PORTH_HTTP_API_ID=$PORTH_HTTP_API_ID" >> $GITHUB_ENV
+            echo "✅ Resolved PORTH_HTTP_API_ID=$PORTH_HTTP_API_ID (tenant API hosts)"
+          fi
           echo "✅ Resolved PORTH_AUTHORIZER_ARN=$PORTH_AUTHORIZER_ARN"
 
           # PORTH-586: the authorizer's EXECUTION role — a different object from
@@ -514,6 +565,10 @@ jobs:
           # arrangement where the zone-scoped session cookie is actually sent.
           VITE_SAMPLE_APP_API_URL: ''
           VITE_PLATFORM_APEX: ${{ env.ENVIRONMENT_SLOT }}
+          # PORTH-656: on a tenant-API-host slot the SPA derives its API host
+          # from its own (acme.{slot}.… → acme.api.{slot}.…) and ignores the
+          # relative bases above. See src/lib/apiHost.ts.
+          VITE_TENANT_API_HOSTS: ${{ env.TENANT_API_HOSTS }}
 
       # ffug is a test fixture for ADR-Z11 (PORTH-555) — its own suite gates the
       # deploy that ships it. Scoped to ffug deliberately: this workflow had no
@@ -681,6 +736,12 @@ jobs:
           fi
           if [ -n "${FFUG_REQUEST_KEY_ARN:-}" ]; then
             OPTIONAL+=("FfugRequestSigningKeyArn=${FFUG_REQUEST_KEY_ARN}")
+          fi
+          # PORTH-656. Always passed, so a slot taken off the list goes back to
+          # 'false' rather than keeping the last deploy's value.
+          OPTIONAL+=("TenantApiHosts=${TENANT_API_HOSTS}")
+          if [ -n "${PORTH_HTTP_API_ID:-}" ]; then
+            OPTIONAL+=("PorthHttpApiId=${PORTH_HTTP_API_ID}")
           fi
 
           # EnvironmentSlot and all three domain names come from one place —
@@ -863,6 +924,10 @@ jobs:
               }]
             }"
           echo "✅ Route 53 aliases upserted: ${{ env.CLOUDFRONT_APEX }}, ${{ env.CLOUDFRONT_ALIAS }} → $CF_DOMAIN"
+
+      - name: Upsert Route 53 aliases for the tenant API hosts (PORTH-656)
+        if: env.TENANT_API_HOSTS == 'true'
+        run: scripts/upsert-tenant-api-dns.sh "${{ env.SAM_STACK_NAME }}" "${{ env.DNS_ROOT }}"
 
       - name: Resolve stack outputs
         id: outputs
