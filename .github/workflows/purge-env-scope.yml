@@ -1,0 +1,55 @@
+name: Purge one environment scope
+
+# PORTH-656. Removes what the platform bootstrap wrote under ENV#{scope}#… for an
+# environment that should not exist (porth-tenant, from #150). Live environments
+# are refused by the script. Dry-run unless `apply` is ticked.
+#
+# Not reset-env.yml: that empties whole tables, every environment included.
+
+on:
+  workflow_dispatch:
+    inputs:
+      env_scope:
+        description: 'The environment scope to purge (never porth-sample / porth-dau)'
+        required: true
+      apply:
+        description: 'Delete. Leave OFF to list exactly what would go.'
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: purge-env-scope
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  PORTH_STACK: serverlessrepo-porth-components
+
+jobs:
+  purge:
+    name: Purge ENV#${{ inputs.env_scope }}# (${{ inputs.apply && 'APPLY' || 'dry-run' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The bootstrap's own role: it is what wrote these rows, and it already holds
+    # Query and DeleteItem on porth-*. No new grant.
+    environment: porth-bootstrap
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet boto3
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Resolve table names
+        run: scripts/resolve-porth-tables.sh "$PORTH_STACK" >> "$GITHUB_ENV"
+      - name: Purge
+        env:
+          PORTH_ENV_SCOPE: ${{ inputs.env_scope }}
+        run: python3 scripts/purge_env_scope.py ${{ inputs.apply && '--apply' || '' }}
