@@ -7,8 +7,8 @@ import pytest
 
 from sample_app.cors import HostBoundOriginMiddleware, own_ui_origin
 
-ALIAS = "*.porth-tenant.ems.estynsoftware.cloud"
-BASE = "porth-tenant.ems.estynsoftware.cloud"
+ALIAS = "*.porth-dau.ems.estynsoftware.cloud"
+BASE = "porth-dau.ems.estynsoftware.cloud"
 
 
 @pytest.mark.parametrize(
@@ -20,7 +20,7 @@ BASE = "porth-tenant.ems.estynsoftware.cloud"
         (f"sample-api.{BASE}", None),          # the shared-host custom domain
         (f"acme.{BASE}", None),                # a UI host
         (f"a.b.api.{BASE}", None),             # not one label
-        (f"acme.api.porth-dau.ems.estynsoftware.cloud", None),  # another slot
+        (f"acme.api.porth-sample.ems.estynsoftware.cloud", None),  # another slot
     ],
 )
 def test_own_ui_origin(host, expected):

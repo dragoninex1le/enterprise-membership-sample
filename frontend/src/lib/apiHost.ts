@@ -6,13 +6,13 @@
 // Tenant-named hosts (VITE_TENANT_API_HOSTS=true): CloudFront serves the UI
 // only, and the API is one `api` label deeper than the page:
 //
-//   page  https://acme.porth-tenant.ems.estynsoftware.cloud
-//   api   https://acme.api.porth-tenant.ems.estynsoftware.cloud
+//   page  https://acme.porth-dau.ems.estynsoftware.cloud
+//   api   https://acme.api.porth-dau.ems.estynsoftware.cloud
 //         ├── /sample/…   this app (root mapping)
 //         └── /porth/…    Porth (the `porth` mapping key) — /porth/auth/* included
 //
-//   page  https://porth-tenant.ems.estynsoftware.cloud   (the platform tenant)
-//   api   https://api.porth-tenant.ems.estynsoftware.cloud
+//   page  https://porth-dau.ems.estynsoftware.cloud   (the platform tenant)
+//   api   https://api.porth-dau.ems.estynsoftware.cloud
 //
 // The session cookie is host-only on the API host, so everything that needs it
 // (auth, Porth, the app) goes to that one host with credentials.
@@ -24,7 +24,7 @@ export function apiOrigin(location: Pick<Location, 'protocol' | 'hostname'> = wi
   if (!TENANT_API_HOSTS) return null
   const { protocol, hostname } = location
   const labels = hostname.split('.')
-  // The platform apex is the slot itself: porth-tenant.{zone} → api.porth-tenant.{zone}.
+  // The platform apex is the slot itself: porth-dau.{zone} → api.porth-dau.{zone}.
   if (labels[0] === import.meta.env.VITE_PLATFORM_APEX) {
     return `${protocol}//api.${hostname}`
   }

@@ -180,7 +180,7 @@ jobs:
           # Empty skips stage C rather than failing it: on a single-environment
           # install there is no real second environment to be refused, and a
           # probe aimed at an invented one proves nothing (PORTH-598).
-          PORTH_AUTH_ENVIRONMENTS: ${{ vars.PORTH_AUTH_ENVIRONMENTS || 'porth-sample,porth-dau,porth-tenant' }}
+          PORTH_AUTH_ENVIRONMENTS: ${{ vars.PORTH_AUTH_ENVIRONMENTS || 'porth-sample,porth-dau' }}
         run: |
           set -o pipefail
           THIS="${ENVIRONMENT_SLOT:-porth-sample}"
