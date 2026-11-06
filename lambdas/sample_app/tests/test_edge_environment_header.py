@@ -28,7 +28,17 @@ class _Loader(yaml.SafeLoader):
     pass
 
 
-_Loader.add_multi_constructor("!", lambda loader, suffix, node: getattr(node, "value", None))
+def _tagged(loader, suffix, node):
+    # Scalars keep their raw value (the function code is a `!Sub |` string).
+    # Sequences are built, so `!If [cond, a, b]` reads as {"If": [cond, a, b]}.
+    if isinstance(node, yaml.SequenceNode):
+        return {suffix: loader.construct_sequence(node, deep=True)}
+    if isinstance(node, yaml.MappingNode):
+        return {suffix: loader.construct_mapping(node, deep=True)}
+    return node.value
+
+
+_Loader.add_multi_constructor("!", _tagged)
 
 _TEMPLATE = pathlib.Path(__file__).resolve().parents[3] / "template.yml"
 
@@ -49,8 +59,18 @@ def distribution() -> dict:
     return dists[0]
 
 
-def test_every_api_behaviour_carries_the_function(distribution):
+def _shared_host_behaviours(distribution) -> list:
+    """PORTH-656: CacheBehaviors is `!If [IsTenantApiHosts, NoValue, [...]]`.
+    The list is the shared-host shape; a tenant-API-host slot has no API
+    behaviours at all, and its environment comes from the host instead."""
     behaviours = distribution.get("CacheBehaviors") or []
+    if isinstance(behaviours, dict) and "If" in behaviours:
+        behaviours = behaviours["If"][2]
+    return behaviours
+
+
+def test_every_api_behaviour_carries_the_function(distribution):
+    behaviours = _shared_host_behaviours(distribution)
     by_path = {b.get("PathPattern"): b for b in behaviours}
 
     assert API_PATHS <= set(by_path), (

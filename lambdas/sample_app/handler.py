@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
 from porth_common.internal_plane import log_plane_identity
+from .cors import HostBoundOriginMiddleware
 from .director import DirectorMiddleware, SampleAppDirector
 from .routers import dashboard, ar, ap, approvals, diagnostics
 
@@ -87,9 +88,16 @@ app.add_middleware(                          # added last  → outermost
     allow_origin_regex=_origin_regex,
     allow_credentials=_allow_credentials,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    # PORTH-656: X-CSRF-Token and X-Porth-Environment as well. Same-origin
+    # through CloudFront they were never preflighted; from a tenant UI to its
+    # API host they are, and a header missing here fails every write.
+    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "X-Porth-Environment"],
     max_age=600,
 )
+
+# PORTH-656 — outermost of all: on an API host, only that host's own UI origin
+# reaches CORSMiddleware. See cors.py.
+app.add_middleware(HostBoundOriginMiddleware)
 app.include_router(dashboard.router)
 app.include_router(ar.router)
 app.include_router(ap.router)

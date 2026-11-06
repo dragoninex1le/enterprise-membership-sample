@@ -102,8 +102,18 @@ def test_the_function_is_attached_to_that_api(resources):
 
 
 def _behaviours(resources) -> dict:
+    """The behaviours of a SHARED-HOST slot — the one where these halves apply.
+
+    PORTH-656: CacheBehaviors is `!If [IsTenantApiHosts, NoValue, [...]]`. On a
+    tenant-API-host slot CloudFront serves the UI only and the API is its own
+    host, so there is nothing to be same-origin with; see
+    test_tenant_api_hosts.py for that shape.
+    """
     cf = resources["CloudFrontDistribution"]["Properties"]["DistributionConfig"]
-    return {b["PathPattern"]: b for b in cf["CacheBehaviors"]}
+    behaviours = cf["CacheBehaviors"]
+    if isinstance(behaviours, dict) and "If" in behaviours:
+        behaviours = behaviours["If"][2]
+    return {b["PathPattern"]: b for b in behaviours}
 
 
 def test_sample_calls_are_same_origin(resources):

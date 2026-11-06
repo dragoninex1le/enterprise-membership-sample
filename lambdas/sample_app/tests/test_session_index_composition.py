@@ -101,3 +101,52 @@ def test_an_empty_environment_list_is_refused():
     """
     with pytest.raises(SystemExit):
         composer.main(["compose", str(_TEMPLATE), "ENV=dev", "ENVIRONMENTS="])
+
+
+# --------------------------------------------------------------------------
+# PORTH-656 — tenant-named API hosts
+# --------------------------------------------------------------------------
+#
+# On a tenant-API-host slot the browser calls {tenant}.api.{slot}.{zone} (and
+# api.{slot}.{zone} for the platform), and BOTH APIs answer on that one host:
+# this app at the root, Porth under the `porth` mapping key. So the host alone
+# cannot pick the binding any more; the path does, and the host's rule has to
+# carry a binding for each.
+
+
+def _api_rules(index, env):
+    return [
+        r for r in index["context_rules"]
+        if r["match"]["host_pattern"] in (
+            f"*.api.{env}.ems.estynsoftware.cloud", f"api.{env}.ems.estynsoftware.cloud"
+        )
+    ]
+
+
+def test_each_environment_gets_both_api_host_rules(template):
+    index = composer.compose(template, "dev", ENVIRONMENTS)
+    for env in ENVIRONMENTS:
+        rules = _api_rules(index, env)
+        assert len(rules) == 2, (env, rules)
+        assert {r["context_hint"] for r in rules} == {f"api-{env}"}
+
+
+def test_on_an_api_host_the_path_picks_the_app_or_porth(template):
+    """/sample → this app's role for THIS environment; anything else → Porth's
+    role on the branch axis. Longest prefix wins, and there is no fallback, so
+    both bindings have to exist."""
+    index = composer.compose(template, "dev", ENVIRONMENTS)
+    for env in ENVIRONMENTS:
+        app = index["bindings"][f"api-{env}:/sample"]
+        porth = index["bindings"][f"api-{env}:/"]
+        assert app["role_arn"].endswith(f"-{env}"), app
+        assert app == index["bindings"][f"sample-{env}:/sample"]
+        assert porth == index["bindings"]["porth:/"]
+
+
+def test_api_host_rules_sit_above_the_catch_all(template):
+    index = composer.compose(template, "dev", ENVIRONMENTS)
+    patterns = [r["match"]["host_pattern"] for r in index["context_rules"]]
+    for env in ENVIRONMENTS:
+        assert patterns.index(f"*.api.{env}.ems.estynsoftware.cloud") < patterns.index("*")
+        assert patterns.index(f"api.{env}.ems.estynsoftware.cloud") < patterns.index("*")

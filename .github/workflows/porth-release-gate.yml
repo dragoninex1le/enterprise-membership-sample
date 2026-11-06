@@ -32,7 +32,7 @@ on:
       porth_version:
         description: 'Candidate Porth version being gated (for traceability)'
         required: true
-        default: '0.4.2'
+        default: '0.4.3'
       components_ref:
         description: 'Components repo ref to install the testbed from'
         required: false
