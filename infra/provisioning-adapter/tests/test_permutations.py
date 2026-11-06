@@ -60,5 +60,6 @@ def test_the_reason_codes_are_the_schemas_closed_list():
 
     root = Path(prawf_schemas.__file__).resolve().parent
     common = next(root.rglob("common.schema.json"))
-    enum = json.loads(common.read_text("utf-8"))["$defs"]["reasonCode"]["enum"]
-    assert permutations.REASON_CODES == set(enum)
+    defs = json.loads(common.read_text("utf-8"))["$defs"]
+    assert permutations.REASON_CODES == set(defs["reasonCode"]["enum"])
+    assert permutations.REASON_CODES_1_1 == set(defs["reasonCode11"]["enum"])

@@ -137,11 +137,9 @@ def call(verb, payload=None, run_id="run-seed-1", dry_run=False, entity="porth-t
     if slot is not None:
         request["slot"] = slot
     response = handler.handler(copy.deepcopy(request), None)
-    if contract.count(".") == 2:
-        # The published prawf-schemas are 1.0; a 1.1 answer is checked by shape until 1.1 publishes.
-        result = validate_contract_response(response)
-        assert result.valid, [str(e) for e in result.errors]
-    else:
+    result = validate_contract_response(response)
+    assert result.valid, [str(e) for e in result.errors]
+    if contract.count(".") == 1:
         assert response["contract_version"] == contract
         assert response["outcome"] == "ok" or response["reason_code"]
         if response["outcome"] == "ok" or response.get("reason_code") not in ("slot_required", "unknown_slot", "version_incompatible"):

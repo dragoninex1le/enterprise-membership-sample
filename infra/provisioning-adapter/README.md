@@ -32,8 +32,8 @@ The adapter speaks contract **1.0** and **1.1** (addendum, Confluence 74448898).
 three-part version (`1.0.0`, `1.1.0`) speaks the 1.0 schemas and is answered in `1.0.0`, exactly as
 before. A two-part caller (`1.0`, `1.1`) is negotiated up to `1.1`, and gets 1.1's additions: a slot
 required on every verb that writes or deletes (`slot_required`), `unknown_slot`, `environment {id, slot}`
-on every response, `baseline_kind` on each entity, and `prune`. The published `prawf-schemas` are still
-1.0, so the tests check 1.1 answers by shape until 1.1 publishes.
+on every response, `baseline_kind` on each entity, and `prune`. `prawf-schemas` 1.1.0 (released
+2026-11-05) holds both versions, and the tests validate every answer, 1.0 or 1.1, against it.
 
 ## `porth`: the install's baseline, as a snapshot
 
