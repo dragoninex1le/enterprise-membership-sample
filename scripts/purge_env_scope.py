@@ -63,7 +63,8 @@ def plan(scope: str, tables: dict) -> list[tuple[str, object, dict]]:
         if str(r["sk"]).startswith("ROLE#"):
             collect("roles", "pk", "sk", f"{p}TENANT#platform#ROLE#{r['sk'][len('ROLE#'):]}")
 
-    collect("claim_mapping", "pk", "sk", f"{p}TENANT#platform")
+    # Upper-case keys, like tenants (bootstrap_claim_mapping_config writes PK/SK).
+    collect("claim_mapping", "PK", "SK", f"{p}TENANT#platform")
 
     for _, _, key in found:
         pk = next(iter(key.values()))
