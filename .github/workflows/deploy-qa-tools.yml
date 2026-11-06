@@ -142,7 +142,7 @@ jobs:
         run: |
           set -euo pipefail
           # CloudFormation must act as the EXECUTION role, not the orchestration role this job
-          # assumed. porth-install-role only calls the CFN/SAR APIs — it deliberately has no
+          # assumed. porth-install-role only calls the CFN APIs (and reads the Porth release) — it deliberately has no
           # iam:CreateRole, so without this the Lambda execution roles cannot be created.
           ROLE_ARG=()
           if [ -n "${CFN_EXECUTION_ROLE:-}" ]; then

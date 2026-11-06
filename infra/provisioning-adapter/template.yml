@@ -31,7 +31,7 @@ Parameters:
   PorthStackName:
     Type: String
     Default: serverlessrepo-porth-components
-    Description: The Porth SAR stack. Its serverlessrepo:semanticVersion tag is the candidate version.
+    Description: The Porth stack. Its ImageTag parameter (or, for a SAR-era install, its serverlessrepo:semanticVersion tag) is the candidate version.
   PorthTenantsTable:
     Type: String
     Description: From the Porth stack's TenantsTableName output. Resolved by the deploy, never typed.

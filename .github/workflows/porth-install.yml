@@ -3,16 +3,21 @@ name: Porth components — install + upgrade
 # PORTH-471 — Pipeline 1. PORTH-530 — SAR 0.1.16 + ADR-Z9 BFF wiring.
 # PORTH-582 — upgraded to SAR 0.2.0 (container-image Porth).
 #
+# PORTH-657 — installs from Porth's S3 release, not SAR.
+#
 # Installs or upgrades the Porth components stack (serverlessrepo-porth-components) in the EMS
-# account by consuming the porth-user-management SAR application, then
+# account from a versioned Porth release in the Estyn Components account, then
 # bootstraps the reserved 'platform' tenant and patches its IdP config.
 #
-# Two-step SAR consume (PORTH-459 pattern): render the SAR template, then
-# `cloudformation create-change-set --role-arn <porth-cfn-execution-role>` so
+# Two steps: resolve the requested version to its template URL from
+# s3://porth-releases-084847995635/porth/<version>/manifest.json, then
+# `cloudformation create-change-set --template-url … --role-arn <porth-cfn-execution-role>` so
 # CloudFormation performs every resource operation as the dedicated execution
-# role. porth-install-role only orchestrates — it calls the CFN/SAR APIs.
+# role. porth-install-role only orchestrates — it calls the CFN APIs and reads the release.
+# The stack keeps its SAR-era name: a new name would be a new stack, and the old one's
+# retained fixed-name tables would block it.
 #
-# GitHubRepoOwner is intentionally NOT passed, so the SAR template's
+# GitHubRepoOwner is intentionally NOT passed, so the template's
 # CreateDeployRole condition stays false — no porth-deploy-role is created
 # and no GitHub OIDC provider is required in the EMS account
 # (PORTH-471 decision, 2026-05-19).
@@ -53,29 +58,28 @@ name: Porth components — install + upgrade
 on:
   workflow_dispatch:
     inputs:
-      sar_version:
+      porth_version:
         # Kept current deliberately. A stale default is not a harmless
         # convenience: the dispatch form prefills it, so leaving 0.2.0 here
         # meant an upgrade silently asked for a release older than the one
         # installed, and the change set was refused with an error that reads as
         # a stack problem rather than a wrong input. Bump this with each Porth
         # release the consumer is expected to move to.
-        description: 'Porth SAR app semantic version to install/upgrade to'
+        description: 'Porth release version to install/upgrade to (must be published: s3://porth-releases-084847995635/porth/<version>/manifest.json)'
         required: true
         # 0.3.1 is what run 32524612746 installed on 2026-08-21. It said 0.3.0,
         # which is the stale-default trap the comment above describes, one
         # release later: accepting the prefilled box asks for an OLDER version
         # than the one deployed and the change set is refused with an error that
         # reads as a stack problem.
-        default: '0.3.1'
+        #
+        # PORTH-657: 0.4.2 is the first version published to the S3 release bucket
+        # (backfilled from SAR so the switch-over can be tested at the same code).
+        default: '0.4.2'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
         default: 'serverlessrepo-porth-components'
-      sar_app_id:
-        description: 'Porth SAR application ARN'
-        required: false
-        default: 'arn:aws:serverlessrepo:us-east-1:084847995635:applications/porth-user-management'
       environment_name:
         description: 'Porth Environment parameter (drives the DynamoDB table name suffix)'
         required: false
@@ -128,13 +132,16 @@ concurrency:
 
 env:
   AWS_REGION: us-east-1
+  # PORTH-657 — Porth releases live here, in the Estyn Components account, readable by
+  # principals in the Estyn Organization (porth-install-role needs s3:GetObject on porth/*).
+  PORTH_RELEASE_BUCKET: porth-releases-084847995635
   # Pinned deliberately; see the install step for why a floating version
   # silently resolved backwards.
   PORTH_INSTALL_VERSION: '0.3.0'
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.sar_version || '0.3.0' }}
+    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.2' }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
@@ -162,9 +169,8 @@ jobs:
       # also works when triggered by the push shim (inputs are empty on push).
       - name: Resolve effective inputs
         run: |
-          echo "EFF_SAR_VERSION=${{ inputs.sar_version || '0.2.0' }}" >> "$GITHUB_ENV"
+          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.2' }}" >> "$GITHUB_ENV"
           echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
-          echo "EFF_SAR_APP_ID=${{ inputs.sar_app_id || 'arn:aws:serverlessrepo:us-east-1:084847995635:applications/porth-user-management' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
           # The configured mode, overridable for one run. Empty IS the mode
           # (PORTH-557): a non-empty FixedEnvironment pins every envelope to one
@@ -182,18 +188,15 @@ jobs:
       - name: Caller identity
         run: aws sts get-caller-identity
 
-      # Precondition: verify the SAR app is accessible (Org-scoped share).
-      # A 403/404 here means the share is missing — escalate to the Porth team
-      # rather than debugging a confusing template-render failure later.
-      - name: Verify SAR app is accessible (Org-scoped share)
-        run: |
-          set -euo pipefail
-          echo "Checking SAR app accessibility: ${{ env.EFF_SAR_APP_ID }}"
-          aws serverlessrepo get-application \
-            --application-id "${{ env.EFF_SAR_APP_ID }}" \
-            --query '{Name:Name,Author:Author,Version:Version.SemanticVersion}' \
-            --output json
-          echo "✅ SAR app is accessible"
+      # PORTH-657 — precondition: the requested version is a published release and this
+      # role can read it. A version exists for consumers once its manifest does (the
+      # Components release workflow writes it last), so an absent manifest means "not
+      # released", and AccessDenied means porth-install-role lacks s3:GetObject on
+      # arn:aws:s3:::porth-releases-084847995635/porth/* — escalate either to the Porth team
+      # rather than debugging a confusing change-set failure later.
+      - name: Resolve the Porth release
+        id: release
+        run: scripts/resolve-porth-release.sh "${{ env.EFF_PORTH_VERSION }}"
 
       - name: Validate inputs and resolve domain parameters
         env:
@@ -211,12 +214,6 @@ jobs:
           ENVIRONMENTS_VAR: ${{ vars.PORTH_AUTH_ENVIRONMENTS || 'porth-sample,porth-dau' }}
         run: |
           set -euo pipefail
-          APP_ARN="${{ env.EFF_SAR_APP_ID }}"
-          if [[ ! "$APP_ARN" =~ ^arn:aws:serverlessrepo:[a-z0-9-]+:[0-9]+:applications/[a-zA-Z0-9_-]+$ ]]; then
-            echo "::error::Invalid sar_app_id: $APP_ARN"
-            exit 1
-          fi
-
           # Custom domain: dispatch input wins, then the canonical var, then the legacy name.
           DOMAIN="${{ inputs.api_domain_name }}"
           [ -z "$DOMAIN" ] && DOMAIN="${API_DOMAIN_VAR:-}" || true
@@ -387,36 +384,6 @@ jobs:
               ;;
           esac
 
-      - name: Render SAR template
-        id: render
-        run: |
-          set -euo pipefail
-          echo "Rendering SAR template: ${{ env.EFF_SAR_APP_ID }} @ ${{ env.EFF_SAR_VERSION }}"
-          CREATE_OUT=$(aws serverlessrepo create-cloud-formation-template \
-            --application-id "${{ env.EFF_SAR_APP_ID }}" \
-            --semantic-version "${{ env.EFF_SAR_VERSION }}" \
-            --output json)
-          TEMPLATE_ID=$(echo "$CREATE_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["TemplateId"])')
-          for i in $(seq 1 30); do
-            GET_OUT=$(aws serverlessrepo get-cloud-formation-template \
-              --application-id "${{ env.EFF_SAR_APP_ID }}" \
-              --template-id "$TEMPLATE_ID" --output json)
-            STATUS=$(echo "$GET_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["Status"])')
-            if [ "$STATUS" = "ACTIVE" ]; then
-              TEMPLATE_URL=$(echo "$GET_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["TemplateUrl"])')
-              echo "template_url=$TEMPLATE_URL" >> "$GITHUB_OUTPUT"
-              echo "✅ SAR template ACTIVE"
-              exit 0
-            elif [ "$STATUS" = "EXPIRED" ]; then
-              echo "::error::SAR template EXPIRED before becoming ACTIVE"
-              exit 1
-            fi
-            echo "  (attempt $i) template status=$STATUS — waiting 2s"
-            sleep 2
-          done
-          echo "::error::SAR template did not become ACTIVE within 60s"
-          exit 1
-
       - name: Create change set
         id: changeset
         env:
@@ -466,7 +433,7 @@ jobs:
           if [ -n "$AUTH_TEST_TOKEN" ]; then
             PARAMS+=( "ParameterKey=AuthTestToken,ParameterValue=$AUTH_TEST_TOKEN" )
           fi
-          # GitHubRepoOwner intentionally omitted → SAR CreateDeployRole condition stays false.
+          # GitHubRepoOwner intentionally omitted → CreateDeployRole condition stays false.
 
           # Custom domain (PORTH-479): AcmCertificateArn + ApiDomainName together flip the
           # template's HasCustomDomain condition, creating the ApiGatewayV2 DomainName +
@@ -521,7 +488,7 @@ jobs:
             --stack-name "$STACK" \
             --change-set-name "$CHANGE_SET_NAME" \
             --change-set-type "$CS_TYPE" \
-            --template-url "${{ steps.render.outputs.template_url }}" \
+            --template-url "${{ steps.release.outputs.template_url }}" \
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
             "${ROLE_ARGS[@]}" \
             --parameters "${PARAMS[@]}" \
@@ -675,7 +642,7 @@ jobs:
           if [ -n "$SESSIONS_TABLE" ] && [ "$SESSIONS_TABLE" != "None" ]; then
             echo "✅ BFF session spine: sessions table $SESSIONS_TABLE"
           else
-            echo "::warning::SessionsTableName not exported — the BFF may not be present in this SAR version"
+            echo "::warning::SessionsTableName not exported — the BFF may not be present in this Porth version"
           fi
 
       - name: Upsert Route 53 alias for Porth API custom domain
@@ -803,7 +770,7 @@ jobs:
           CA_DOMAIN: porth
           CA_REPO: porth-py
           # The Porth publisher account, which owns the CodeArtifact domain. Same
-          # account as the SAR app ID default above.
+          # account as the release bucket above.
           CA_OWNER: ${{ vars.PORTH_CODEARTIFACT_OWNER || '084847995635' }}
         run: |
           set -euo pipefail
@@ -817,7 +784,7 @@ jobs:
           # Cross-account consume from the publisher's CodeArtifact domain. This
           # is the same package the Porth release itself is built from, so the
           # consumer cannot end up running upgrade logic from a different version
-          # than the SAR it just installed.
+          # than the release it just installed.
           aws codeartifact login \
             --tool pip \
             --domain "$CA_DOMAIN" \
@@ -894,8 +861,8 @@ jobs:
             exit 1
           fi
 
-          if [ -z "${EFF_SAR_VERSION:-}" ]; then
-            echo "::error::EFF_SAR_VERSION is empty — refusing to run migrations"
+          if [ -z "${EFF_PORTH_VERSION:-}" ]; then
+            echo "::error::EFF_PORTH_VERSION is empty — refusing to run migrations"
             echo "::error::without knowing which release is being installed."
             exit 1
           fi
@@ -910,7 +877,7 @@ jobs:
           # --target-version is the safety gate, not a convenience (PORTH-606).
           # A migration is only correct once the code that can READ its output is
           # running, so an install of an older release must not carry it. Without
-          # this, dispatching with the default sar_version (0.2.0) would deploy
+          # this, dispatching an old porth_version (e.g. 0.2.0) would deploy
           # code that reads ENV#e#ROLE#{id} and then re-key every row to
           # ENV#e#TENANT#t#ROLE#{id} — every read missing, on a stack that just
           # reported success. That very dispatch happened; an unrelated
@@ -923,14 +890,14 @@ jobs:
           porth-install migrate-keys \
             --roles-table "porth-roles-${ENV_NAME}" \
             --users-table "porth-users-${ENV_NAME}" \
-            --target-version "${EFF_SAR_VERSION}" \
+            --target-version "${EFF_PORTH_VERSION}" \
             --dry-run
 
           echo "── apply ──"
           porth-install migrate-keys \
             --roles-table "porth-roles-${ENV_NAME}" \
             --users-table "porth-users-${ENV_NAME}" \
-            --target-version "${EFF_SAR_VERSION}"
+            --target-version "${EFF_PORTH_VERSION}"
 
       # ── Seed SSM auth-policy + session-policy templates ─────────────────────
       # Components deploy.yml seeds these after every deploy, but porth-install
@@ -1098,7 +1065,7 @@ jobs:
             echo ""
             echo "- **Action:** ${{ steps.preflight.outputs.action }}"
             echo "- **No-op:** ${{ steps.changeset.outputs.no_changes || 'false' }}"
-            echo "- **Target version:** ${{ env.EFF_SAR_VERSION }}"
+            echo "- **Target version:** ${{ env.EFF_PORTH_VERSION }}"
             echo "- **Stack:** ${{ env.EFF_STACK_NAME }}"
             echo "- **Environment param:** ${{ env.EFF_ENV_NAME }}"
             echo "- **Env mode:** ${{ env.EFF_FIXED_ENV == '' && 'MULTI (FixedEnvironment empty)' || format('single (FixedEnvironment=`{0}`)', env.EFF_FIXED_ENV) }}"

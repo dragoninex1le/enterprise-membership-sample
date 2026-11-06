@@ -258,14 +258,14 @@ jobs:
 
           # PORTH-586: the authorizer's EXECUTION role — a different object from
           # the function ARN above, and the principal the app's own role trusts.
-          # Published as an output from SAR 0.3.1; before that it was not
+          # Published as an output from Porth 0.3.1; before that it was not
           # derivable at all, since the role is SAM-generated with a name nobody
           # can compose.
           PORTH_AUTHORIZER_ROLE_ARN=$(get_output AuthorizerFunctionRoleArn)
           if [ -z "$PORTH_AUTHORIZER_ROLE_ARN" ] || [ "$PORTH_AUTHORIZER_ROLE_ARN" == "None" ]; then
             echo "❌ Could not resolve AuthorizerFunctionRoleArn from the $STACK stack outputs."
-            echo "❌ It is published from SAR 0.3.1 — upgrade the Porth install first"
-            echo "❌ (porth-install.yml, sar_version 0.3.1). Without it the sample app's"
+            echo "❌ It is published from Porth 0.3.1 — upgrade the Porth install first"
+            echo "❌ (porth-install.yml, porth_version 0.3.1 or later). Without it the sample app's"
             echo "❌ role has no principal to trust, so the authorizer cannot assume it and"
             echo "❌ every request to /sample/* denies."
             exit 1

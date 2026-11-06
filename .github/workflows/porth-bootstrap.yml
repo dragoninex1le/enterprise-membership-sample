@@ -16,7 +16,7 @@ name: Porth — bootstrap platform tenant
 #      ENV#prod#TENANT#platform, so the install reported success and login silently did not
 #      work. One implementation, two callers.
 #
-# The Porth SAR ships no platform bootstrap, so every consumer provides its own. Replacing
+# Porth ships no platform bootstrap, so every consumer provides its own. Replacing
 # this with a product-side implementation is PORTH-536; when that lands, this workflow and
 # scripts/bootstrap_platform_tenant.py both go away.
 
