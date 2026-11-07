@@ -24,11 +24,14 @@ on:
     inputs:
       env_scope:
         description: >
-          ADR-Z8 environment slot to write under (ENV#{scope}#…). Must match the
-          Porth install's FixedEnvironment, or the authorizer will not find these
-          records. DATA axis — not the table-name suffix.
-        required: false
-        default: 'prod'
+          The declared environment (deploy/porth/environments.json) to rebuild the
+          platform tenant under (ENV#{scope}#…). DATA axis — not the table-name suffix.
+        required: true
+        type: choice
+        options:
+          - porth-dau
+          - porth-sample
+        default: porth-dau
       stack_name:
         description: 'Porth components CloudFormation stack name'
         required: false
@@ -44,7 +47,7 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
-  ENV_SCOPE: ${{ inputs.env_scope || 'prod' }}
+  ENV_SCOPE: ${{ inputs.env_scope }}
   PORTH_STACK: ${{ inputs.stack_name || 'serverlessrepo-porth-components' }}
 
 jobs:
@@ -190,15 +193,24 @@ jobs:
     needs: reset
     uses: ./.github/workflows/porth-bootstrap.yml
     with:
-      env_scope: ${{ inputs.env_scope || 'prod' }}
+      env_scope: ${{ inputs.env_scope }}
       tenants_table: ${{ needs.reset.outputs.tenants_table }}
       permissions_table: ${{ needs.reset.outputs.permissions_table }}
       roles_table: ${{ needs.reset.outputs.roles_table }}
       claim_mapping_table: ${{ needs.reset.outputs.claim_mapping_table }}
 
+  # PORTH-656: the bootstrap writes no permissions; Porth's own reconcile does,
+  # under the install role (porth-reconcile.yml), from the installed release.
+  reconcile:
+    name: Reconcile Porth's permissions
+    needs: [reset, bootstrap]
+    uses: ./.github/workflows/porth-reconcile.yml
+    with:
+      env_scopes: '["${{ inputs.env_scope }}"]'
+
   summary:
     name: Done
-    needs: [reset, bootstrap]
+    needs: [reset, bootstrap, reconcile]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

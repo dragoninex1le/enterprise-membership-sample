@@ -2,13 +2,15 @@
 # PORTH-656 — run `porth-install check` against the declared environments.
 #
 #   CA_DOMAIN CA_REPO CA_OWNER        the porth-py CodeArtifact repository
-#   PORTH_INSTALL_CHECK_VERSION       pinned (see porth-install.yml)
+#   PORTH_INSTALL_CHECK_VERSION       the release's porth-install, from its manifest
+#   EFF_PORTH_VERSION                 the Porth release installed (limits the migrations checked)
 #   PORTH_ENV_NAME                    the Porth stack's Environment (dev)
 #   AUTH0_MGMT_CLIENT_ID/_SECRET      optional; enables the Auth0 checks
 set -euo pipefail
 
 aws codeartifact login --tool pip --domain "$CA_DOMAIN" --domain-owner "$CA_OWNER" \
   --repository "$CA_REPO" --region "$AWS_REGION"
+: "${PORTH_INSTALL_CHECK_VERSION:?the install job did not output porth_install_version}"
 pip install --quiet "porth-install==${PORTH_INSTALL_CHECK_VERSION}"
 
 # The declared file, from main, exactly as the install read it.
@@ -27,4 +29,12 @@ if [ -n "${AUTH0_MGMT_CLIENT_ID:-}" ] && [ -n "${AUTH0_MGMT_CLIENT_SECRET:-}" ];
   export AUTH0_DOMAIN
 fi
 
-porth-install check --environments-file "$DECLARED" --branch "${PORTH_ENV_NAME:-dev}"
+# porth-install >= 0.4.7 reads the data tables itself (named from --branch) and
+# WARNS about legacy rows; --target-version limits the key migrations it asks
+# about to those this release carries. Older ones lack the flag.
+EXTRA=()
+if [ -n "${EFF_PORTH_VERSION:-}" ] && porth-install check --help | grep -q -- '--target-version'; then
+  EXTRA=(--target-version "$EFF_PORTH_VERSION")
+fi
+
+porth-install check --environments-file "$DECLARED" --branch "${PORTH_ENV_NAME:-dev}" "${EXTRA[@]}"

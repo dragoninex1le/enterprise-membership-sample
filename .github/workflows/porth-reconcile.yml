@@ -1,0 +1,76 @@
+name: Porth — reconcile permissions
+
+# PORTH-656. Porth's permissions are Porth's: its release ships the catalogue and
+# `porth-install reconcile-permissions` makes an environment match it — registers
+# what the release ships, grants it to the platform-admin role and every tenant's
+# admin role, and (with prune) removes what Porth no longer ships, with every
+# grant to it.
+#
+# Runs AFTER the platform bootstrap, which creates the platform tenant and its
+# platform-admin role but no longer writes permissions: its hand-kept copy of the
+# catalogue re-created PORTH-597's retired platform.orgs.* / platform.settings.*
+# on every install, at the pre-0.4.1 keys the migration had just removed.
+#
+# Called by porth-install.yml and reset-env.yml. Under the install role (the
+# porth-install environment), which reads CodeArtifact; the bootstrap role does not.
+
+on:
+  workflow_call:
+    inputs:
+      env_scopes:
+        description: 'JSON array of declared environments, e.g. ["porth-sample","porth-dau"]'
+        required: true
+        type: string
+      environment_name:
+        description: 'Table-name suffix (the Porth stack Environment)'
+        required: false
+        type: string
+        default: 'dev'
+      porth_install_version:
+        description: "porth-install to run. Empty = the installed Porth release's, from its manifest."
+        required: false
+        type: string
+        default: ''
+      prune_retired:
+        description: 'Delete what Porth no longer ships. Off = list it (dry run).'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  reconcile:
+    name: Reconcile Porth's permissions
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: porth-install
+    env:
+      AWS_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Resolve porth-install (given, or the installed release's)
+        env:
+          GIVEN: ${{ inputs.porth_install_version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$GIVEN" ]; then
+            echo "PORTH_INSTALL_VERSION=$GIVEN" >> "$GITHUB_ENV"
+          else
+            scripts/resolve-porth-release.sh "$(scripts/installed-porth-version.sh)"
+          fi
+      - name: reconcile-permissions, then retired permissions
+        env:
+          ENV_NAME: ${{ inputs.environment_name }}
+          ENV_SCOPES: ${{ inputs.env_scopes }}
+          PRUNE: ${{ inputs.prune_retired && 'true' || 'false' }}
+        run: scripts/porth-reconcile-permissions.sh

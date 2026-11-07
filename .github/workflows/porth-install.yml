@@ -84,7 +84,7 @@ on:
         # 0.4.8 names the two Porth APIs (porth-dev-api / porth-dev-browser-api).
         # 0.4.9 — PORTH-655 bugs (audit slot, org routes platform-only,
         # legacy-read refusal, connector claim-mapping lineage).
-        default: '0.4.9'
+        default: '0.4.12'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
@@ -125,6 +125,11 @@ on:
         type: choice
         options: [INFO, DEBUG, WARNING, ERROR, CRITICAL]
         default: 'INFO'
+      prune_retired:
+        description: 'Delete permissions Porth no longer ships (e.g. platform.orgs.*) and every grant to them. Leave OFF: the install always prints the dry run; read it first.'
+        required: false
+        type: boolean
+        default: false
       allow_stack_delete:
         description: 'Permit deleting a failed stack before recreating it. Retained tables/KMS keys SURVIVE and will block the recreate — read the pre-flight error first.'
         required: false
@@ -144,22 +149,25 @@ env:
   # PORTH-657 — Porth releases live here, in the Estyn Components account, readable by
   # principals in the Estyn Organization (porth-install-role needs s3:GetObject on porth/*).
   PORTH_RELEASE_BUCKET: porth-releases-084847995635
-  # Pinned deliberately; see the install step for why a floating version
-  # silently resolved backwards.
-  PORTH_INSTALL_VERSION: '0.3.0'
-  # PORTH-656: `porth-install check` arrived in 0.4.3. Its own pin, so the
-  # install steps above keep the version they were proven with.
-  PORTH_INSTALL_CHECK_VERSION: '0.4.4'
+  # PORTH-656: no porth-install pin here. The version every step runs is the
+  # one the Porth release was cut with — its manifest's
+  # components["porth-install"] — resolved by scripts/resolve-porth-release.sh
+  # into PORTH_INSTALL_VERSION (install job) and the job output the check job
+  # reads. Exact, so pip cannot backtrack (why the old pin existed); and it moves
+  # with the release, so a release's migrations and checks always run here. The
+  # pins it replaces (0.3.0 for the install, 0.4.4 for check) had kept every
+  # migration and check since 0.4.1 off this install.
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.9' }}
+    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.12' }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
     # Passed to the bootstrap job, which runs under its own role on a fresh runner and so
     # cannot see anything this job put in GITHUB_ENV.
     outputs:
+      porth_install_version: ${{ steps.release.outputs.porth_install_version }}
       env_scopes: ${{ steps.tables.outputs.env_scopes }}
       tenants_table: ${{ steps.tables.outputs.tenants_table }}
       permissions_table: ${{ steps.tables.outputs.permissions_table }}
@@ -181,7 +189,7 @@ jobs:
       # also works when triggered by the push shim (inputs are empty on push).
       - name: Resolve effective inputs
         run: |
-          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.9' }}" >> "$GITHUB_ENV"
+          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.12' }}" >> "$GITHUB_ENV"
           echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
           # The configured mode, overridable for one run. Empty IS the mode
@@ -841,6 +849,20 @@ jobs:
             --root-url "$PORTH_ROOT_URL_RESOLVED" \
             --environments "${PORTH_AUTH_ENVIRONMENTS_RAW:-}"
 
+      # ── Porth's permissions match this release's catalogue ─────────────────
+      # PORTH-656. Before the migrations, because the 0.4.1 catalogue migration
+      # lets a record already at the new key supersede every per-tenant copy:
+      # reconciled first, Porth's own permissions collapse without comparison.
+      # Per declared environment. Registration only: retired permissions are
+      # listed (and, with prune_retired, removed) by the reconcile job after the
+      # bootstrap, so nothing the bootstrap writes can outlive them.
+      - name: Reconcile Porth's permissions (porth-install reconcile-permissions)
+        env:
+          ENV_NAME: ${{ env.EFF_ENV_NAME }}
+          ENV_SCOPES: ${{ steps.tables.outputs.env_scopes }}
+          PRUNE: skip
+        run: scripts/porth-reconcile-permissions.sh
+
       # ── Data migrations (porth-install migrate-keys) ───────────────────────
       # PORTH-605. This runs on EVERY install and upgrade, because that is what
       # migrations.py is built for: each migration scans, asks each row whether
@@ -910,6 +932,8 @@ jobs:
           porth-install migrate-keys \
             --roles-table "porth-roles-${ENV_NAME}" \
             --users-table "porth-users-${ENV_NAME}" \
+            --permissions-table "porth-permissions-${ENV_NAME}" \
+            --claim-mapping-configs-table "porth-claim-mapping-configs-${ENV_NAME}" \
             --target-version "${EFF_PORTH_VERSION}" \
             --dry-run
 
@@ -917,6 +941,8 @@ jobs:
           porth-install migrate-keys \
             --roles-table "porth-roles-${ENV_NAME}" \
             --users-table "porth-users-${ENV_NAME}" \
+            --permissions-table "porth-permissions-${ENV_NAME}" \
+            --claim-mapping-configs-table "porth-claim-mapping-configs-${ENV_NAME}" \
             --target-version "${EFF_PORTH_VERSION}"
 
       # ── Seed SSM auth-policy + session-policy templates ─────────────────────
@@ -1132,14 +1158,31 @@ jobs:
   # ── PORTH-656: is the install complete for every declared environment? ────
   # Read-only, and last: it checks what the steps above wrote, including each
   # environment's platform tenant. ERROR (configuration) fails the run; WARN
-  # (one tenant's data — no org id, an org not named for its tenant) is named
-  # and does not. The Auth0 checks run when AUTH0_MGMT_CLIENT_ID and
+  # (one tenant's data — no org id, an org not named for its tenant — and, with
+  # porth-install ≥ 0.4.7, legacy data: rows a key migration would still
+  # rewrite, permissions Porth no longer ships, grants to missing keys, each
+  # naming its fix) is named and does not. The Auth0 checks run when AUTH0_MGMT_CLIENT_ID and
   # AUTH0_MGMT_CLIENT_SECRET are set on the porth-install environment (a
   # Management API app with read:clients and read:organizations); without
   # them the output says they were skipped.
+  # PORTH-656: after the bootstrap (which creates the platform tenant and its
+  # platform-admin role but writes no permissions), make every environment's
+  # permissions match this release, and list — or, with prune_retired, remove —
+  # what Porth no longer ships. See porth-reconcile.yml.
+  reconcile:
+    name: Reconcile Porth's permissions
+    needs: [install-or-upgrade, bootstrap]
+    if: ${{ !cancelled() && needs.install-or-upgrade.result == 'success' }}
+    uses: ./.github/workflows/porth-reconcile.yml
+    with:
+      env_scopes: ${{ needs.install-or-upgrade.outputs.env_scopes }}
+      environment_name: ${{ inputs.environment_name || 'dev' }}
+      porth_install_version: ${{ needs.install-or-upgrade.outputs.porth_install_version }}
+      prune_retired: ${{ inputs.prune_retired }}
+
   check:
     name: Check the install against the declared environments
-    needs: [install-or-upgrade, bootstrap]
+    needs: [install-or-upgrade, bootstrap, reconcile]
     if: ${{ !cancelled() && needs.install-or-upgrade.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -1161,4 +1204,8 @@ jobs:
           AUTH0_MGMT_CLIENT_ID: ${{ secrets.AUTH0_MGMT_CLIENT_ID }}
           AUTH0_MGMT_CLIENT_SECRET: ${{ secrets.AUTH0_MGMT_CLIENT_SECRET }}
           PORTH_ENV_NAME: ${{ inputs.environment_name || 'dev' }}
+          # The release's own porth-install (from its manifest), so check
+          # carries every data and configuration check that release ships.
+          PORTH_INSTALL_CHECK_VERSION: ${{ needs.install-or-upgrade.outputs.porth_install_version }}
+          EFF_PORTH_VERSION: ${{ inputs.porth_version || '0.4.12' }}
         run: scripts/porth-install-check.sh
