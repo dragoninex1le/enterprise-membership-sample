@@ -3,6 +3,7 @@
 // PORTH-595 — Announce: re-emit a tenant's lifecycle event so a service deployed after it can catch up
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { tenantPagePath } from '../hooks/useManagedTenant'
 import { organizationsApi } from '../api/organizations'
 import { tenantsApi } from '../api/tenants'
 import { EMPTY_IDP, IdpFields, idpFormOf, idpFromForm, type IdpForm } from '../components/IdpFields'
@@ -189,7 +190,7 @@ export default function TenantsPage() {
                 </td>
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-2">
-                    <button onClick={() => navigate(`/admin/tenant/claim-config?tenantId=${t.tenant_id}`)}
+                    <button onClick={() => navigate(tenantPagePath(t.tenant_id))}
                       className="text-xs px-2 py-1 bg-indigo-50 border border-indigo-200 rounded hover:bg-indigo-100 text-indigo-700 font-medium">
                       Manage →
                     </button>

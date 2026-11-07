@@ -1,9 +1,7 @@
 // PORTH-130 — Roles admin screen
 import { useEffect, useState, useCallback } from 'react'
-import { useSearchParams } from 'react-router-dom'
-import { usePorthContext } from '../context/PorthContext'
-import { useHasRole } from '../hooks/useRoles'
-import { PLATFORM_ADMIN } from '../constants'
+import { useMatch } from 'react-router-dom'
+import { TENANT_PAGE, useManagedTenant } from '../hooks/useManagedTenant'
 import { rolesApi } from '../api/roles'
 import { permissionsApi } from '../api/permissions'
 import type { Role, Permission, CreateRoleRequest } from '../api/types'
@@ -21,12 +19,9 @@ function groupByCategory(permissions: Permission[]): Record<string, Permission[]
 }
 
 export default function RolesPage() {
-  const { currentUser } = usePorthContext()
-  const isPlatformAdmin = useHasRole(PLATFORM_ADMIN)
-  const [searchParams] = useSearchParams()
-  const tenantId = isPlatformAdmin
-    ? (searchParams.get('tenantId') ?? '')
-    : (currentUser?.porthUser.tenant_id ?? '')
+  const tenantId = useManagedTenant()
+  const onTenantPage = useMatch(TENANT_PAGE) !== null
+  const Heading = onTenantPage ? 'h2' : 'h1'
 
   const [roles, setRoles] = useState<Role[]>([])
   const [loading, setLoading] = useState(true)
@@ -163,7 +158,7 @@ export default function RolesPage() {
   return (
     <div className="relative">
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">Roles</h1>
+        <Heading className={`${onTenantPage ? 'text-lg font-semibold' : 'text-2xl font-bold'} text-gray-900`}>Roles</Heading>
         <button
           onClick={openModal}
           className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700"

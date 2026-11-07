@@ -1,7 +1,8 @@
-import { NavLink, useSearchParams } from 'react-router-dom'
+import { NavLink, useMatch, useSearchParams } from 'react-router-dom'
 import { useHasRole } from '../hooks/useRoles'
 import { usePorthContext } from '../context/PorthContext'
 import { PLATFORM_ADMIN, SAMPLE_ROLES } from '../constants'
+import { TENANT_PAGE, tenantPagePath } from '../hooks/useManagedTenant'
 
 const { TENANT_ADMIN, AR_CLERK, AP_CLERK, CONTROLLER } = SAMPLE_ROLES
 
@@ -21,9 +22,10 @@ export default function Sidebar() {
   const isTenantAdmin = useHasRole(TENANT_ADMIN)
   const { currentUser } = usePorthContext()
   const [searchParams] = useSearchParams()
-  // Prefer explicit ?tenantId= param (platform admin managing a tenant);
-  // fall back to the signed-in user's own tenant (tenant-admin self-service).
+  // A tenant admin's tenant is their own. A platform admin's is the one whose page they are on -
+  // never their own as a fallback, which made the platform tenant look like the one being managed.
   const tenantId = searchParams.get('tenantId') ?? currentUser?.porthUser.tenant_id ?? ''
+  const managing = useMatch(TENANT_PAGE)?.params.tenantId ?? ''
 
   const canSeeAR = useHasRole(AR_CLERK, CONTROLLER, TENANT_ADMIN)
   const canSeeAP = useHasRole(AP_CLERK, CONTROLLER, TENANT_ADMIN)
@@ -43,16 +45,16 @@ export default function Sidebar() {
               <span>🏢</span>Tenants
             </NavLink>
 
-            {tenantId && (
+            {managing && (
               <>
                 {sectionLabel('Managing Tenant')}
                 <div className="px-3 py-1">
-                  <p className="text-xs text-indigo-600 font-mono truncate" title={tenantId}>{tenantId}</p>
+                  <p className="text-xs text-indigo-600 font-mono truncate" title={managing}>{managing}</p>
                 </div>
-                <NavLink to={`/admin/tenant/roles?tenantId=${tenantId}`} className={linkClass}>
+                <NavLink to={tenantPagePath(managing, 'roles')} className={linkClass}>
                   <span>🎭</span>Roles
                 </NavLink>
-                <NavLink to={`/admin/tenant/claim-config?tenantId=${tenantId}`} className={linkClass}>
+                <NavLink to={tenantPagePath(managing, 'claim-mapping')} className={linkClass}>
                   <span>🗒️</span>Claim Mapping
                 </NavLink>
               </>
