@@ -84,9 +84,7 @@ on:
         # 0.4.8 names the two Porth APIs (porth-dev-api / porth-dev-browser-api).
         # 0.4.9 — PORTH-655 bugs (audit slot, org routes platform-only,
         # legacy-read refusal, connector claim-mapping lineage).
-        # 0.4.11 — PORTH-656 the MCP door on tenant API hosts; installed by
-        # run 42410002955.
-        default: '0.4.11'
+        default: '0.4.9'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
@@ -171,7 +169,7 @@ env:
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.11' }}
+    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.9' }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
@@ -199,7 +197,7 @@ jobs:
       # also works when triggered by the push shim (inputs are empty on push).
       - name: Resolve effective inputs
         run: |
-          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.11' }}" >> "$GITHUB_ENV"
+          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.9' }}" >> "$GITHUB_ENV"
           echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
           # The configured mode, overridable for one run. Empty IS the mode
