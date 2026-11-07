@@ -1,16 +1,15 @@
 """`porth-tenant` - seed (PRF-12) and teardown (PRF-15).
 
-**What a seeded tenant is.** Exactly what Porth 0.3.1 - the version EMS runs - writes when a tenant
-is added to an existing organisation (`PUT /tenants/`), using Porth's own code for every write:
+**What a seeded tenant is.** What Porth writes when a tenant is added to an existing organisation
+(`PUT /tenants/`), using Porth's own code for every write (porth-common 0.0.21, Porth 0.4.10):
 
 1. the tenant row, through porth-common's `TenantRepository.create` - PK/SK, both indexes (gsi2 is
    what lists it), and the `Tenant.created` and `tenant.created` events;
-2. the tenant-admin role, the tenant-namespace permissions registered under the tenant, and the
-   role's grants - through porth-common's `RoleRepository` and `PermissionRepository`. Porth 0.3.1
-   orchestrated these three calls in its API service (`provision_tenant_admin_role`), which is not
-   in the wheel; the orchestration below is that function's, step for step, with the two
-   configuration values it read passed as their defaults (role name `tenant-admin`, no platform
-   overrides).
+2. the tenant-admin role and its grants, through porth-common's `ensure_tenant_admin_role` - the one
+   function Porth's API and porth-install both provision a tenant admin with (PORTH-643). The API's
+   two configuration values are passed as their defaults (role name `tenant-admin`, no platform
+   overrides). The grants include `tenant.claim_mappings.manage`, without which Porth refuses a
+   tenant its own claim mapping (PORTH-637/638).
 
 3. the tenant's IdP config (`idp_config_override`), when the dataset carries one - through
    porth-common's `TenantRepository.update`, validated by Porth 0.3.1's `TenantPatch`. It lives on the
@@ -19,8 +18,8 @@ is added to an existing organisation (`PUT /tenants/`), using Porth's own code f
    which is `update`, and what this does.
 
 Nothing else: no claim mapping (`porth-claim-mapping`, its own table and entity - one call, one
-entity, D12) and nothing in the identity provider. porth-common is pinned to 0.0.9, the
-release SAR 0.3.1 shipped; when EMS moves to a newer Porth, the pin moves with it.
+entity, D12) and nothing in the identity provider. porth-common is pinned to the release the Porth
+EMS runs shipped; when a Porth change affects what a seed writes, the pin moves with it.
 
 **It adds tenants; it never takes one over.** The organisation must already exist - Porth 0.3.1 had
 no way to create one alone - and the tenant must not. An existing tenant was not written by this
@@ -40,9 +39,6 @@ import slots
 from envelope import ContractError
 
 ENTITY = "porth-tenant"
-ADMIN_ROLE_NAME = "tenant-admin"
-ADMIN_ROLE_DESCRIPTION = "Tenant Administrator — full access to all tenant-level features"
-PLATFORM_NAMESPACE = "porth-platform"
 ATTRIBUTES = {"tenant_tier", "org", "admin_role_source_key", "idp_config_override"}
 
 
@@ -72,12 +68,24 @@ class Porth:
         # Porth's audit trail names who acted and in which slot; this run is the actor.
         set_audit_context(actor_id=f"prawf:{run_id}", environment=env_scope)
         self.publisher = EventPublisher(client=self.events, environment=env_scope)
-        self.orgs = OrganizationRepository(tenants, resource, event_publisher=self.publisher, environment=env_scope)
-        self.tenants = TenantRepository(tenants, resource, event_publisher=self.publisher, environment=env_scope)
-        self.claims = ClaimMappingConfigRepository(os.environ["PORTH_CLAIM_MAPPING_CONFIGS_TABLE"], resource,
+        # porth-common 0.0.21 (PORTH-632): a repository takes a callable that returns the resource and
+        # resolves it per access. One resource, already holding this run's session credentials.
+        def connect():
+            return resource
+
+        # Porth's audit trail (porth-audit-log): porth-common 0.0.21 writes an entry for every write, and
+        # by default through the execution role, unnarrowed. The adapter's execution role has no data
+        # access, so its entries go through this run's one-slot session like every other write - under
+        # ENV#{slot}#, which the session's LeadingKeys holds them to.
+        from porth_common.audit import logger as audit_logger
+        from porth_common.providers.aws.repositories.audit_log_repo import AuditLogRepository
+        audit_logger.init(AuditLogRepository(os.environ["PORTH_AUDIT_LOG_TABLE"], connect, environment=env_scope))
+        self.orgs = OrganizationRepository(tenants, connect, event_publisher=self.publisher, environment=env_scope)
+        self.tenants = TenantRepository(tenants, connect, event_publisher=self.publisher, environment=env_scope)
+        self.claims = ClaimMappingConfigRepository(os.environ["PORTH_CLAIM_MAPPING_CONFIGS_TABLE"], connect,
                                                    event_publisher=self.publisher, environment=env_scope)
-        self.roles = RoleRepository(roles, resource, events_client=self.events, environment=env_scope)
-        self.permissions = PermissionRepository(permissions, resource, events_client=self.events, environment=env_scope)
+        self.roles = RoleRepository(roles, connect, events_client=self.events, environment=env_scope)
+        self.permissions = PermissionRepository(permissions, connect, events_client=self.events, environment=env_scope)
 
 
 def _tenant(resource: object) -> dict:
@@ -176,7 +184,7 @@ def seed(env_scope: str, run_id: str, dry_run: bool, payload: object) -> tuple[l
         return [_handle(t["tenant_id"], "created", run_id) for t in wanted], [f"dry run: {label} would be applied; nothing written"]
 
     tenants_table, _, _ = _tables()
-    from porth_common.permissions import catalogue
+    from porth_common.tenants.admin_role import ensure_tenant_admin_role
 
     handles = []
     for t in wanted:
@@ -193,22 +201,14 @@ def seed(env_scope: str, run_id: str, dry_run: bool, payload: object) -> tuple[l
             from porth_common.models.tenant import TenantPatch
             porth.tenants.update(tid, TenantPatch(idp_config_override=t["idp_config_override"]).model_dump(exclude_none=True))
 
-        # provision_tenant_admin_role, Porth 0.3.1 - role, then the tenant permissions, then grants.
+        # The tenant-admin role, the one way Porth provisions it (porth-common 0.0.21, PORTH-643): the
+        # API's PUT /tenants/ and porth-install both call this. Porth's own tenant permissions come from
+        # its static catalogue - tenant.claim_mappings.manage among them - plus what applications
+        # registered in the environment's catalogue. The API's two configuration values are passed as
+        # their defaults: role name `tenant-admin`, no platform overrides.
         ledger.record(porth.db, env_scope, run_id, ENTITY, ledger.tenant_scope(tid))
-        role = porth.roles.create_role(
-            tenant_id=tid, name=ADMIN_ROLE_NAME, source_key=t["admin_role_source_key"],
-            is_system=True, description=ADMIN_ROLE_DESCRIPTION,
-        )
-        for spec in catalogue.CATALOGUE:
-            if spec.namespace == PLATFORM_NAMESPACE:
-                continue
-            porth.permissions.register(
-                tenant_id=tid, app_namespace=spec.namespace, key=spec.id, display_name=spec.display_name,
-                description=spec.description, category=spec.category, sort_order=spec.sort_order,
-            )
-        keys = sorted({p.key for p in porth.permissions.list_by_tenant(tid) if p.app_namespace != PLATFORM_NAMESPACE})
-        if keys:
-            porth.roles.set_role_permissions(role.id, keys, tid)
+        ensure_tenant_admin_role(role_repo=porth.roles, permission_repo=porth.permissions,
+                                 tenant_id=tid, source_key=t["admin_role_source_key"])
         handles.append(_handle(tid, "created", run_id))
 
     ledger.set_marker(porth.db, env_scope, ENTITY, dataset, run_id, handles)

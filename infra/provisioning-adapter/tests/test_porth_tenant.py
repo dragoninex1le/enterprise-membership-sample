@@ -22,6 +22,9 @@ SLOT = "porth-dau"
 TABLES = {"tenants": "porth-tenants-dev", "roles": "porth-roles-dev", "permissions": "porth-permissions-dev",
           "claims": "porth-claim-mapping-configs-dev", "users": "porth-users-dev", "org_units": "porth-org-units-dev",
           "sessions": "porth-sessions-dev"}
+#: Porth's audit trail: porth-common appends to it and nothing reads it back, so it is not one of the
+#: tables a slot is made of (teardown and reset leave it, as Porth's own deletes do).
+PORTH_AUDIT_LOG = "porth-audit-log-dev"
 AUDIT = "prawf-adapter-audit"  # prawf's own table - never one of Porth's
 SNAPSHOTS = "prawf-adapter-snapshots-123456789012"  # where a baseline too big for its item goes
 ORG_ID = "0b7d3e52-9a51-4bd4-8a1e-3f0c2d1e9a77"
@@ -77,6 +80,7 @@ def porth(monkeypatch):
                          KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
                          AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}])
         _table(ddb, AUDIT, "PK", "SK", [])
+        _table(ddb, PORTH_AUDIT_LOG, "pk", "sk", [("gsi1", "gsi1pk", "gsi1sk"), ("gsi2", "gsi2pk", "gsi2sk")])
         boto3.client("s3").create_bucket(Bucket=SNAPSHOTS)
         events = boto3.client("events")
         events.create_event_bus(Name="porth-events")
@@ -110,6 +114,7 @@ def porth(monkeypatch):
         monkeypatch.setenv("PORTH_USERS_TABLE", TABLES["users"])
         monkeypatch.setenv("PORTH_ORG_UNITS_TABLE", TABLES["org_units"])
         monkeypatch.setenv("PORTH_SESSIONS_TABLE", TABLES["sessions"])
+        monkeypatch.setenv("PORTH_AUDIT_LOG_TABLE", PORTH_AUDIT_LOG)
         monkeypatch.setenv("PRAWF_AUDIT_TABLE", AUDIT)
         monkeypatch.setenv("PRAWF_SNAPSHOT_BUCKET", SNAPSHOTS)
         monkeypatch.setenv("PORTH_STACK_NAME", "serverlessrepo-porth-components")
@@ -162,9 +167,9 @@ def repos():
     from porth_common.providers.aws.repositories.role_repo import RoleRepository
     from porth_common.providers.aws.repositories.permission_repo import PermissionRepository
     res = boto3.resource("dynamodb")
-    return (TenantRepository(TABLES["tenants"], res, environment=SLOT),
-            RoleRepository(TABLES["roles"], res, environment=SLOT),
-            PermissionRepository(TABLES["permissions"], res, environment=SLOT))
+    return (TenantRepository(TABLES["tenants"], lambda: res, environment=SLOT),
+            RoleRepository(TABLES["roles"], lambda: res, environment=SLOT),
+            PermissionRepository(TABLES["permissions"], lambda: res, environment=SLOT))
 
 
 # ---------------------------------------------------------------- seed
@@ -196,15 +201,33 @@ def test_porths_directory_scan_still_loads_and_sees_only_tenants(porth):
     assert {env for env, _ in loaded} == {SLOT}
 
 
-def test_seed_provisions_the_tenant_admin_role_as_porth_0_3_1_did(porth):
+def test_seed_provisions_the_tenant_admin_role_as_porth_does(porth):
     call("seed", {"dataset": ems_test()})
-    _, roles, permissions = repos()
+    _, roles, _ = repos()
     (role,) = roles.list_roles("ems-test")
     assert (role.name, role.source_key, role.is_system) == ("tenant-admin", "tenant-admin", True)
-    registered = {p.key for p in permissions.list_by_tenant("ems-test")}
-    assert registered == {"tenant.roles.create", "tenant.roles.update", "tenant.roles.delete"}
     granted = set(roles.get_role_permissions("ems-test", role.id))
-    assert granted == registered
+    # Porth's tenant namespace, from its static catalogue - never a platform permission.
+    assert granted == {"tenant.roles.create", "tenant.roles.update", "tenant.roles.delete",
+                       "tenant.claim_mappings.manage"}
+
+
+def test_porths_audit_trail_records_the_seed_in_the_slot(porth):
+    """porth-common 0.0.21 appends an audit entry per write; the adapter's go through its one-slot session."""
+    call("seed", {"dataset": ems_test()})
+    rows = boto3.resource("dynamodb").Table(PORTH_AUDIT_LOG).scan()["Items"]
+    assert {(r["entity_type"], r["action"]) for r in rows} >= {("Tenant", "created"), ("Role", "created")}
+    assert all(r["pk"].startswith(f"ENV#{SLOT}#") for r in rows), "every entry under the slot"
+    assert all(r.get("actor_id", "").startswith("prawf:") for r in rows if "actor_id" in r)
+
+
+def test_the_tenant_admin_can_manage_its_claim_mapping(porth):
+    """Porth 0.4.10 refuses a tenant's claim mapping to a caller without it (PORTH-637/638)."""
+    from porth_common.permissions.catalogue import CanManageClaimMapping
+    call("seed", {"dataset": ems_test()})
+    _, roles, _ = repos()
+    (role,) = roles.list_roles("ems-test")
+    assert CanManageClaimMapping in roles.get_role_permissions("ems-test", role.id)
 
 
 #: The manifest's IdP block, as Porth's TenantIdpConfig carries it - synthetic values.

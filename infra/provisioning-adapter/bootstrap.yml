@@ -95,6 +95,11 @@ Resources:
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-users-*
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-org-units-*
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-sessions-*
+          # Porth's audit trail: porth-common 0.0.21 appends an entry for every write. Append only.
+          - Sid: PorthAuditLogAppend
+            Effect: Allow
+            Action: dynamodb:PutItem
+            Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-audit-log-*
           # prawf's own bookkeeping: which run wrote what (the audit table, template.yml).
           - Sid: PrawfAdapterTables
             Effect: Allow

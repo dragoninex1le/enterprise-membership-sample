@@ -14,7 +14,8 @@ What it checks, each as its own line:
   * the tenant row exists as Porth 0.3.1 writes it - both indexes (gsi2 is what lists it), active,
     belonging to that organisation by id and name, with the dataset's display name, tier and IdP config
   * the tenant-admin role exists, answers to the dataset's claim value, is a system role, and holds
-    exactly the tenant permissions registered under the tenant
+    Porth's tenant permissions (TENANT_ADMIN_GRANTS) - tenant.claim_mappings.manage among them, without
+    which Porth 0.4.10 refuses the tenant its own claim mapping
   * the tenant's latest claim mapping exists, is compiled, and resolves roles - without it every
     sign-in gets no roles (PORTH-479)
   * the adapter's dataset markers - in prawf's own audit table - say which dataset version (and
@@ -132,7 +133,13 @@ def readable(row: dict) -> list[str]:
     return problems
 
 
-def check_admin_role(roles: list[dict], grants: list[str], registered: list[str], source_key: str | None) -> list[str]:
+#: Porth's own tenant-namespace permissions: what porth-common 0.0.21's `ensure_tenant_admin_role` grants
+#: every tenant admin from its static catalogue (an application's registered permissions come on top).
+#: Permissions are no longer registered under the tenant; the catalogue is the environment's.
+TENANT_ADMIN_GRANTS = ("tenant.claim_mappings.manage", "tenant.roles.create", "tenant.roles.delete", "tenant.roles.update")
+
+
+def check_admin_role(roles: list[dict], grants: list[str], source_key: str | None) -> list[str]:
     admins = [r for r in roles if r.get("name") == "tenant-admin"]
     if len(admins) != 1:
         return [f"expected one tenant-admin role, found {len(admins)}"]
@@ -142,10 +149,12 @@ def check_admin_role(roles: list[dict], grants: list[str], registered: list[str]
         problems.append(f"tenant-admin answers to {role.get('source_key')!r}, the dataset says {source_key!r}")
     if role.get("is_system") is not True:
         problems.append("tenant-admin is not a system role - the role API could delete or re-permission it")
-    if not registered:
-        problems.append("no tenant permissions are registered under the tenant")
-    if sorted(grants) != sorted(registered):
-        problems.append(f"tenant-admin holds {sorted(grants)}, but the tenant's permissions are {sorted(registered)}")
+    missing = sorted(set(TENANT_ADMIN_GRANTS) - set(grants))
+    if missing:
+        problems.append(f"tenant-admin holds {sorted(grants)}, missing Porth's tenant permissions {missing}")
+    platform = sorted(g for g in grants if g.startswith("platform."))
+    if platform:
+        problems.append(f"tenant-admin holds platform permissions {platform}")
     return problems
 
 
@@ -243,7 +252,7 @@ def main() -> int:
 
     ems = Ems(args.profile, args.region)
     tables = ems.outputs()
-    tenants, roles_t, perms_t = tables["TenantsTableName"], tables["RolesTableName"], tables["PermissionsTableName"]
+    tenants, roles_t = tables["TenantsTableName"], tables["RolesTableName"]
     claims_t = tables["ClaimMappingConfigsTableName"]
     s = args.slot
 
@@ -263,8 +272,6 @@ def main() -> int:
     roles = [r for r in ems.query(roles_t, "pk", f"ENV#{s}#TENANT#{args.tenant}") if str(r.get("sk", "")).startswith("ROLE#")]
     admin = next((r for r in roles if r.get("name") == "tenant-admin"), None)
     grants = [g["permission_key"] for g in ems.query(roles_t, "pk", f"ENV#{s}#TENANT#{args.tenant}#ROLE#{admin['id']}")] if admin else []
-    registered = [p["key"] for p in ems.query(perms_t, "gsi1pk", f"ENV#{s}#TENANT#{args.tenant}", index="gsi1")
-                  if p.get("app_namespace") != "porth-platform"]
     versions = ems.query(claims_t, "PK", f"ENV#{s}#TENANT#{args.tenant}")
     markers = {e: ems.get(AUDIT_TABLE, {"PK": f"ENV#{s}#ENTITY#{e}", "SK": "DATASET"})
                for e in ("porth-org", "porth-tenant", "porth-claim-mapping")}
@@ -275,7 +282,7 @@ def main() -> int:
         (f"organisation {args.org!r} in {s}", check_org(org, args.org, org_expected)),
         (f"tenant {args.tenant!r} as Porth 0.3.1 writes it", check_tenant(tenant, s, args.tenant, org, tenant_expected)),
         ("tenant-admin role, claim value and grants", check_admin_role(
-            roles, grants, registered, tenant_expected["admin_role_source_key"] if tenant_expected else None)),
+            roles, grants, tenant_expected["admin_role_source_key"] if tenant_expected else None)),
         ("the tenant's claim mapping, compiled and resolving roles", check_claim_mapping(versions, admin, claims_expected)),
         ("the adapter's dataset markers, in prawf's audit table", [f"no dataset marker for {e}" for e, m in markers.items() if not m]),
         ("Porth's tenants table holds no prawf rows", [f"{r['PK']} / {r['SK']}" for r in strays]),

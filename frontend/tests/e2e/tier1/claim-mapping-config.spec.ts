@@ -25,6 +25,22 @@ test.describe('Claim mapping, on a tenant page', () => {
     await expect(page.getByRole('link', { name: '← All tenants' })).toBeVisible()
   })
 
+  test('a refusal says it is a missing permission, not a failure to retry', async ({ page }) => {
+    await page.route(/\/claim-mapping-configs\/test-tenant\/(latest|versions)($|\?)/, (route) =>
+      route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ detail: 'forbidden' }) }))
+    await page.goto(PAGE)
+    await expect(page.getByText(/do not have permission to manage this tenant's claim mapping \(HTTP 403\), so the current config/)).toBeVisible()
+    await expect(page.getByText('Failed to load current config.')).toHaveCount(0)
+  })
+
+  test('a tenant with no claim mapping yet is not an error', async ({ page }) => {
+    await page.route(/\/claim-mapping-configs\/test-tenant\/latest($|\?)/, (route) =>
+      route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ detail: 'Claim mapping config not found' }) }))
+    await page.goto(PAGE)
+    await expect(page.locator('textarea').first()).toBeVisible()
+    await expect(page.getByText(/Failed to load/)).toHaveCount(0)
+  })
+
   test('reads the tenant from the platform list, not the public lookup', async ({ page }) => {
     // GET /tenants/{id} is Porth's pre-login route: no authorizer, so no slot, and no tier.
     let publicLookup = false

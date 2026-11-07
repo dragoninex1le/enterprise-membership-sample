@@ -110,9 +110,14 @@ def _boundary(boot):
 def test_the_boundary_names_porth_tables_and_never_the_apps(boot):
     tables = [r for st in _boundary(boot) if st["Effect"] == "Allow" for r in resources(st) if ":table/" in r]
     families = sorted(r.rsplit(":table/", 1)[1] for r in tables)
-    assert families == ["porth-claim-mapping-configs-*", "porth-org-units-*", "porth-permissions-*", "porth-roles-*",
-                        "porth-sessions-*", "porth-tenants-*", "porth-users-*", "prawf-adapter-*"]
+    assert families == ["porth-audit-log-*", "porth-claim-mapping-configs-*", "porth-org-units-*", "porth-permissions-*",
+                        "porth-roles-*", "porth-sessions-*", "porth-tenants-*", "porth-users-*", "prawf-adapter-*"]
     assert not any(f in ("porth-*", "prawf-*", "*") for f in families)
+
+
+def test_porths_audit_log_is_append_only_under_the_boundary(boot):
+    (st,) = [st for st in _boundary(boot) if any("porth-audit-log-" in r for r in resources(st))]
+    assert st["Sid"] == "PorthAuditLogAppend" and actions(st) == ["dynamodb:PutItem"]
 
 
 def test_the_pipeline_creates_prawfs_tables_and_never_porths(boot):
@@ -198,6 +203,7 @@ _RESOLVED = {"AWS::Region": "us-east-1", "AWS::AccountId": "195950944420", "Port
              "PorthPermissionsTable": "porth-permissions-dev", "PorthClaimMappingConfigsTable": "porth-claim-mapping-configs-dev",
              "PorthUsersTable": "porth-users-dev", "PorthOrgUnitsTable": "porth-org-units-dev",
              "PorthSessionsTable": "porth-sessions-dev",
+             "PorthAuditLogTable": "porth-audit-log-dev",
              "PorthEventBus": "porth-events-dev", "SnapshotBucket.Arn": "arn:aws:s3:::prawf-adapter-snapshots-195950944420"}
 
 

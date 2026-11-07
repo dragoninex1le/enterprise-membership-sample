@@ -79,6 +79,11 @@ apiClient.interceptors.response.use(
     // never surface "authorizer denied: invalid_session" to the user.
     void onAuthError(err).catch(() => undefined)
     const detail = err.response?.data?.detail ?? err.response?.data?.message ?? err.message
-    return Promise.reject(new Error(Array.isArray(detail) ? detail[0]?.msg : detail))
+    // The message is Porth's detail; the response stays on the error. A page tells "there is none yet"
+    // (404) and "you may not" (403) from a fault by its status, and dropping it made every one a fault.
+    return Promise.reject(Object.assign(new Error(Array.isArray(detail) ? detail[0]?.msg : detail), {
+      response: err.response,
+      status: err.response?.status as number | undefined,
+    }))
   },
 )

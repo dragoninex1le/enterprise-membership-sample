@@ -159,6 +159,11 @@ jobs:
             echo "$key=$value" >> "$GITHUB_OUTPUT"
             echo "$key: $value"
           done
+          # Porth's audit log has no stack output. Porth names it porth-audit-log-{Environment}, as it
+          # names porth-tenants-{Environment}, so the tenants table's suffix is its suffix too.
+          tenants=$(out TenantsTableName)
+          echo "AuditLogTableName=porth-audit-log-${tenants#porth-tenants-}" >> "$GITHUB_OUTPUT"
+          echo "AuditLogTableName: porth-audit-log-${tenants#porth-tenants-}"
 
       # prawf-adapter-boundary admits Porth's table FAMILIES by name (porth-tenants-* and so on). A
       # table named outside them would be silently denied on every call - so a name that does not fit
@@ -172,6 +177,7 @@ jobs:
           USERS: ${{ steps.porth.outputs.UsersTableName }}
           ORG_UNITS: ${{ steps.porth.outputs.OrgUnitsTableName }}
           SESSIONS: ${{ steps.porth.outputs.SessionsTableName }}
+          AUDIT_LOG: ${{ steps.porth.outputs.AuditLogTableName }}
           BUS: ${{ steps.porth.outputs.EventBusName }}
         run: |
           set -euo pipefail
@@ -184,6 +190,7 @@ jobs:
           check porth-users- "$USERS"
           check porth-org-units- "$ORG_UNITS"
           check porth-sessions- "$SESSIONS"
+          check porth-audit-log- "$AUDIT_LOG"
           check porth-events- "$BUS"
           exit $bad
 
@@ -292,6 +299,7 @@ jobs:
                 "PorthUsersTable=${{ steps.porth.outputs.UsersTableName }}" \
                 "PorthOrgUnitsTable=${{ steps.porth.outputs.OrgUnitsTableName }}" \
                 "PorthSessionsTable=${{ steps.porth.outputs.SessionsTableName }}" \
+                "PorthAuditLogTable=${{ steps.porth.outputs.AuditLogTableName }}" \
                 "PorthEventBus=${{ steps.porth.outputs.EventBusName }}" \
                 "AdapterVersion=${GITHUB_SHA::12}" \
                 "$@"

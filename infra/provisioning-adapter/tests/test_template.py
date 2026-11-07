@@ -105,6 +105,15 @@ def test_only_porths_tables_may_ever_be_scanned(tpl):
     assert len(deny["NotResource"]) == 7
 
 
+def test_porths_audit_log_is_append_only(tpl):
+    """porth-common 0.0.21 appends an entry for every write. The adapter may add one and do nothing else."""
+    grants = [(n, st) for n, st in _statements(tpl) if "${PorthAuditLogTable}" in str(st.get("Resource"))]
+    assert [(n, st["Sid"]) for n, st in grants] == [("DataRole", "AppendPorthAuditLog")]
+    assert _actions(grants[0][1]) == ["dynamodb:PutItem"] and grants[0][1]["Effect"] == "Allow"
+    env = tpl["Resources"]["AdapterFunction"]["Properties"]["Environment"]["Variables"]
+    assert env["PORTH_AUDIT_LOG_TABLE"] == {"Ref": "PorthAuditLogTable"}
+
+
 def test_snapshots_go_to_prawfs_own_private_encrypted_bucket(tpl):
     bucket = tpl["Resources"]["SnapshotBucket"]
     assert bucket["DeletionPolicy"] == "RetainExceptOnCreate" and bucket["UpdateReplacePolicy"] == "Retain"

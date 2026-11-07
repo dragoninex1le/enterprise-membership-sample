@@ -32,12 +32,12 @@ def seed_tenant_then_claims(run_id="run-seed-1"):
 
 def repo():
     from porth_common.providers.aws.repositories.claim_mapping_config_repo import ClaimMappingConfigRepository
-    return ClaimMappingConfigRepository(TABLES["claims"], boto3.resource("dynamodb"), environment=SLOT)
+    return ClaimMappingConfigRepository(TABLES["claims"], lambda: boto3.resource("dynamodb"), environment=SLOT)
 
 
 def admin_role_id():
     from porth_common.providers.aws.repositories.role_repo import RoleRepository
-    roles = RoleRepository(TABLES["roles"], boto3.resource("dynamodb"), environment=SLOT)
+    roles = RoleRepository(TABLES["roles"], lambda: boto3.resource("dynamodb"), environment=SLOT)
     return next(r.id for r in roles.list_roles("ems-test") if r.name == "tenant-admin")
 
 
