@@ -1,0 +1,6 @@
+{
+  "environments": {
+    "porth-sample": {"deploys_from": "main", "tenant_api_hosts": true},
+    "porth-dau": {"deploys_from": "other-branches", "tenant_api_hosts": true}
+  }
+}

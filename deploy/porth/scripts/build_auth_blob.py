@@ -17,19 +17,47 @@ Reads its inputs from the environment so the workflow stays declarative:
     EFF_FIXED_ENVIRONMENT   the ADR-Z8 slot
     PORTH_SESSIONS_TABLE
     PORTH_SESSION_KMS
+    EXISTING_AUTH_BLOB      the live /porth/auth value, if any (JSON)
 
 Writes the blob as JSON on stdout. Anything diagnostic goes to stderr, so the
 caller can capture stdout directly.
 
-What it deliberately does NOT write: root_url, environments and tenant_origins.
+What it deliberately does NOT decide: root_url, environments and tenant_origins.
 Those are policy.MANAGED_KEYS, owned by `porth-install auth-config`, which runs
-after this. Writing them here is what PORTH-587/588 removed.
+after this. Deciding them here is what PORTH-587/588 removed.
+
+But it CARRIES them over from the live blob (PORTH-656). This step overwrites
+/porth/auth, and auth-config writes the managed keys back about 12 seconds
+later. In between the live blob had none of them, and Porth's Lambdas re-read
+it every 60 seconds: one that re-read in that gap stopped recognising tenant
+API hosts for up to a minute (logins unscoped, API hosts 404, CORS "*"), on
+every install. Carrying the live values keeps them present throughout;
+auth-config still conforms them right after.
 """
 from __future__ import annotations
 
 import json
 import os
 import sys
+
+
+#: policy.MANAGED_KEYS — carried over, never decided, here.
+MANAGED_KEYS = ("root_url", "environments", "tenant_origins")
+
+
+def carried_managed_keys(existing_raw: str) -> dict:
+    """The managed keys the live blob already has, unchanged. Empty when there
+    is no live blob or it is unreadable — a first install has nothing to carry."""
+    if not existing_raw.strip():
+        return {}
+    try:
+        existing = json.loads(existing_raw)
+    except json.JSONDecodeError:
+        print("::warning::the live /porth/auth is not valid JSON — carrying nothing over", file=sys.stderr)
+        return {}
+    if not isinstance(existing, dict):
+        return {}
+    return {k: existing[k] for k in MANAGED_KEYS if existing.get(k) not in (None, "")}
 
 
 def build(manifest: dict, env: dict) -> dict:
@@ -68,6 +96,7 @@ def build(manifest: dict, env: dict) -> dict:
     if idp.get("end_session_endpoint"):
         blob["end_session_endpoint"] = idp["end_session_endpoint"]
 
+    blob.update(carried_managed_keys(env.get("EXISTING_AUTH_BLOB", "")))
     return blob
 
 

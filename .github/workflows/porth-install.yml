@@ -77,7 +77,14 @@ on:
         # (backfilled from SAR so the switch-over can be tested at the same code).
         # PORTH-656: 0.4.3 serves tenant API hosts ({tenant}.api.{slot}.{zone}) —
         # host-bound credentials, the `porth` mapping key and per-host CORS.
-        default: '0.4.3'
+        # PORTH-656: 0.4.7 adds the browser surface (BrowserHttpApiId and the
+        # browser authorizer), which deploy-sample-app.yml moves tenant-API-host
+        # slots onto; 0.4.5 clears the drifted authorizer; 0.4.6 reloads the
+        # tenant directory on a login-org miss.
+        # 0.4.8 names the two Porth APIs (porth-dev-api / porth-dev-browser-api).
+        # 0.4.9 — PORTH-655 bugs (audit slot, org routes platform-only,
+        # legacy-read refusal, connector claim-mapping lineage).
+        default: '0.4.9'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
@@ -140,10 +147,13 @@ env:
   # Pinned deliberately; see the install step for why a floating version
   # silently resolved backwards.
   PORTH_INSTALL_VERSION: '0.3.0'
+  # PORTH-656: `porth-install check` arrived in 0.4.3. Its own pin, so the
+  # install steps above keep the version they were proven with.
+  PORTH_INSTALL_CHECK_VERSION: '0.4.4'
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.3' }}
+    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.9' }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
@@ -171,7 +181,7 @@ jobs:
       # also works when triggered by the push shim (inputs are empty on push).
       - name: Resolve effective inputs
         run: |
-          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.3' }}" >> "$GITHUB_ENV"
+          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.9' }}" >> "$GITHUB_ENV"
           echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
           # The configured mode, overridable for one run. Empty IS the mode
@@ -209,11 +219,6 @@ jobs:
           DNS_ZONE_VAR: ${{ vars.DNS_ZONE }}
           SPA_ORIGINS_VAR: ${{ vars.PORTH_SPA_ORIGINS }}
           ROOT_URL_VAR: ${{ vars.PORTH_ROOT_URL }}
-          # The ADR-Z8 environments this install serves (PORTH-627). Defaulted
-          # rather than required, so the environments EMS actually deploys are
-          # written down in the repo instead of in repository settings; the
-          # variable still overrides.
-          ENVIRONMENTS_VAR: ${{ vars.PORTH_AUTH_ENVIRONMENTS || 'porth-sample,porth-dau' }}
         run: |
           set -euo pipefail
           # Custom domain: dispatch input wins, then the canonical var, then the legacy name.
@@ -282,7 +287,14 @@ jobs:
             echo "::warning::Tenant subdomains will be refused with 'return_to not allowed' unless each is in PORTH_SPA_ORIGINS."
           fi
           echo "PORTH_ROOT_URL_RESOLVED=$ROOT_URL" >> "$GITHUB_ENV"
-          echo "PORTH_AUTH_ENVIRONMENTS_RAW=${ENVIRONMENTS_VAR:-}" >> "$GITHUB_ENV"
+          # PORTH-656: the ADR-Z8 environments this install serves, declared once
+          # in deploy/porth/environments.json and read from main. No repository
+          # variable and no default here: one list, which `porth-install check`
+          # verifies the install against at the end of this run.
+          git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main
+          ENVIRONMENTS=$(python3 scripts/environments.py list)
+          echo "Declared environments: ${ENVIRONMENTS}"
+          echo "PORTH_AUTH_ENVIRONMENTS_RAW=${ENVIRONMENTS}" >> "$GITHUB_ENV"
 
       - name: Pre-flight stack-state check
         id: preflight
@@ -627,7 +639,7 @@ jobs:
           if [ -z "${PORTH_AUTH_ENVIRONMENTS_RAW:-}" ]; then
             echo "❌ No environments configured, so the platform tenant would be"
             echo "❌ written nowhere and no operator could sign in to any"
-            echo "❌ environment. Set PORTH_AUTH_ENVIRONMENTS or take the default."
+            echo "❌ environment. Declare them in deploy/porth/environments.json."
             exit 1
           fi
           ENV_SCOPES=$(printf '%s' "$PORTH_AUTH_ENVIRONMENTS_RAW" \
@@ -740,9 +752,15 @@ jobs:
           # containing JSON. An apostrophe in one of its comments ended the shell
           # string and broke the deploy (PORTH-589); the error read as a bash
           # syntax error pointing at a parenthesis.
+          # PORTH-656: the live blob, so the builder can carry the managed keys
+          # (root_url, environments, tenant_origins) over instead of dropping
+          # them for the seconds until auth-config writes them back.
+          EXISTING_AUTH_BLOB=$(aws ssm get-parameter --name /porth/auth \
+            --query Parameter.Value --output text --region "$AWS_REGION" 2>/dev/null || echo "")
           BLOB=$(
             MANIFEST="$MANIFEST" \
             EFF_FIXED_ENVIRONMENT="$EFF_FIXED_ENV" \
+            EXISTING_AUTH_BLOB="$EXISTING_AUTH_BLOB" \
             python3 deploy/porth/scripts/build_auth_blob.py
           )
 
@@ -750,7 +768,7 @@ jobs:
           aws ssm put-parameter --name /porth/auth --type String --overwrite \
             --value "$BLOB" --region "$AWS_REGION"
           echo "✅ Seeded /porth/auth (issuer $(echo "$BLOB" | python3 -c 'import json,sys; print(json.load(sys.stdin)["issuer"])'))"
-          echo "   (origin policy keys are written by the next step, not this one)"
+          echo "   (origin policy keys carried over from the live blob; the next step conforms them)"
 
       # ── Conform the origin policy — PORTH-588 ───────────────────────────────
       # root_url / environments / tenant_origins are policy.MANAGED_KEYS, owned by
@@ -1110,3 +1128,37 @@ jobs:
       permissions_table: ${{ needs.install-or-upgrade.outputs.permissions_table }}
       roles_table: ${{ needs.install-or-upgrade.outputs.roles_table }}
       claim_mapping_table: ${{ needs.install-or-upgrade.outputs.claim_mapping_table }}
+
+  # ── PORTH-656: is the install complete for every declared environment? ────
+  # Read-only, and last: it checks what the steps above wrote, including each
+  # environment's platform tenant. ERROR (configuration) fails the run; WARN
+  # (one tenant's data — no org id, an org not named for its tenant) is named
+  # and does not. The Auth0 checks run when AUTH0_MGMT_CLIENT_ID and
+  # AUTH0_MGMT_CLIENT_SECRET are set on the porth-install environment (a
+  # Management API app with read:clients and read:organizations); without
+  # them the output says they were skipped.
+  check:
+    name: Check the install against the declared environments
+    needs: [install-or-upgrade, bootstrap]
+    if: ${{ !cancelled() && needs.install-or-upgrade.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: porth-install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: porth-install check
+        env:
+          CA_DOMAIN: porth
+          CA_REPO: porth-py
+          CA_OWNER: ${{ vars.PORTH_CODEARTIFACT_OWNER || '084847995635' }}
+          AUTH0_MGMT_CLIENT_ID: ${{ secrets.AUTH0_MGMT_CLIENT_ID }}
+          AUTH0_MGMT_CLIENT_SECRET: ${{ secrets.AUTH0_MGMT_CLIENT_SECRET }}
+          PORTH_ENV_NAME: ${{ inputs.environment_name || 'dev' }}
+        run: scripts/porth-install-check.sh

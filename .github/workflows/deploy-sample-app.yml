@@ -16,6 +16,10 @@ on:
       - '.github/workflows/deploy-provisioning-adapter.yml'
       - 'infra/qa-tools/**'
       - '.github/workflows/deploy-qa-tools.yml'
+      # The Porth install has its own pipeline (porth-install.yml); its blob
+      # builder is used by nothing else.
+      - '.github/workflows/porth-install.yml'
+      - 'deploy/porth/scripts/build_auth_blob.py'
   workflow_dispatch:
     inputs:
       # PORTH-656. Empty keeps the ref rule (main → porth-sample, any other
@@ -68,12 +72,11 @@ env:
   #
   # `ENVIRONMENT: dev` used to sit here and was read by nothing.
   ENVIRONMENT_SLOT: ${{ inputs.slot || (github.ref == 'refs/heads/main' && 'porth-sample' || 'porth-dau') }}
-  # PORTH-656 — environments moving to the tenant-named-host shape (INSTALL.md
-  # §4a): the UI on CloudFront only, the API on {tenant}.api.{slot}.{zone}.
-  # Space-separated. A listed environment switches over on the first deploy
-  # that finds its tenant-host certificate (porth-install-once); until then it
-  # stays on the shared-host shape and says so.
-  TENANT_API_HOST_SLOTS: porth-sample porth-dau
+  # PORTH-656: WHICH environments exist, and whether each serves tenant API
+  # hosts, is declared once in deploy/porth/environments.json and read from
+  # main (scripts/environments.py). ENVIRONMENT_SLOT above stays an expression
+  # only because the concurrency group needs it before any step runs; the first
+  # step checks it against the declared file and fails if they disagree.
   NODE_VERSION: '20'
 
 jobs:
@@ -123,12 +126,12 @@ jobs:
             echo "DNS_ROOT=${ROOT}."
           } >> "$GITHUB_ENV"
 
-          # PORTH-656: is this slot on the tenant-named-host shape?
-          TENANT_API_HOSTS=false
-          for s in ${{ env.TENANT_API_HOST_SLOTS }}; do
-            [ "$s" = "$SLOT" ] && TENANT_API_HOSTS=true
-          done
-          echo "TENANT_API_HOSTS=${TENANT_API_HOSTS}" >> "$GITHUB_ENV"
+          # PORTH-656: the declared environments, read from main — a branch
+          # deploys its code, never its own idea of the environments.
+          git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main
+          python3 scripts/environments.py resolve --ref "$GITHUB_REF" \
+            --slot "${{ inputs.slot }}" --expected "$SLOT" | tee -a "$GITHUB_ENV"
+          TENANT_API_HOSTS=$(grep '^TENANT_API_HOSTS=' "$GITHUB_ENV" | tail -1 | cut -d= -f2)
           echo "tenant api   : ${TENANT_API_HOSTS} (*.api.${SLOT}.${ROOT}, api.${SLOT}.${ROOT})"
 
           echo "environment  : ${SLOT}"
@@ -327,6 +330,29 @@ jobs:
           fi
           echo "PORTH_AUTHORIZER_ROLE_ARN=$PORTH_AUTHORIZER_ROLE_ARN" >> $GITHUB_ENV
           echo "✅ Resolved PORTH_AUTHORIZER_ROLE_ARN=$PORTH_AUTHORIZER_ROLE_ARN"
+
+          # PORTH-656 — the browser surface (Porth 0.4.7+). A tenant-API-host slot
+          # serves only the SPA's cookie sessions, so its `porth` mapping, its own
+          # API's authorizer and the role that authorizer assumes all move to the
+          # browser surface. One authorizer per surface: bearer callers stay on
+          # Porth's HttpApiId, and this app has none.
+          if [ "${TENANT_API_HOSTS}" = "true" ]; then
+            BROWSER_API_ID=$(get_output BrowserHttpApiId)
+            BROWSER_AUTHORIZER_ARN=$(get_output BrowserAuthorizerFunctionArn)
+            BROWSER_AUTHORIZER_ROLE_ARN=$(get_output BrowserAuthorizerFunctionRoleArn)
+            if [ -z "$BROWSER_API_ID" ] || [ "$BROWSER_API_ID" == "None" ] \
+               || [ -z "$BROWSER_AUTHORIZER_ARN" ] || [ "$BROWSER_AUTHORIZER_ARN" == "None" ] \
+               || [ -z "$BROWSER_AUTHORIZER_ROLE_ARN" ] || [ "$BROWSER_AUTHORIZER_ROLE_ARN" == "None" ]; then
+              echo "::warning::The Porth install has no browser surface (needs Porth 0.4.7+). This slot stays on the shared authorizer until porth-install.yml upgrades it."
+            else
+              {
+                echo "PORTH_HTTP_API_ID=$BROWSER_API_ID"
+                echo "PORTH_AUTHORIZER_ARN=$BROWSER_AUTHORIZER_ARN"
+                echo "PORTH_AUTHORIZER_ROLE_ARN=$BROWSER_AUTHORIZER_ROLE_ARN"
+              } >> "$GITHUB_ENV"
+              echo "✅ Browser surface: api=$BROWSER_API_ID authorizer=$BROWSER_AUTHORIZER_ARN"
+            fi
+          fi
 
           # PORTH-587 — what ffug needs from the install, read from the install
           # rather than assumed here.
@@ -835,6 +861,12 @@ jobs:
         # resolve nowhere.
         run: |
           set -euo pipefail
+          # PORTH-656: a tenant-API-host slot has no sample-api.{slot} domain
+          # any more, so its alias is removed instead of upserted.
+          if [ "${TENANT_API_HOSTS}" = "true" ]; then
+            scripts/remove-sample-api-dns.sh "${{ env.SAMPLE_API_DOMAIN }}" "${{ env.DNS_ROOT }}"
+            exit 0
+          fi
           get_output() {
             aws cloudformation describe-stacks \
               --stack-name ${{ env.SAM_STACK_NAME }} \

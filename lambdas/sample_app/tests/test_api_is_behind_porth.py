@@ -127,9 +127,25 @@ def test_sample_calls_are_same_origin(resources):
 def test_the_sample_behaviour_points_at_the_sample_api(resources):
     cf = resources["CloudFrontDistribution"]["Properties"]["DistributionConfig"]
     behaviour = _behaviours(resources)["/sample/*"]
-    origins = {o["Id"] for o in cf["Origins"]}
+    origins = cf["Origins"]
+    if isinstance(origins, dict) and "If" in origins:
+        # PORTH-656: `!If [IsTenantApiHosts, [S3 only], [S3 + API origins]]` —
+        # the behaviours live on the shared-host branch, and so must their origins.
+        origins = origins["If"][2]
+    ids = {o["Id"] for o in origins}
 
-    assert behaviour["TargetOriginId"] in origins, "behaviour targets a missing origin"
+    assert behaviour["TargetOriginId"] in ids, "behaviour targets a missing origin"
+
+
+def test_a_tenant_api_host_slot_has_the_ui_origin_only(resources):
+    """PORTH-656: no API behaviours there, so no API origins either."""
+    cf = resources["CloudFrontDistribution"]["Properties"]["DistributionConfig"]
+    assert [o["Id"] for o in cf["Origins"]["If"][1]] == ["S3Origin"]
+
+
+def test_the_sample_api_domain_exists_only_on_shared_host_slots(resources):
+    for name in ("SampleAppApiDomain", "SampleAppApiMapping"):
+        assert resources[name].get("Condition") == "IsSharedHost", name
 
 
 def test_sample_responses_are_never_cached(resources):
