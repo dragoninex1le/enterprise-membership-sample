@@ -1,11 +1,17 @@
 """`porth-role` - seed (PRF-18) and teardown; reset is reset.py's.
 
-**What a seeded role is.** An arranged role - one a test needs that the tenant's seed does not make,
-such as a role with no grants for a denial test (`porth-role:no-access`). Exactly what Porth 0.3.1
-writes for `POST /roles/`: `RoleRepository.create_role` with `is_system=False`, which is never taken
-from the caller (PORTH-597) - so a seeded role is always one reset may remove, and never one that
-locks a tenant out of its own administration. No grants are written: a role is arranged with the
-permissions a test gives it, and the denial test gives it none.
+**What a seeded role is.** A role the tenant's seed does not make: one of the application's roles
+(`viewer`, `controller`, ...) with the permissions it holds, or an arranged one a test needs, such as
+a role with no grants for a denial test (`porth-role:no-access`). Exactly what Porth writes for
+`POST /roles/` and `PUT /roles/{id}/permissions`: `RoleRepository.create_role` with `is_system=False`,
+which is never taken from the caller (PORTH-597) - so a seeded role is always one reset may remove,
+and never one that locks a tenant out of its own administration - then `set_role_permissions`.
+
+**Grants link to what the install has** (Richard, 2026-11-07). The application's permissions are
+bootstrapped - registered by its own deploy into the environment's catalogue - and a seeded role
+only links to them. So every key in `spec.permissions` must already be in the slot: Porth's own
+tenant permissions, or a key the catalogue holds. A key the slot does not have is refused before
+anything is written; a platform permission is never granted to a tenant's role.
 
 The tenant must exist (seed `porth-tenant` first), and the role's name and claim value must be free in
 it - Porth refuses a duplicate (PORTH-226), and so does this.
@@ -27,15 +33,39 @@ def _role(resource: object) -> dict:
         raise ContractError("unsupported", "not_implemented", f"resource type {kind!r} is not implemented for {ENTITY}")
     name = resource.get("alias")
     spec = resource.get("spec") or {}
-    extra = sorted(set(spec) - {"tenant", "source_key", "description"})
+    extra = sorted(set(spec) - {"tenant", "source_key", "description", "permissions"})
     if extra:
-        raise ContractError("refused", "dataset_conflict", f"role {name!r}: unknown fields {extra} - a seeded role has no grants")
+        raise ContractError("refused", "dataset_conflict", f"role {name!r}: unknown fields {extra}")
+    permissions = spec.get("permissions", [])
+    if not isinstance(permissions, list) or not all(isinstance(k, str) and k.strip() for k in permissions):
+        raise ContractError("refused", "dataset_conflict", f"role {name!r}: spec.permissions must be a list of permission keys")
+    if len(set(permissions)) != len(permissions):
+        raise ContractError("refused", "dataset_conflict", f"role {name!r}: spec.permissions names a key twice")
     for field, value in (("alias (the role's name)", name), ("spec.tenant", spec.get("tenant")),
                          ("spec.source_key", spec.get("source_key"))):
         if not isinstance(value, str) or not value.strip():
             raise ContractError("refused", "dataset_conflict", f"role {name!r} has no {field}")
     return {"name": name, "tenant_id": spec["tenant"], "source_key": spec["source_key"],
-            "description": spec.get("description") or ""}
+            "description": spec.get("description") or "", "permissions": sorted(permissions)}
+
+
+def _grantable(porth: Porth) -> tuple[set[str], set[str]]:
+    """(what a tenant's role may link to in this slot, the platform permissions it never may).
+
+    Porth's own tenant permissions are known statically (porth-common's catalogue), as
+    `ensure_tenant_admin_role` treats them; the rest is what the environment's catalogue holds - the
+    application's permissions, registered by its deploy and captured by bootstrap.
+    """
+    from porth_common.permissions.catalogue import CATALOGUE, PLATFORM_ADMIN_ROLE, PLATFORM_NAMESPACE
+
+    platform = {s.id for s in CATALOGUE if s.namespace == PLATFORM_NAMESPACE}
+    grantable = {s.id for s in CATALOGUE if s.namespace != PLATFORM_NAMESPACE}
+    for p in porth.permissions.list_all():
+        if p.app_namespace == PLATFORM_NAMESPACE or p.admin_role == PLATFORM_ADMIN_ROLE:
+            platform.add(p.key)
+        else:
+            grantable.add(p.key)
+    return grantable - platform, platform
 
 
 def _handle(r: dict, role_id: str | None, outcome: str, run_id: str) -> dict:
@@ -74,6 +104,21 @@ def seed(env_scope: str, run_id: str, dry_run: bool, payload: object) -> tuple[l
                 f"tenant {r['tenant_id']!r} already has a role named {r['name']!r} or answering to "
                 f"{r['source_key']!r}, not written by this dataset; it is never taken over",
             )
+    grantable, platform = _grantable(porth)
+    for r in wanted:
+        refused = [k for k in r["permissions"] if k in platform]
+        if refused:
+            raise ContractError(
+                "refused", "dataset_conflict",
+                f"role {r['name']!r} would hold platform permission(s) {refused}; a tenant's role never does",
+            )
+        missing = [k for k in r["permissions"] if k not in grantable]
+        if missing:
+            raise ContractError(
+                "refused", "dataset_conflict",
+                f"role {r['name']!r} links to permission(s) {missing}, which {env_scope} does not have; "
+                "an application's permissions are bootstrapped by its deploy, never seeded",
+            )
     if dry_run:
         return [_handle(r, None, "created", run_id) for r in wanted], [f"dry run: {label} would be applied; nothing written"]
 
@@ -83,6 +128,8 @@ def seed(env_scope: str, run_id: str, dry_run: bool, payload: object) -> tuple[l
         ledger.record(porth.db, env_scope, run_id, ENTITY, {"kind": "role", "tenant_id": r["tenant_id"], "name": r["name"]})
         role = porth.roles.create_role(tenant_id=r["tenant_id"], name=r["name"], description=r["description"],
                                        is_system=False, source_key=r["source_key"])
+        if r["permissions"]:
+            porth.roles.set_role_permissions(role.id, r["permissions"], r["tenant_id"])
         handles.append(_handle(r, role.id, "created", run_id))
 
     ledger.set_marker(porth.db, env_scope, ENTITY, dataset, run_id, handles)

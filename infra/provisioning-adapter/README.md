@@ -107,11 +107,19 @@ identity provider.
 
 ## `porth-role`: seed and teardown
 
-An arranged role - one a test needs that the tenant's seed does not make, such as `no-access` for a
-denial test (PRF-18). What Porth 0.3.1 writes for `POST /roles/`: `create_role` with `is_system=False`,
-never taken from the caller (PORTH-597), so every seeded role is one reset may remove. No grants:
-`spec` takes `tenant`, `source_key` and `description` only. The tenant must exist, and the name and
-claim value must be free in it (PORTH-226).
+A role the tenant's seed does not make: one of the application's roles (`viewer`, `ar-clerk`,
+`ap-clerk`, `controller`) with the permissions it holds, or an arranged one a test needs, such as
+`no-access` for a denial test (PRF-18). What Porth writes for `POST /roles/` then
+`PUT /roles/{id}/permissions`: `create_role` with `is_system=False`, never taken from the caller
+(PORTH-597), so every seeded role is one reset may remove, then `set_role_permissions`. `spec` takes
+`tenant`, `source_key`, `description` and `permissions`. The tenant must exist, and the name and claim
+value must be free in it (PORTH-226).
+
+**A grant links to what the install has** (Richard, 2026-11-07). The application's permissions are
+bootstrapped - its deploy registers them in the environment's catalogue - never seeded. So every key
+in `permissions` must already be in the slot: one of Porth's tenant permissions, or one the catalogue
+holds. Any other key is refused before anything is written, and a platform permission is never granted
+to a tenant's role. Teardown removes the role and its grants (`delete_role` cascades).
 
 ## `porth-claim-mapping`: seed and teardown
 
@@ -129,9 +137,9 @@ pin moves when a Porth change affects what the seed writes - not on every porth-
 | `porth` | yes | every row under `ENV#{s}#` in tenants, roles, permissions, claim-mapping-configs, users and org-units; `baseline_kind: snapshot` | `bootstrap`, `reset`, `prune` — PRF-20, implemented (contract 1.1) | `seed` (an override; not built yet); `teardown` (nothing here is run-created) |
 | `porth-tenant` | yes | tenants `ENV#{s}#TENANT#{tid}` / `METADATA`, its IdP config (`idp_config_override`) included; its roles, grants and permissions | `seed` PRF-12, `teardown` PRF-15 — implemented | |
 | `porth-claim-mapping` | yes | claim-mapping-configs `ENV#{s}#TENANT#{tid}` / `VERSION#{n:06d}` | `seed` PRF-13, `teardown` — implemented | |
-| `porth-app-permission` | yes | permissions `ENV#{s}#TENANT#{tid}#NS#{app}` / `PERM#{key}` | `seed`, `absent` | |
-| `porth-role-grant` | yes | roles `ENV#{s}#TENANT#{tid}#ROLE#{uuid}` / `PERM#{key}` — unioned, never replaced (PORTH-609) | `ensure`, `absent` | |
-| `porth-role` | yes | roles `ENV#{s}#TENANT#{tid}` / `ROLE#{uuid}`, not a system role | `seed` PRF-18, `teardown` — implemented | |
+| `porth-app-permission` | yes | permissions `ENV#{s}#NS#{app}` / `PERM#{key}` — bootstrapped: the app's deploy registers them (Richard, 2026-11-07) | `seed`, `absent` | |
+| `porth-role-grant` | yes | roles `ENV#{s}#TENANT#{tid}#ROLE#{uuid}` / `PERM#{key}` on a role the seed does not own — unioned, never replaced (PORTH-609) | `ensure`, `absent` | |
+| `porth-role` | yes | roles `ENV#{s}#TENANT#{tid}` / `ROLE#{uuid}`, not a system role, and its grants | `seed` PRF-18, `teardown` — implemented | |
 | `porth-session` | yes | sessions: the whole table, every environment's | `reset` — implemented | |
 | `porth-idp` | no | Auth0 users, Organizations, role assignments | — | every verb: needs the provider's Management API, which is not in this account |
 
