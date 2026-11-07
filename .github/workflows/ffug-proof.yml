@@ -172,17 +172,15 @@ jobs:
         #
         # An evidence workflow that can report green while proving nothing is
         # worse than no evidence workflow, because someone will cite it.
-        env:
-          # The other deployed environment, for stage C. Derived from the
-          # environments this install serves, minus the one being proved — so a
-          # third environment needs no change here.
-          #
-          # Empty skips stage C rather than failing it: on a single-environment
-          # install there is no real second environment to be refused, and a
-          # probe aimed at an invented one proves nothing (PORTH-598).
         run: |
           set -o pipefail
           # PORTH-656: the declared environments, from main.
+          #
+          # The other deployed environment, for stage C, is these minus the one
+          # being proved - so a third environment needs no change here. Empty
+          # skips stage C rather than failing it: on a single-environment
+          # install there is no real second environment to be refused, and a
+          # probe aimed at an invented one proves nothing (PORTH-598).
           git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main
           PORTH_AUTH_ENVIRONMENTS=$(python3 scripts/environments.py list)
           THIS="${ENVIRONMENT_SLOT:-porth-sample}"
