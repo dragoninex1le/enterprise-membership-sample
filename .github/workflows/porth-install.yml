@@ -84,7 +84,9 @@ on:
         # 0.4.8 names the two Porth APIs (porth-dev-api / porth-dev-browser-api).
         # 0.4.9 — PORTH-655 bugs (audit slot, org routes platform-only,
         # legacy-read refusal, connector claim-mapping lineage).
-        default: '0.4.9'
+        # 0.4.11 — PORTH-656 the MCP door on tenant API hosts; installed by
+        # run 42410002955.
+        default: '0.4.11'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
@@ -125,6 +127,15 @@ on:
         type: choice
         options: [INFO, DEBUG, WARNING, ERROR, CRITICAL]
         default: 'INFO'
+      migrations_dry_run:
+        # Plan the data migrations and stop before writing. For a migration
+        # that has never run on this install (0.4.1's catalogue and connector
+        # moves, first carried by porth-install 0.4.5), so the plan can be read
+        # before anything moves. Every other step runs as normal.
+        description: 'Plan the data migrations (migrate-keys --dry-run) and skip applying them.'
+        required: false
+        type: boolean
+        default: false
       allow_stack_delete:
         description: 'Permit deleting a failed stack before recreating it. Retained tables/KMS keys SURVIVE and will block the recreate — read the pre-flight error first.'
         required: false
@@ -146,14 +157,21 @@ env:
   PORTH_RELEASE_BUCKET: porth-releases-084847995635
   # Pinned deliberately; see the install step for why a floating version
   # silently resolved backwards.
-  PORTH_INSTALL_VERSION: '0.3.0'
+  #
+  # 0.4.5: migrate-keys carries 0.4.1's environment-catalogue and
+  # connector-enablement migrations (they need --permissions-table and
+  # --claim-mapping-configs-table), and `delegated-config put` /
+  # `delegated-mapping put` exist. Requires porth-common>=0.0.22.
+  PORTH_INSTALL_VERSION: '0.4.5'
   # PORTH-656: `porth-install check` arrived in 0.4.3. Its own pin, so the
   # install steps above keep the version they were proven with.
-  PORTH_INSTALL_CHECK_VERSION: '0.4.4'
+  # 0.4.5 also checks the MCP callbacks (/porth/oauth/callback) on the Auth0
+  # application; it ERRORs until those callbacks are registered.
+  PORTH_INSTALL_CHECK_VERSION: '0.4.5'
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.9' }}
+    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.11' }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
@@ -181,7 +199,7 @@ jobs:
       # also works when triggered by the push shim (inputs are empty on push).
       - name: Resolve effective inputs
         run: |
-          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.9' }}" >> "$GITHUB_ENV"
+          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.11' }}" >> "$GITHUB_ENV"
           echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
           # The configured mode, overridable for one run. Empty IS the mode
@@ -872,6 +890,7 @@ jobs:
           # change-set parameters); inventing a second source for the same value
           # is how the table-name suffix drifts.
           ENV_NAME: ${{ env.EFF_ENV_NAME }}
+          MIGRATIONS_DRY_RUN: ${{ inputs.migrations_dry_run }}
         run: |
           set -euo pipefail
 
@@ -906,17 +925,30 @@ jobs:
           # No --installed-version: omitted means "unknown", which considers
           # every migration up to the target. Convergence makes that affordable,
           # and an install nobody can date is the one most likely to be behind.
+          #
+          # Every table a selected migration rewrites is passed: 0.2.5 moves
+          # roles and users, 0.4.1 moves permissions (one catalogue per
+          # environment) and claim-mapping-configs (one delegated-connector row
+          # per connector). A missing table stops the run before any write.
+          TABLES=(
+            --roles-table "porth-roles-${ENV_NAME}"
+            --users-table "porth-users-${ENV_NAME}"
+            --permissions-table "porth-permissions-${ENV_NAME}"
+            --claim-mapping-configs-table "porth-claim-mapping-configs-${ENV_NAME}"
+          )
+
           echo "── plan ──"
-          porth-install migrate-keys \
-            --roles-table "porth-roles-${ENV_NAME}" \
-            --users-table "porth-users-${ENV_NAME}" \
+          porth-install migrate-keys "${TABLES[@]}" \
             --target-version "${EFF_PORTH_VERSION}" \
             --dry-run
 
+          if [ "${MIGRATIONS_DRY_RUN:-false}" = "true" ]; then
+            echo "::notice::migrations_dry_run=true — plan only, nothing applied."
+            exit 0
+          fi
+
           echo "── apply ──"
-          porth-install migrate-keys \
-            --roles-table "porth-roles-${ENV_NAME}" \
-            --users-table "porth-users-${ENV_NAME}" \
+          porth-install migrate-keys "${TABLES[@]}" \
             --target-version "${EFF_PORTH_VERSION}"
 
       # ── Seed SSM auth-policy + session-policy templates ─────────────────────
