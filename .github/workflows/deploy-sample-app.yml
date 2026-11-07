@@ -337,6 +337,17 @@ jobs:
           # browser surface. One authorizer per surface: bearer callers stay on
           # Porth's HttpApiId, and this app has none.
           if [ "${TENANT_API_HOSTS}" = "true" ]; then
+            # The BEARER surface, kept before the three values above are
+            # replaced by the browser surface's. The app's own bearer API (/mcp,
+            # and the connector's prth_ callers) is guarded by Porth's bearer
+            # authorizer, and `.well-known` maps to Porth's bearer API, so an MCP
+            # client can discover the door (Porth INSTALL §4a, "The MCP door").
+            {
+              echo "PORTH_BEARER_HTTP_API_ID=$(get_output HttpApiId)"
+              echo "PORTH_BEARER_AUTHORIZER_ARN=$PORTH_AUTHORIZER_ARN"
+              echo "PORTH_BEARER_AUTHORIZER_ROLE_ARN=$PORTH_AUTHORIZER_ROLE_ARN"
+            } >> "$GITHUB_ENV"
+            echo "✅ Bearer surface: api=$(get_output HttpApiId) authorizer=$PORTH_AUTHORIZER_ARN"
             BROWSER_API_ID=$(get_output BrowserHttpApiId)
             BROWSER_AUTHORIZER_ARN=$(get_output BrowserAuthorizerFunctionArn)
             BROWSER_AUTHORIZER_ROLE_ARN=$(get_output BrowserAuthorizerFunctionRoleArn)
@@ -793,6 +804,13 @@ jobs:
           OPTIONAL+=("TenantApiHosts=${TENANT_API_HOSTS}")
           if [ -n "${PORTH_HTTP_API_ID:-}" ]; then
             OPTIONAL+=("PorthHttpApiId=${PORTH_HTTP_API_ID}")
+          fi
+          # The bearer surface (/mcp, connector callers). Empty on a shared-host
+          # slot, where the template leaves the bearer API out.
+          if [ -n "${PORTH_BEARER_AUTHORIZER_ARN:-}" ]; then
+            OPTIONAL+=("PorthBearerHttpApiId=${PORTH_BEARER_HTTP_API_ID}")
+            OPTIONAL+=("PorthBearerAuthorizerFunctionArn=${PORTH_BEARER_AUTHORIZER_ARN}")
+            OPTIONAL+=("PorthBearerAuthorizerFunctionRoleArn=${PORTH_BEARER_AUTHORIZER_ROLE_ARN}")
           fi
 
           # EnvironmentSlot and all three domain names come from one place —
