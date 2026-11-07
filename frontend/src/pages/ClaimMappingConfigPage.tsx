@@ -10,6 +10,13 @@ import { PLATFORM_TENANT_ID, TENANT_PAGE, useManagedTenant } from '../hooks/useM
 
 const DEFAULT_MAPPING = JSON.stringify(DEFAULT_CLAIM_MAPPING, null, 2)
 
+/** A failed read, said as what it was: Porth refuses a tenant's claim mapping to anyone without
+ *  tenant.claim_mappings.manage (PORTH-637/638), and that is not a fault to retry. */
+function loadFailure(what: string, status?: number): string {
+  if (status === 403) return `You do not have permission to manage this tenant's claim mapping (HTTP 403), so ${what} cannot be shown.`
+  return `Failed to load ${what}${status ? ` (HTTP ${status})` : ''}.`
+}
+
 export default function ClaimMappingConfigPage() {
   const tenantId = useManagedTenant()
   const onTenantPage = useMatch(TENANT_PAGE) !== null
@@ -44,7 +51,7 @@ export default function ClaimMappingConfigPage() {
       .catch((err) => {
         const status = err?.response?.status
         if (status !== 404) {
-          setEditorError('Failed to load current config.')
+          setEditorError(loadFailure('the current config', status))
         }
         setCurrent(null)
       })
@@ -58,7 +65,7 @@ export default function ClaimMappingConfigPage() {
     claimConfigsApi
       .listVersions(tenantId)
       .then(setVersions)
-      .catch(() => setVersionsError('Failed to load version history.'))
+      .catch((err) => setVersionsError(loadFailure('the version history', err?.response?.status)))
       .finally(() => setVersionsLoading(false))
   }
 

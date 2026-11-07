@@ -1,4 +1,4 @@
-"""scripts/verify_seed.py's checks, against the rows a real seed writes (porth-common 0.0.9 on moto).
+"""scripts/verify_seed.py's checks, against the rows a real seed writes (porth-common 0.0.21 on moto).
 
 The script reads EMS's tables with the aws CLI; its checks are pure functions over the items, so they
 are tested here on exactly what the adapter writes - read back raw, in the DynamoDB JSON the CLI
@@ -36,10 +36,9 @@ def read(slug="ems-fixtures", tenant_id="ems-test"):
     roles = [r for r in raw_query(TABLES["roles"], "pk", f"ENV#{SLOT}#TENANT#{tenant_id}") if r["sk"].startswith("ROLE#")]
     admin = next(r for r in roles if r["name"] == "tenant-admin")
     grants = [g["permission_key"] for g in raw_query(TABLES["roles"], "pk", f"ENV#{SLOT}#TENANT#{tenant_id}#ROLE#{admin['id']}")]
-    registered = [p["key"] for p in raw_query(TABLES["permissions"], "gsi1pk", f"ENV#{SLOT}#TENANT#{tenant_id}", index="gsi1")]
     directory = [verify.item(i) for i in ddb.scan(TableName=TABLES["tenants"])["Items"]
                  if i["SK"]["S"] == "METADATA" and "TENANT#" in i["PK"]["S"]]
-    return org, tenant, roles, grants, registered, directory
+    return org, tenant, roles, grants, directory
 
 
 def seed_both():
@@ -49,11 +48,11 @@ def seed_both():
 
 def test_every_check_passes_on_what_a_seed_writes(porth):
     seed_both()
-    org, tenant, roles, grants, registered, directory = read()
+    org, tenant, roles, grants, directory = read()
     expected = {"display_name": "EMS Test Tenant", "tenant_tier": "development"}
     assert verify.check_org(org, "ems-fixtures", "EMS Fixtures") == []
     assert verify.check_tenant(tenant, SLOT, "ems-test", org, expected) == []
-    assert verify.check_admin_role(roles, grants, registered, "tenant-admin") == []
+    assert verify.check_admin_role(roles, grants, "tenant-admin") == []
     assert verify.check_directory(directory) == []
 
 
@@ -80,7 +79,7 @@ def test_a_missing_seed_is_reported(porth):
 
 def test_each_check_can_fail(porth):
     seed_both()
-    org, tenant, roles, grants, registered, directory = read()
+    org, tenant, roles, grants, directory = read()
 
     unlisted = {k: v for k, v in tenant.items() if not k.startswith("gsi2")}
     assert any("gsi2" in p for p in verify.check_tenant(unlisted, SLOT, "ems-test", org, None))
@@ -91,8 +90,10 @@ def test_each_check_can_fail(porth):
     assert any("display_name" in p for p in verify.check_tenant(
         tenant, SLOT, "ems-test", org, {"display_name": "Something else", "tenant_tier": "development"}))
 
-    assert any("holds" in p for p in verify.check_admin_role(roles, grants[:1], registered, None))
-    assert any("answers to" in p for p in verify.check_admin_role(roles, grants, registered, "someone-else"))
+    without = [g for g in grants if g != "tenant.claim_mappings.manage"]
+    assert any("tenant.claim_mappings.manage" in p for p in verify.check_admin_role(roles, without, None))
+    assert any("platform permissions" in p for p in verify.check_admin_role(roles, [*grants, "platform.tenants.read"], None))
+    assert any("answers to" in p for p in verify.check_admin_role(roles, grants, "someone-else"))
 
     renamed = [{**org, "name": "Not EMS"}]
     assert verify.check_org(renamed[0], "ems-fixtures", "EMS Fixtures")

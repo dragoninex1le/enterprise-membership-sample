@@ -18,7 +18,7 @@ def no_access(tenant="ems-test", version="1.0.0", **spec):
 
 def roles():
     from porth_common.providers.aws.repositories.role_repo import RoleRepository
-    return RoleRepository(TABLES["roles"], boto3.resource("dynamodb"), environment=SLOT)
+    return RoleRepository(TABLES["roles"], lambda: boto3.resource("dynamodb"), environment=SLOT)
 
 
 def seed_tenant_then_role(run_id="run-seed-1"):

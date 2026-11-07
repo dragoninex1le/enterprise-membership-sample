@@ -162,9 +162,9 @@ def repos():
     from porth_common.providers.aws.repositories.role_repo import RoleRepository
     from porth_common.providers.aws.repositories.permission_repo import PermissionRepository
     res = boto3.resource("dynamodb")
-    return (TenantRepository(TABLES["tenants"], res, environment=SLOT),
-            RoleRepository(TABLES["roles"], res, environment=SLOT),
-            PermissionRepository(TABLES["permissions"], res, environment=SLOT))
+    return (TenantRepository(TABLES["tenants"], lambda: res, environment=SLOT),
+            RoleRepository(TABLES["roles"], lambda: res, environment=SLOT),
+            PermissionRepository(TABLES["permissions"], lambda: res, environment=SLOT))
 
 
 # ---------------------------------------------------------------- seed
@@ -196,15 +196,24 @@ def test_porths_directory_scan_still_loads_and_sees_only_tenants(porth):
     assert {env for env, _ in loaded} == {SLOT}
 
 
-def test_seed_provisions_the_tenant_admin_role_as_porth_0_3_1_did(porth):
+def test_seed_provisions_the_tenant_admin_role_as_porth_does(porth):
     call("seed", {"dataset": ems_test()})
-    _, roles, permissions = repos()
+    _, roles, _ = repos()
     (role,) = roles.list_roles("ems-test")
     assert (role.name, role.source_key, role.is_system) == ("tenant-admin", "tenant-admin", True)
-    registered = {p.key for p in permissions.list_by_tenant("ems-test")}
-    assert registered == {"tenant.roles.create", "tenant.roles.update", "tenant.roles.delete"}
     granted = set(roles.get_role_permissions("ems-test", role.id))
-    assert granted == registered
+    # Porth's tenant namespace, from its static catalogue - never a platform permission.
+    assert granted == {"tenant.roles.create", "tenant.roles.update", "tenant.roles.delete",
+                       "tenant.claim_mappings.manage"}
+
+
+def test_the_tenant_admin_can_manage_its_claim_mapping(porth):
+    """Porth 0.4.10 refuses a tenant's claim mapping to a caller without it (PORTH-637/638)."""
+    from porth_common.permissions.catalogue import CanManageClaimMapping
+    call("seed", {"dataset": ems_test()})
+    _, roles, _ = repos()
+    (role,) = roles.list_roles("ems-test")
+    assert CanManageClaimMapping in roles.get_role_permissions("ems-test", role.id)
 
 
 #: The manifest's IdP block, as Porth's TenantIdpConfig carries it - synthetic values.

@@ -15,7 +15,7 @@ def ems_org(version="1.0.0", slug="ems-fixtures", name="EMS Fixtures") -> dict:
 
 def org_repo():
     from porth_common.providers.aws.repositories.organization_repo import OrganizationRepository
-    return OrganizationRepository(TABLES["tenants"], boto3.resource("dynamodb"), environment=SLOT)
+    return OrganizationRepository(TABLES["tenants"], lambda: boto3.resource("dynamodb"), environment=SLOT)
 
 
 def test_seed_writes_the_org_row_porth_0_3_1_writes_and_porth_reads_it_back(porth):

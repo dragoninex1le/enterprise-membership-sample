@@ -79,11 +79,13 @@ entity removes tenants first. Resource type `porth.org` (an extension type), e.g
 
 ## `porth-tenant`: seed and teardown
 
-`seed` takes an inline, enumerated dataset (contract §4.3, §8) and writes exactly what **Porth 0.3.1**
-— the version EMS runs — writes for `PUT /tenants/`, with **Porth's own code**: porth-common 0.0.9
-(pinned in `src/adapter/requirements.txt`) for the tenant row, the tenant-admin role, the tenant
-permissions and the role's grants, and their events on Porth's bus. The orchestration of the last
-three is Porth 0.3.1's `provision_tenant_admin_role`, which is not in the wheel.
+`seed` takes an inline, enumerated dataset (contract §4.3, §8) and writes what Porth writes for
+`PUT /tenants/`, with **Porth's own code**: porth-common 0.0.21, the release Porth 0.4.10 ships (pinned
+in `src/adapter/requirements.txt`), for the tenant row and its events on Porth's bus, and porth-common's
+`ensure_tenant_admin_role` (PORTH-643) for the tenant-admin role and its grants - the function Porth's
+API and porth-install both call. The grants are Porth's tenant permissions from its static catalogue,
+`tenant.claim_mappings.manage` among them, plus whatever applications registered in the environment's
+catalogue. Permissions are no longer registered under the tenant.
 
 - The dataset's digest is recomputed and a mismatch refused (rule in `datasets.py`).
 - Each tenant is validated with Porth 0.3.1's own request model before anything is written: one bad
@@ -207,7 +209,7 @@ python -m pytest infra/provisioning-adapter/tests -q
 
 Offline, with in-memory fakes, and every response is validated against the real schemas from the
 `prawf-schemas` package (CodeArtifact `estyn-prawf-py`). `tests/test_porth_tenant.py` runs the real
-porth-common 0.0.9 (CodeArtifact `porth/porth-py`) against an in-memory AWS (moto) and reads every
+porth-common 0.0.21 (CodeArtifact `porth/porth-py`) against an in-memory AWS (moto) and reads every
 seeded row back through Porth's own repositories and its tenant directory scan. A canary proves the validator can fail. The
 C1 test is behavioural: anything the adapter declares must not answer `unsupported`.
 

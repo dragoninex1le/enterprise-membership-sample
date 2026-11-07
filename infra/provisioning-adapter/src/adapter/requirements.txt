@@ -1,5 +1,6 @@
-# The Porth that EMS runs is SAR 0.3.1, which shipped porth-common 0.0.9. The seed entities write
+# porth-common 0.0.21 is the release Porth 0.4.10 ships (Components 6056124). The seed entities write
 # Porth's rows with Porth's own code. Move this pin when a Porth change affects what they write - a
-# minor porth-common release does not always need an adapter change (Richard, 2026-11-05).
+# minor porth-common release does not always need an adapter change (Richard, 2026-11-05). 0.0.9 predated
+# tenant.claim_mappings.manage, so a seeded tenant admin could not read its own claim mapping.
 # bootstrap, reset and prune of `porth` use none of it: they copy rows, whatever Porth wrote.
-porth-common==0.0.9
+porth-common==0.0.21
