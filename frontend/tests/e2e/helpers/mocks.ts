@@ -227,6 +227,19 @@ export async function mockBootstrap(
     })
   })
 
+  // GET /tenants/ — the platform-only list the tenant page reads its tenant from (PORTH-576).
+  // A substring `q`, as Porth applies it; the page picks the exact id out of the answer.
+  await page.route(/\/tenants\/(\?.*)?$/, (route) => {
+    if (route.request().method() !== 'GET') return route.continue()
+    const q = new URL(route.request().url()).searchParams.get('q') ?? ''
+    const all = [DEFAULT_TENANT, { ...DEFAULT_TENANT, tenant_id: 'platform', display_name: 'Platform' }]
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ tenants: all.filter(t => t.tenant_id.includes(q)), next_cursor: null }),
+    })
+  })
+
   const resolvedUser = { ...DEFAULT_PLATFORM_ADMIN_USER, ...userOverrides }
   const resolvedRoles = roles ?? [DEFAULT_PLATFORM_ADMIN_ROLE]
   const resolvedPermissions = permissions ?? DEFAULT_PERMISSIONS.map(p => p.key)

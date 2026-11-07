@@ -20,10 +20,20 @@ export default function TenantPage() {
   useEffect(() => {
     setTenant(null)
     setError(null)
+    let live = true
     tenantsApi
-      .get(tenantId)
-      .then(setTenant)
-      .catch((err) => setError(err?.response?.status === 404 ? `There is no tenant ${tenantId}.` : 'Failed to load the tenant.'))
+      .find(tenantId)
+      .then((found) => {
+        if (!live) return
+        if (found) setTenant(found)
+        else setError(`There is no tenant ${tenantId}.`)
+      })
+      .catch((err) => {
+        if (!live) return
+        const status = err?.response?.status
+        setError(`Failed to load the tenant${status ? ` (HTTP ${status})` : ''}.`)
+      })
+    return () => { live = false }
   }, [tenantId])
 
   return (
