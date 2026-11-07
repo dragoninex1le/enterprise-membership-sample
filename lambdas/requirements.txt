@@ -37,4 +37,7 @@ fastapi==0.111.0
 # ships code that raises AttributeError on first use. Lift it in the migration.
 porth-common>=0.0.17,<0.0.18
 mangum==0.17.0
+# The accounts MCP service (sample_app/accounts_mcp): the SDK's FastMCP server in
+# stateless JSON mode. <2: the 2.x line renames FastMCP and changes the transport.
+mcp>=1.2,<2
 boto3>=1.34.0

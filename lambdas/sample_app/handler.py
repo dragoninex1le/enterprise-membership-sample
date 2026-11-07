@@ -8,6 +8,7 @@ from porth_common.internal_plane import log_plane_identity
 from .cors import HostBoundOriginMiddleware
 from .director import DirectorMiddleware, SampleAppDirector
 from .routers import dashboard, ar, ap, approvals, diagnostics
+from .accounts_mcp import http as accounts_mcp
 
 # PORTH-622 — set once, for the whole package, at the entry point.
 #
@@ -106,6 +107,9 @@ app.include_router(approvals.router)
 # every other route, so it reports the identity of a REAL request rather
 # than of a probe taking a different path to get here.
 app.include_router(diagnostics.router)
+# The accounts MCP service, at /mcp. Reached only through the app's bearer API
+# (template.yml SampleAppBearerApi); the browser API serves /sample/* alone.
+app.include_router(accounts_mcp.router)
 
 # PORTH-623 — say who this deployable is and where it will read, once, on the
 # first invocation. INFO on purpose: this is the post-deploy check, and putting
