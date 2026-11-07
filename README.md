@@ -83,7 +83,7 @@ Set on the GitHub Environment named above, not at repo level unless stated.
 | `AWS_CFN_EXECUTION_ROLE_ARN` | `porth-install` | Optional. CloudFormation execution role for the SAR install |
 | `ACM_CERTIFICATE_ARN` | `sample-app-deploy` | Certificate for the CloudFront distribution (us-east-1) |
 | `DNS_ZONE` | `porth-install` | e.g. `ems.estynsoftware.cloud` — drives the BFF cookie domain |
-| `API_DOMAIN_NAME` | `porth-install` | Porth API custom domain FQDN |
+| `API_DOMAIN_NAME` | `porth-install` | Name of the retired shared Porth API host (`porth-api.{zone}`): the install deletes its DNS alias. Optional; defaults to `porth-api.{DNS_ZONE}`. Remove once retired. |
 | `PORTH_SPA_ORIGINS` | `porth-install` | CSV of allowed SPA origins |
 | `PORTH_STACK_NAME` | `sample-app-deploy` | Defaults to `serverlessrepo-porth-components` |
 
@@ -91,8 +91,6 @@ Set on the GitHub Environment named above, not at repo level unless stated.
 
 | Name | Environment | Description |
 |---|---|---|
-| `ACM_CERTIFICATE_ARN` | `porth-install` | Certificate for the Porth API custom domain (a `vars.` value of the same name is accepted as a legacy fallback) |
-| `PORTH_AUTH_TEST_TOKEN` | `porth-install`, repo | Optional authorizer test-token bypass |
 | Tier 2 e2e secrets | repo | `PLAYWRIGHT_BASE_URL`, `PORTH_PLATFORM_BASE_URL`, `PORTH_API_URL`, `PORTH_TENANT_CONFIG`, and the platform-admin / tenant-user email+password pairs |
 
 > `PLATFORM_AUTH0_DOMAIN` / `_CLIENT_ID` / `_AUDIENCE` are **no longer read by any workflow** —

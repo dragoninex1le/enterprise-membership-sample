@@ -12,7 +12,6 @@ Reads its inputs from the environment so the workflow stays declarative:
 
     MANIFEST                the /porth/config/testbed value (JSON)
     PORTH_DNS_ZONE          e.g. ems.estynsoftware.cloud
-    PORTH_DOMAIN            the proxy's own host
     PORTH_SPA_ORIGINS_RAW   legacy origin list
     EFF_FIXED_ENVIRONMENT   the ADR-Z8 slot
     PORTH_SESSIONS_TABLE
@@ -81,8 +80,9 @@ def build(manifest: dict, env: dict) -> dict:
         "interactive_client_id": idp.get("client_id", ""),
         "audience": idp.get("audience", ""),
         "protocol": idp.get("protocol", "oidc"),
-        # Stack shape, derived by the pipeline.
-        "custom_domain": env.get("PORTH_DOMAIN", ""),
+        # Stack shape, derived by the pipeline. No custom_domain: the shared
+        # porth-api.{zone} host is retired (PORTH-655); every request arrives on
+        # a tenant API host, which names its own callback and issuer.
         "cookie_domain": f".{zone}",
         "dns_zone": zone,
         "spa_origins": env.get("PORTH_SPA_ORIGINS_RAW", ""),
