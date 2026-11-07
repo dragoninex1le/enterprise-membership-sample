@@ -25,6 +25,16 @@ test.describe('Claim mapping, on a tenant page', () => {
     await expect(page.getByRole('link', { name: '← All tenants' })).toBeVisible()
   })
 
+  test('reads the tenant from the platform list, not the public lookup', async ({ page }) => {
+    // GET /tenants/{id} is Porth's pre-login route: no authorizer, so no slot, and no tier.
+    let publicLookup = false
+    await page.route(/\/tenants\/test-tenant($|\?)/, (route) => { publicLookup = true; return route.abort() })
+    await page.goto(PAGE)
+    await expect(page.getByText(`test-tenant · ${DEFAULT_TENANT.org_name} · production · active`)).toBeVisible()
+    await expect(page.getByText('Failed to load the tenant')).toHaveCount(0)
+    expect(publicLookup).toBe(false)
+  })
+
   test('the editor holds the mapping from the API', async ({ page }) => {
     await page.goto(PAGE)
     await expect(page.locator('textarea').first()).toHaveValue(/resolve_roles/)
@@ -64,9 +74,6 @@ test.describe('The platform tenant\'s claim mapping', () => {
     await mockBootstrap(page)
     await mockClaimConfig(page)
     await mockClaimConfigVersions(page)
-    await page.route(/\/tenants\/platform($|\?)/, (route) =>
-      route.fulfill({ status: 200, contentType: 'application/json',
-        body: JSON.stringify({ ...DEFAULT_TENANT, tenant_id: 'platform', display_name: 'Platform' }) }))
   })
 
   test('is shown read-only: the install owns it', async ({ page }) => {
