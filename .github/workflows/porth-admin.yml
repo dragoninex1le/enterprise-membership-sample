@@ -28,6 +28,7 @@ on:
         type: choice
         options:
           - reconcile-permissions
+          - prune-retired-permissions
           - check-session-policy
           - backfill-tenant-index
           - auth-config
@@ -36,9 +37,17 @@ on:
         required: false
         default: 'dev'
       env_scope:
-        description: 'ADR-Z8 slot the records live under. Must match FixedEnvironment.'
+        description: 'The declared environment (deploy/porth/environments.json) the records live under'
+        required: true
+        type: choice
+        options:
+          - porth-dau
+          - porth-sample
+        default: porth-dau
+      porth_version:
+        description: 'Porth release whose porth-install to run. Empty = the release installed in this account.'
         required: false
-        default: 'prod'
+        default: ''
       apply:
         description: 'Write changes. Leave OFF to dry-run and read the report first.'
         required: false
@@ -58,7 +67,9 @@ env:
   CA_DOMAIN: porth
   CA_REPO: porth-py
   CA_OWNER: '084847995635'
-  PORTH_INSTALL_VERSION: '0.2.5'
+  # PORTH-656: no pin. The porth-install run is the one the installed Porth
+  # release was cut with (its manifest), so a task never runs an older tool than
+  # the release it is operating on (this was pinned to 0.2.5 under Porth 0.4.11).
 
 jobs:
   run-task:
@@ -84,6 +95,14 @@ jobs:
       - name: Caller identity
         run: aws sts get-caller-identity
 
+      - name: Resolve the Porth release (installed, unless named)
+        id: release
+        run: |
+          set -euo pipefail
+          VERSION="${{ inputs.porth_version }}"
+          [ -n "$VERSION" ] || VERSION="$(scripts/installed-porth-version.sh)"
+          scripts/resolve-porth-release.sh "$VERSION"
+
       - name: Install porth-install from CodeArtifact
         run: |
           set -euo pipefail
@@ -103,14 +122,14 @@ jobs:
           # transient. A pin turns that into "no matching distribution", which
           # names the real problem.
           #
-          # Bump this deliberately when a new porth-install is published.
+          # Exact, from the release manifest (previous step), for the reason above.
           pip install --quiet "porth-install==${PORTH_INSTALL_VERSION}"
           echo "porth-install $(pip show porth-install | awk '/^Version:/ {print $2}')"
 
       - name: Run the task
         env:
           ENV_NAME: ${{ inputs.environment_name || 'dev' }}
-          ENV_SCOPE: ${{ inputs.env_scope || 'prod' }}
+          ENV_SCOPE: ${{ inputs.env_scope }}
           APPLY: ${{ inputs.apply }}
         run: |
           set -euo pipefail
@@ -137,6 +156,20 @@ jobs:
                 --environment "$ENV_SCOPE" \
                 --tenants all \
                 $DRY
+              ;;
+            prune-retired-permissions)
+              # PORTH-656: delete permissions Porth no longer ships in its own
+              # namespaces (e.g. platform.orgs.*), and every grant to them, across
+              # every tenant. Lists everything first; deletes only with apply.
+              PRUNE_APPLY=""
+              [ "$APPLY" = "true" ] && PRUNE_APPLY="--apply"
+              porth-install reconcile-permissions \
+                --permissions-table "porth-permissions-${ENV_NAME}" \
+                --roles-table "porth-roles-${ENV_NAME}" \
+                --tenants-table "porth-tenants-${ENV_NAME}" \
+                --environment "$ENV_SCOPE" \
+                --tenants all \
+                --prune-retired $PRUNE_APPLY
               ;;
             check-session-policy)
               # Read-only; ignores $DRY.
@@ -168,5 +201,5 @@ jobs:
             echo "- **Task:** \`${{ inputs.task }}\`"
             echo "- **Mode:** ${{ inputs.apply && '**APPLY** — changes written' || 'dry run — nothing written' }}"
             echo "- **Tables:** \`*-${{ inputs.environment_name || 'dev' }}\`"
-            echo "- **Env scope:** \`${{ inputs.env_scope || 'prod' }}\`"
+            echo "- **Env scope:** \`${{ inputs.env_scope }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
