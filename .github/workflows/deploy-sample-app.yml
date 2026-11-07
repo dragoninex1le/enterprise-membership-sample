@@ -862,6 +862,12 @@ jobs:
         # resolve nowhere.
         run: |
           set -euo pipefail
+          # PORTH-656: a tenant-API-host slot has no sample-api.{slot} domain
+          # any more, so its alias is removed instead of upserted.
+          if [ "${TENANT_API_HOSTS}" = "true" ]; then
+            scripts/remove-sample-api-dns.sh "${{ env.SAMPLE_API_DOMAIN }}" "${{ env.DNS_ROOT }}"
+            exit 0
+          fi
           get_output() {
             aws cloudformation describe-stacks \
               --stack-name ${{ env.SAM_STACK_NAME }} \

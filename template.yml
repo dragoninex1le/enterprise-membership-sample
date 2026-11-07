@@ -293,6 +293,9 @@ Conditions:
 
   # PORTH-656 — see TenantApiHosts.
   IsTenantApiHosts: !Equals [!Ref TenantApiHosts, 'true']
+  # PORTH-656: the shared-host shape — CloudFront fronts the APIs. Only these
+  # slots need the sample-api.{slot} domain and CloudFront's API origins.
+  IsSharedHost: !Not [!Condition IsTenantApiHosts]
 
 Resources:
 
@@ -367,8 +370,12 @@ Resources:
   # Regional, not edge-optimised: CloudFront is already in front of it, and an
   # edge-optimised domain would put a second CloudFront distribution behind the
   # first.
+  # PORTH-656: shared-host slots only. On a tenant-API-host slot CloudFront has
+  # no /sample/* behaviour and the SPA calls {tenant}.api.{slot}/sample, so
+  # nothing reaches this domain.
   SampleAppApiDomain:
     Type: AWS::ApiGatewayV2::DomainName
+    Condition: IsSharedHost
     Properties:
       DomainName: !Ref SampleApiDomainName
       DomainNameConfigurations:
@@ -378,6 +385,7 @@ Resources:
 
   SampleAppApiMapping:
     Type: AWS::ApiGatewayV2::ApiMapping
+    Condition: IsSharedHost
     Properties:
       ApiId: !Ref SampleAppApi
       DomainName: !Ref SampleAppApiDomain
@@ -1784,27 +1792,34 @@ Resources:
                 FunctionAssociations:
                   - EventType: viewer-request
                     FunctionARN: !GetAtt PorthApiPathStripFunction.FunctionMetadata.FunctionARN
-        Origins:
-          - Id: S3Origin
-            DomainName: !GetAtt AdminUIBucket.RegionalDomainName
-            OriginAccessControlId: !GetAtt CloudFrontOAC.Id
-            S3OriginConfig: {}
-          - Id: PorthApiOrigin
-            # PorthApiUrl is "https://host" — index 2 of the "/"-split is the host.
-            DomainName: !Select [2, !Split ["/", !Ref PorthApiUrl]]
-            CustomOriginConfig:
-              OriginProtocolPolicy: https-only
-              OriginSSLProtocols: [TLSv1.2]
-          - Id: SampleApiOrigin
-            # PORTH-586 — the custom domain rather than the execute-api
-            # hostname, so the Host the authorizer sees is stable and the
-            # session-policy binding can be keyed on it. DependsOn is implicit
-            # through the !Ref, but the API mapping must exist before traffic
-            # arrives or the domain answers 404.
-            DomainName: !Ref SampleApiDomainName
-            CustomOriginConfig:
-              OriginProtocolPolicy: https-only
-              OriginSSLProtocols: [TLSv1.2]
+        # PORTH-656: a tenant-API-host slot serves the UI only, so it has the S3
+        # origin alone; the API origins go with the API behaviours.
+        Origins: !If
+          - IsTenantApiHosts
+          - - Id: S3Origin
+              DomainName: !GetAtt AdminUIBucket.RegionalDomainName
+              OriginAccessControlId: !GetAtt CloudFrontOAC.Id
+              S3OriginConfig: {}
+          - - Id: S3Origin
+              DomainName: !GetAtt AdminUIBucket.RegionalDomainName
+              OriginAccessControlId: !GetAtt CloudFrontOAC.Id
+              S3OriginConfig: {}
+            - Id: PorthApiOrigin
+              # PorthApiUrl is "https://host" — index 2 of the "/"-split is the host.
+              DomainName: !Select [2, !Split ["/", !Ref PorthApiUrl]]
+              CustomOriginConfig:
+                OriginProtocolPolicy: https-only
+                OriginSSLProtocols: [TLSv1.2]
+            - Id: SampleApiOrigin
+              # PORTH-586 — the custom domain rather than the execute-api
+              # hostname, so the Host the authorizer sees is stable and the
+              # session-policy binding can be keyed on it. DependsOn is implicit
+              # through the !Ref, but the API mapping must exist before traffic
+              # arrives or the domain answers 404.
+              DomainName: !Ref SampleApiDomainName
+              CustomOriginConfig:
+                OriginProtocolPolicy: https-only
+                OriginSSLProtocols: [TLSv1.2]
 
   # Rewrites SPA deep links to /index.html at the edge.
   #
@@ -1896,17 +1911,20 @@ Outputs:
     Description: Public URL of the Porth Admin UI
     Value: !Sub https://${CloudFrontDistribution.DomainName}
   SampleApiDomainName:
+    Condition: IsSharedHost
     Description: >-
       Custom domain the sample app's API answers on. This is the host the
       authorizer matches against context_rules in the session-policy index.
     Value: !Ref SampleApiDomainName
   SampleApiDomainRegionalDomainName:
+    Condition: IsSharedHost
     Description: >-
       Alias target for the sample API's custom domain. Consumed by deploy.yml's
       Route 53 upsert — see SampleAppApiDomain for why the record is not a
       stack resource.
     Value: !GetAtt SampleAppApiDomain.RegionalDomainName
   SampleApiDomainRegionalHostedZoneId:
+    Condition: IsSharedHost
     Description: Hosted zone of the alias target, for the same upsert.
     Value: !GetAtt SampleAppApiDomain.RegionalHostedZoneId
   SampleAppSessionPolicyArn:
