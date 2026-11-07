@@ -72,6 +72,14 @@ class Porth:
         # resolves it per access. One resource, already holding this run's session credentials.
         def connect():
             return resource
+
+        # Porth's audit trail (porth-audit-log): porth-common 0.0.21 writes an entry for every write, and
+        # by default through the execution role, unnarrowed. The adapter's execution role has no data
+        # access, so its entries go through this run's one-slot session like every other write - under
+        # ENV#{slot}#, which the session's LeadingKeys holds them to.
+        from porth_common.audit import logger as audit_logger
+        from porth_common.providers.aws.repositories.audit_log_repo import AuditLogRepository
+        audit_logger.init(AuditLogRepository(os.environ["PORTH_AUDIT_LOG_TABLE"], connect, environment=env_scope))
         self.orgs = OrganizationRepository(tenants, connect, event_publisher=self.publisher, environment=env_scope)
         self.tenants = TenantRepository(tenants, connect, event_publisher=self.publisher, environment=env_scope)
         self.claims = ClaimMappingConfigRepository(os.environ["PORTH_CLAIM_MAPPING_CONFIGS_TABLE"], connect,

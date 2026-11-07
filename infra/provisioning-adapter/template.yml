@@ -53,6 +53,9 @@ Parameters:
   PorthSessionsTable:
     Type: String
     Description: From the Porth stack's SessionsTableName output.
+  PorthAuditLogTable:
+    Type: String
+    Description: Porth's audit log, porth-audit-log-{env}. Porth's stack has no output for it; the deploy derives it from the tenants table's suffix.
   PorthEventBus:
     Type: String
     Description: From the Porth stack's EventBusName output (porth-events-{env}).
@@ -180,6 +183,12 @@ Resources:
                   - dynamodb:DeleteItem
                   - dynamodb:DescribeTable
                 Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthSessionsTable}
+              # Porth's audit trail: porth-common 0.0.21 appends an entry for every write it makes.
+              # Append only - no read, update or delete - and the session's LeadingKeys holds each to the slot.
+              - Sid: AppendPorthAuditLog
+                Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PorthAuditLogTable}
               - Sid: PorthEventsOnly
                 Effect: Allow
                 Action: events:PutEvents
@@ -344,6 +353,8 @@ Resources:
           PORTH_USERS_TABLE: !Ref PorthUsersTable
           PORTH_ORG_UNITS_TABLE: !Ref PorthOrgUnitsTable
           PORTH_SESSIONS_TABLE: !Ref PorthSessionsTable
+          # porth-common reads it at import (config.TABLE_PORTH_AUDIT_LOG); the adapter injects its repository.
+          PORTH_AUDIT_LOG_TABLE: !Ref PorthAuditLogTable
           # porth-common reads it at import (config.EVENT_BUS_NAME). Its default, porth-events, is
           # not the bus Porth deploys - left unset, every seed would write a row and then fail.
           PORTH_EVENT_BUS: !Ref PorthEventBus
