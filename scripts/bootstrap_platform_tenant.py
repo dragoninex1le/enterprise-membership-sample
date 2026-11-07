@@ -61,18 +61,14 @@ APP_NS = "porth-platform"
 # the two writes records the authorizer never looks for.
 ENV_SCOPE = os.environ.get("PORTH_ENV_SCOPE", "").strip()
 
-PERMISSIONS = [
-    {"key": "platform.tenants.read",   "display_name": "View Tenants",           "category": "Tenants",       "sort_order": 10},
-    {"key": "platform.tenants.create", "display_name": "Create Tenants",          "category": "Tenants",       "sort_order": 20},
-    {"key": "platform.tenants.update", "display_name": "Update Tenants",          "category": "Tenants",       "sort_order": 30},
-    {"key": "platform.tenants.delete", "display_name": "Delete Tenants",          "category": "Tenants",       "sort_order": 40},
-    {"key": "platform.orgs.read",      "display_name": "View Organisations",      "category": "Organisations", "sort_order": 10},
-    {"key": "platform.orgs.create",    "display_name": "Create Organisations",    "category": "Organisations", "sort_order": 20},
-    {"key": "platform.orgs.update",    "display_name": "Update Organisations",    "category": "Organisations", "sort_order": 30},
-    {"key": "platform.orgs.delete",    "display_name": "Delete Organisations",    "category": "Organisations", "sort_order": 40},
-    {"key": "platform.settings.read",  "display_name": "View Platform Settings",  "category": "Settings",      "sort_order": 10},
-    {"key": "platform.settings.write", "display_name": "Edit Platform Settings",  "category": "Settings",      "sort_order": 20},
-]
+# PORTH-656: no PERMISSIONS here. Porth's catalogue is Porth's — the release
+# ships it and `porth-install reconcile-permissions` (porth-reconcile.yml, after
+# this script) registers it and grants it to platform-admin. The copy that lived
+# here was Porth's pre-PORTH-597 catalogue: it re-registered the retired
+# platform.orgs.* / platform.settings.* permissions, at the pre-0.4.1 per-tenant
+# keys, and re-granted them, on every install — straight after migrate-keys had
+# removed them. This script creates the platform org, tenant, role and claim
+# mapping, and nothing Porth's release owns.
 
 # The roles-claim namespace is derived from the Auth0 API identifier (the audience),
 # because that is what the post-login Action namespaces its custom claims with. The two
@@ -254,22 +250,6 @@ def bootstrap_platform_org_and_tenant(tenants_tbl, now: str) -> str:
     return org_id
 
 
-def bootstrap_permissions(perms_tbl, now: str) -> list[str]:
-    permission_keys: list[str] = []
-    for p in PERMISSIONS:
-        perms_tbl.put_item(Item={
-            "pk": env_key(f"TENANT#platform#NS#{APP_NS}"), "sk": f"PERM#{p['key']}",
-            "gsi1pk": env_key("TENANT#platform"), "gsi1sk": f"CAT#{p['category']}#PERM#{p['key']}",
-            "id": str(uuid.uuid4()), "key": p["key"], "display_name": p["display_name"],
-            "category": p["category"], "app_namespace": APP_NS,
-            "tenant_id": "platform", "sort_order": p["sort_order"],
-            "created_at": now, "updated_at": now,
-        })
-        permission_keys.append(p["key"])
-        print(f"    registered  {p['key']}")
-    return permission_keys
-
-
 def bootstrap_role(roles_tbl, now: str) -> str:
     platform_pk = env_key("TENANT#platform")
     resp = roles_tbl.query(
@@ -299,80 +279,6 @@ def bootstrap_role(roles_tbl, now: str) -> str:
     })
     print(f"    created  platform-admin (id={role_id})")
     return role_id
-
-
-def bootstrap_role_permissions(roles_tbl, role_id: str, permission_keys: list[str], now: str) -> None:
-    """Set the platform-admin role's permission grants.
-
-    PORTH-607 — tenant-leading keys. This wrote ``ENV#{e}#ROLE#{id}``, the shape
-    that predates PORTH-604, and it runs in the same install pipeline as the
-    migration and AFTER it. So the migration correctly moved the grants and
-    deleted the originals, and thirty seconds later this recreated them:
-
-        ENV#prod#ROLE#{id}              ← written here, again, every install
-        ENV#prod#TENANT#platform#ROLE#{id}   ← where the migration had put them
-
-    Nothing failed. The repositories read new-then-old, so the duplicates were
-    invisible from the application — the only symptom was the old rows never
-    going away, which reads as "the migration did not delete them".
-
-    ``legacy_pk`` is still swept, because this install may be the first one that
-    runs after a migration and the rows this script itself left behind are
-    exactly the ones nothing else will clean up.
-
-    PORTH-609 — it removes only the grants it OWNS. The consuming app registers
-    its own permissions against this role, and replacing the whole set revoked
-    them on every Porth install.
-    """
-    role_pk = env_key(f"TENANT#platform#ROLE#{role_id}")
-    legacy_pk = env_key(f"ROLE#{role_id}")
-
-    # Only the grants this script OWNS (PORTH-609). It used to delete every
-    # PERM# row on the role before writing its own ten back, which silently
-    # revoked any permission granted by anything else — the consuming app's own
-    # permissions among them. The EMS app registers Accounts Receivable,
-    # Accounts Payable and Dashboard against this same role, and an install of
-    # PORTH wiped them: the app then rendered "unauthorized" on its own pages,
-    # with nothing in Porth's logs, because Porth had allowed every request.
-    #
-    # It was concealed until now. The sweep only looked at the legacy key, so
-    # after PORTH-602 moved the rows it deleted nothing at all; PORTH-607 made
-    # the sweep find both shapes, and that is what turned a latent
-    # whole-set replace into a real one.
-    #
-    # A whole-set replace is the wrong verb here regardless. porth_common's
-    # set_role_permissions already unions for exactly this reason — "an operator
-    # may have granted extras deliberately and this is not the place to revoke
-    # them" — and a bootstrap script has even less claim to another
-    # namespace's grants than an operator does.
-    owned = {p["key"] for p in PERMISSIONS}
-
-    for pk in (role_pk, legacy_pk):
-        existing = roles_tbl.query(
-            KeyConditionExpression=Key("pk").eq(pk) & Key("sk").begins_with("PERM#")
-        )
-        for item in existing.get("Items", []):
-            key = item.get("permission_key") or item["sk"].removeprefix("PERM#")
-            if key not in owned:
-                # Someone else's grant. Not ours to remove — and on the legacy
-                # key, not ours to leave stranded either, so it is moved rather
-                # than dropped.
-                if pk == legacy_pk:
-                    moved = dict(item)
-                    moved["pk"] = role_pk
-                    roles_tbl.put_item(Item=moved)
-                    roles_tbl.delete_item(Key={"pk": item["pk"], "sk": item["sk"]})
-                continue
-            roles_tbl.delete_item(Key={"pk": item["pk"], "sk": item["sk"]})
-
-    # Write new links
-    for pkey in permission_keys:
-        roles_tbl.put_item(Item={
-            "pk": role_pk, "sk": f"PERM#{pkey}",
-            "role_id": role_id, "permission_key": pkey,
-            "tenant_id": "platform", "assigned_at": now,
-        })
-    print(f"    set {len(permission_keys)} permissions on platform-admin")
 
 
 def bootstrap_claim_mapping_config(claim_tbl, now: str) -> None:
@@ -410,7 +316,6 @@ def main() -> None:
     dynamodb = boto3.resource("dynamodb", region_name=REGION)
 
     tenants_tbl = dynamodb.Table(os.environ["PORTH_TENANTS_TABLE"])
-    perms_tbl   = dynamodb.Table(os.environ["PORTH_PERMISSIONS_TABLE"])
     roles_tbl   = dynamodb.Table(os.environ["PORTH_ROLES_TABLE"])
     claim_tbl   = dynamodb.Table(os.environ["PORTH_CLAIM_MAPPING_CONFIGS_TABLE"])
 
@@ -425,19 +330,11 @@ def main() -> None:
     bootstrap_platform_org_and_tenant(tenants_tbl, now)
     print("   ✅ platform org and tenant ready")
 
-    print("\n1. Permissions")
-    permission_keys = bootstrap_permissions(perms_tbl, now)
-    print(f"   ✅ {len(permission_keys)} permissions ready")
-
-    print("\n2. platform-admin role")
+    print("\n1. platform-admin role")
     role_id = bootstrap_role(roles_tbl, now)
-    print(f"   ✅ role_id={role_id}")
+    print(f"   ✅ role_id={role_id} (permissions: porth-install reconcile-permissions, next)")
 
-    print("\n3. Role–permission links")
-    bootstrap_role_permissions(roles_tbl, role_id, permission_keys, now)
-    print("   ✅ permissions linked")
-
-    print("\n4. Claim mapping config")
+    print("\n2. Claim mapping config")
     bootstrap_claim_mapping_config(claim_tbl, now)
     print("   ✅ claim mapping config ready")
 

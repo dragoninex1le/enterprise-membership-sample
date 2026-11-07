@@ -853,14 +853,14 @@ jobs:
       # PORTH-656. Before the migrations, because the 0.4.1 catalogue migration
       # lets a record already at the new key supersede every per-tenant copy:
       # reconciled first, Porth's own permissions collapse without comparison.
-      # Per declared environment. Retired permissions (PORTH-597's
-      # platform.orgs.*, platform.settings.*) are always listed; they are only
-      # deleted, with every grant to them, when the prune_retired input is on.
+      # Per declared environment. Registration only: retired permissions are
+      # listed (and, with prune_retired, removed) by the reconcile job after the
+      # bootstrap, so nothing the bootstrap writes can outlive them.
       - name: Reconcile Porth's permissions (porth-install reconcile-permissions)
         env:
           ENV_NAME: ${{ env.EFF_ENV_NAME }}
           ENV_SCOPES: ${{ steps.tables.outputs.env_scopes }}
-          PRUNE: ${{ inputs.prune_retired }}
+          PRUNE: skip
         run: scripts/porth-reconcile-permissions.sh
 
       # ── Data migrations (porth-install migrate-keys) ───────────────────────
@@ -1165,9 +1165,24 @@ jobs:
   # AUTH0_MGMT_CLIENT_SECRET are set on the porth-install environment (a
   # Management API app with read:clients and read:organizations); without
   # them the output says they were skipped.
+  # PORTH-656: after the bootstrap (which creates the platform tenant and its
+  # platform-admin role but writes no permissions), make every environment's
+  # permissions match this release, and list — or, with prune_retired, remove —
+  # what Porth no longer ships. See porth-reconcile.yml.
+  reconcile:
+    name: Reconcile Porth's permissions
+    needs: [install-or-upgrade, bootstrap]
+    if: ${{ !cancelled() && needs.install-or-upgrade.result == 'success' }}
+    uses: ./.github/workflows/porth-reconcile.yml
+    with:
+      env_scopes: ${{ needs.install-or-upgrade.outputs.env_scopes }}
+      environment_name: ${{ inputs.environment_name || 'dev' }}
+      porth_install_version: ${{ needs.install-or-upgrade.outputs.porth_install_version }}
+      prune_retired: ${{ inputs.prune_retired }}
+
   check:
     name: Check the install against the declared environments
-    needs: [install-or-upgrade, bootstrap]
+    needs: [install-or-upgrade, bootstrap, reconcile]
     if: ${{ !cancelled() && needs.install-or-upgrade.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

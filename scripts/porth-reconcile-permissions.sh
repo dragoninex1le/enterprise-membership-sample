@@ -6,7 +6,8 @@
 #   PORTH_INSTALL_VERSION   from the release manifest (resolve-porth-release.sh)
 #   ENV_NAME                the Porth stack's Environment (table-name suffix)
 #   ENV_SCOPES              JSON array of declared environments, e.g. ["porth-sample","porth-dau"]
-#   PRUNE                   "true" to delete retired permissions and their grants
+#   PRUNE                   "skip" = register only; "false" = also list retired
+#                           permissions (dry run); "true" = delete them and their grants
 #   CA_DOMAIN CA_REPO CA_OWNER AWS_REGION   (optional; defaults below)
 set -euo pipefail
 
@@ -37,7 +38,7 @@ for SCOPE in $(printf '%s' "$ENV_SCOPES" | python3 -c 'import json,sys; print(" 
 
   # --prune-retired arrived in porth-install 0.4.6. Separate call: with it, the
   # whole run is a dry run unless --apply, and the reconcile above must apply.
-  if [ "$HAS_PRUNE" = true ]; then
+  if [ "$HAS_PRUNE" = true ] && [ "${PRUNE:-false}" != "skip" ]; then
     if [ "${PRUNE:-false}" = "true" ]; then
       echo "── ${SCOPE}: prune retired permissions (APPLY) ──"
       echo "::warning::prune_retired is on — ${SCOPE}: retired Porth permissions and every grant to them are being DELETED"
