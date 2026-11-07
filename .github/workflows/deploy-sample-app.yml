@@ -72,12 +72,11 @@ env:
   #
   # `ENVIRONMENT: dev` used to sit here and was read by nothing.
   ENVIRONMENT_SLOT: ${{ inputs.slot || (github.ref == 'refs/heads/main' && 'porth-sample' || 'porth-dau') }}
-  # PORTH-656 — environments moving to the tenant-named-host shape (INSTALL.md
-  # §4a): the UI on CloudFront only, the API on {tenant}.api.{slot}.{zone}.
-  # Space-separated. A listed environment switches over on the first deploy
-  # that finds its tenant-host certificate (porth-install-once); until then it
-  # stays on the shared-host shape and says so.
-  TENANT_API_HOST_SLOTS: porth-sample porth-dau
+  # PORTH-656: WHICH environments exist, and whether each serves tenant API
+  # hosts, is declared once in deploy/porth/environments.json and read from
+  # main (scripts/environments.py). ENVIRONMENT_SLOT above stays an expression
+  # only because the concurrency group needs it before any step runs; the first
+  # step checks it against the declared file and fails if they disagree.
   NODE_VERSION: '20'
 
 jobs:
@@ -127,12 +126,12 @@ jobs:
             echo "DNS_ROOT=${ROOT}."
           } >> "$GITHUB_ENV"
 
-          # PORTH-656: is this slot on the tenant-named-host shape?
-          TENANT_API_HOSTS=false
-          for s in ${{ env.TENANT_API_HOST_SLOTS }}; do
-            [ "$s" = "$SLOT" ] && TENANT_API_HOSTS=true
-          done
-          echo "TENANT_API_HOSTS=${TENANT_API_HOSTS}" >> "$GITHUB_ENV"
+          # PORTH-656: the declared environments, read from main — a branch
+          # deploys its code, never its own idea of the environments.
+          git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main
+          python3 scripts/environments.py resolve --ref "$GITHUB_REF" \
+            --slot "${{ inputs.slot }}" --expected "$SLOT" | tee -a "$GITHUB_ENV"
+          TENANT_API_HOSTS=$(grep '^TENANT_API_HOSTS=' "$GITHUB_ENV" | tail -1 | cut -d= -f2)
           echo "tenant api   : ${TENANT_API_HOSTS} (*.api.${SLOT}.${ROOT}, api.${SLOT}.${ROOT})"
 
           echo "environment  : ${SLOT}"
