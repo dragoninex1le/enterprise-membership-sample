@@ -150,7 +150,7 @@ jobs:
             aws cloudformation describe-stacks --stack-name "$PORTH_STACK_NAME" --region "$AWS_REGION" \
               --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text
           }
-          for key in TenantsTableName RolesTableName PermissionsTableName ClaimMappingConfigsTableName UsersTableName OrgUnitsTableName SessionsTableName EventBusName; do
+          for key in TenantsTableName RolesTableName PermissionsTableName ClaimMappingConfigsTableName UsersTableName SessionsTableName EventBusName; do
             value=$(out "$key")
             if [ -z "$value" ] || [ "$value" = "None" ]; then
               echo "::error::$PORTH_STACK_NAME has no $key output"
@@ -159,11 +159,14 @@ jobs:
             echo "$key=$value" >> "$GITHUB_OUTPUT"
             echo "$key: $value"
           done
-          # Porth's audit log has no stack output. Porth names it porth-audit-log-{Environment}, as it
-          # names porth-tenants-{Environment}, so the tenants table's suffix is its suffix too.
-          tenants=$(out TenantsTableName)
-          echo "AuditLogTableName=porth-audit-log-${tenants#porth-tenants-}" >> "$GITHUB_OUTPUT"
-          echo "AuditLogTableName: porth-audit-log-${tenants#porth-tenants-}"
+          # Two of Porth's tables have no stack output: the audit log never had one, and PORTH-636 dropped
+          # OrgUnitsTableName (Porth 0.4.x) to fit SAR's inline cap. Porth names every table
+          # porth-{family}-{Environment}, so the tenants table's suffix is theirs too.
+          suffix=$(out TenantsTableName); suffix=${suffix#porth-tenants-}
+          for pair in OrgUnitsTableName:porth-org-units AuditLogTableName:porth-audit-log; do
+            echo "${pair%%:*}=${pair#*:}-$suffix" >> "$GITHUB_OUTPUT"
+            echo "${pair%%:*}: ${pair#*:}-$suffix (derived)"
+          done
 
       # prawf-adapter-boundary admits Porth's table FAMILIES by name (porth-tenants-* and so on). A
       # table named outside them would be silently denied on every call - so a name that does not fit
