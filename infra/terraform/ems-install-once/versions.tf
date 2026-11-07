@@ -10,6 +10,11 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    # SupplierLink's key pair for each slot (suppliers.tf).
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
   }
 
   # Remote state, never local. These keys are created once and destroyed never;

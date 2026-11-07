@@ -624,6 +624,232 @@ Resources:
       Stage: $default
       ApiMappingKey: .well-known
 
+  # ── The supplier portal (Porth delegated sessions for suppliers' contacts) ──
+  #
+  # supplier_portal/. A buyer's supplier signs in to the supplier network
+  # (SupplierLink), which signs an assertion for them; POST
+  # {tenant}.api.{slot}/suppliers/session trades it for a Porth session in the buyer's
+  # tenant, used on /suppliers/* (the sample app, on Porth's bearer authorizer).
+  # Porth's contract for the session: docs/delegated-mint.md.
+
+  SupplierLinksTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub ems-supplier-links-${EnvironmentSlot}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: tenant_pk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: by_tenant
+          KeySchema:
+            - { AttributeName: tenant_pk, KeyType: HASH }
+          Projection: { ProjectionType: ALL }
+
+  # Named: Porth's install Terraform lists it in delegated_mint_caller_role_arns,
+  # which is what actually allows the mint (Porth's key policy). These statements
+  # are the role's own half of that grant.
+  SupplierPortalRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ems-supplier-portal-${EnvironmentSlot}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ems-supplier-portal
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Only this role writes the links. That is what makes a tenant context
+              # read back from them trustworthy.
+              - Sid: BuyerLinks
+                Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:DeleteItem, dynamodb:Query]
+                Resource:
+                  - !GetAtt SupplierLinksTable.Arn
+                  - !Sub "${SupplierLinksTable.Arn}/index/by_tenant"
+              - Sid: SupplierLinkPublicKey
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/ems/${EnvironmentSlot}/suppliers/supplierlink/public-key
+              - Sid: PorthServiceDocuments
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services/*
+              # kms:Sign cannot name an alias ARN as its Resource, so the key is
+              # selected by the alias it carries.
+              - Sid: SignMintRequests
+                Effect: Allow
+                Action: [kms:Sign, kms:DescribeKey]
+                Resource: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*
+                Condition:
+                  ForAnyValue:StringEquals:
+                    kms:ResourceAliases: !Sub alias/porth-delegated-mint-request-${PorthBranch}
+              - Sid: CallPorthMint
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:porth-${PorthBranch}-delegated-mint
+
+  SupplierPortalFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ems-supplier-portal-${EnvironmentSlot}
+      CodeUri: supplier_portal/
+      Handler: supplier_portal.lambda_entry.handler
+      Runtime: python3.12
+      Timeout: 15
+      MemorySize: 512
+      Role: !GetAtt SupplierPortalRole.Arn
+      Environment:
+        Variables:
+          BUYER_LINKS_TABLE: !Ref SupplierLinksTable
+          SUPPLIERLINK_PUBLIC_KEY_PARAMETER: !Sub /ems/${EnvironmentSlot}/suppliers/supplierlink/public-key
+          PORTH_BRANCH: !Ref PorthBranch
+          CLOUDFRONT_ALIAS: !Ref CloudFrontAlias
+      Events:
+        # The buyer's tenant admin links their SupplierLink account, from the SPA,
+        # on the browser API. More specific than /sample/{proxy+}, so it lands here.
+        BuyerLink:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SampleAppApi
+            Path: /sample/suppliers/link
+            Method: ANY
+        BuyerLinkItem:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SampleAppApi
+            Path: /sample/suppliers/{proxy+}
+            Method: ANY
+        BuyerLinkPreflight:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SampleAppApi
+            Path: /sample/suppliers/{proxy+}
+            Method: OPTIONS
+            Auth:
+              Authorizer: NONE
+
+  # The SUPPLIERS API, under `suppliers` on both API domains:
+  #   POST /suppliers/session  -> SupplierPortalFunction, no Porth authorizer (the
+  #                               caller has a SupplierLink assertion, not a Porth token)
+  #   ANY  /suppliers/{proxy+} -> SampleAppFunction, Porth's bearer authorizer
+  SampleAppSuppliersApi:
+    Type: AWS::ApiGatewayV2::Api
+    Condition: HasBearerSurface
+    Properties:
+      Name: !Sub ems-sample-app-suppliers-${EnvironmentSlot}
+      ProtocolType: HTTP
+      Description: The supplier portal — session exchange (open) and suppliers' contacts (Porth bearer authorizer).
+
+  SampleAppSuppliersAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Condition: HasBearerSurface
+    Properties:
+      ApiId: !Ref SampleAppSuppliersApi
+      Name: PorthBearerAuthorizer
+      AuthorizerType: REQUEST
+      AuthorizerPayloadFormatVersion: '2.0'
+      EnableSimpleResponses: false
+      AuthorizerResultTtlInSeconds: 0
+      IdentitySource:
+        - $request.header.Authorization
+      AuthorizerUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PorthBearerAuthorizerFunctionArn}/invocations
+      AuthorizerCredentialsArn: !GetAtt SampleAppAuthorizerInvokeRole.Arn
+
+  SampleAppSuppliersSessionIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Condition: HasBearerSurface
+    Properties:
+      ApiId: !Ref SampleAppSuppliersApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt SupplierPortalFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  SampleAppSuppliersAppIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Condition: HasBearerSurface
+    Properties:
+      ApiId: !Ref SampleAppSuppliersApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt SampleAppFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  SampleAppSuppliersSessionRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: HasBearerSurface
+    Properties:
+      ApiId: !Ref SampleAppSuppliersApi
+      RouteKey: POST /session
+      AuthorizationType: NONE
+      Target: !Sub integrations/${SampleAppSuppliersSessionIntegration}
+
+  SampleAppSuppliersRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: HasBearerSurface
+    Properties:
+      ApiId: !Ref SampleAppSuppliersApi
+      RouteKey: ANY /{proxy+}
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref SampleAppSuppliersAuthorizer
+      Target: !Sub integrations/${SampleAppSuppliersAppIntegration}
+
+  SampleAppSuppliersStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Condition: HasBearerSurface
+    Properties:
+      ApiId: !Ref SampleAppSuppliersApi
+      StageName: $default
+      AutoDeploy: true
+
+  SampleAppSuppliersSessionPermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasBearerSurface
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref SupplierPortalFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${SampleAppSuppliersApi}/*/*/session
+
+  SampleAppSuppliersAppPermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasBearerSurface
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref SampleAppFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${SampleAppSuppliersApi}/*
+
+  TenantApiSuppliersMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Condition: HasBearerSurface
+    DependsOn: SampleAppSuppliersStage
+    Properties:
+      ApiId: !Ref SampleAppSuppliersApi
+      DomainName: !Ref TenantApiDomain
+      Stage: $default
+      ApiMappingKey: suppliers
+
+  PlatformApiSuppliersMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Condition: HasBearerSurface
+    DependsOn: SampleAppSuppliersStage
+    Properties:
+      ApiId: !Ref SampleAppSuppliersApi
+      DomainName: !Ref PlatformApiDomain
+      Stage: $default
+      ApiMappingKey: suppliers
+
   # The A record is NOT here. HostedZoneName makes CloudFormation resolve the
   # zone with route53:ListHostedZones, and sample-app-deploy-role holds
   # route53:ListHostedZonesByName — a different action. The whole change set
@@ -1741,6 +1967,26 @@ Resources:
                   - !Sub 'repo:${UatRunnerComponentsRepo}:*'
                   - !Sub 'repo:${UatRunnerConsumerRepo}:*'
       Policies:
+        # supplier-proof.yml plays SupplierLink: it signs assertions with the
+        # simulator's private key, and afterwards searches the logs for any token.
+        - PolicyName: supplier-proof
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/ems/${EnvironmentSlot}/suppliers/supplierlink/simulator-private-key
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+              - Effect: Allow
+                Action: logs:FilterLogEvents
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/ems-supplier-portal-${EnvironmentSlot}:*
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/ems-sample-app-${EnvironmentSlot}:*
         - PolicyName: invoke-and-read-ffug
           PolicyDocument:
             Version: '2012-10-17'
@@ -2070,6 +2316,16 @@ Outputs:
     Condition: HasBearerSurface
     Description: The MCP endpoint on a tenant's API host ({tenant} is the tenant id).
     Value: !Sub https://{tenant}.api.${CloudFrontApexAlias}/mcp
+  SupplierSessionUrlPattern:
+    Condition: HasBearerSurface
+    Description: Where a supplier's contact trades a SupplierLink assertion for a session ({tenant} is the buyer).
+    Value: !Sub https://{tenant}.api.${CloudFrontApexAlias}/suppliers/session
+  SupplierPortalRoleArn:
+    Description: >-
+      The delegated-mint caller. Porth's install Terraform must list it in
+      delegated_mint_caller_role_arns, or every supplier session is refused at
+      Porth's key policy.
+    Value: !GetAtt SupplierPortalRole.Arn
   SampleAppBearerApiId:
     Condition: HasBearerSurface
     Description: The sample app's bearer API (MCP, connector tokens), on Porth's bearer authorizer.

@@ -427,6 +427,28 @@ resource "aws_iam_role_policy" "deploy_role_async_work" {
         # The pattern is the suffix, not porth-dau by name, so a further
         # environment needs no new grant. The unsuffixed stack stays covered by
         # the vendor statement.
+        # deploy-sample-app.yml registers the app's permissions with
+        # `porth-install register-permissions`, which — like Porth's own API —
+        # writes, publishes a Permission.* event on Porth's bus, and records an
+        # audit entry.
+        #
+        # CONFIRMED by run 42415791710: AccessDeniedException on events:PutEvents
+        # for sample-app-deploy-role, after the dry run had passed. A dry run
+        # publishes nothing, so it cannot prove this grant.
+        Sid      = "RegisterAppPermissionsEvents"
+        Effect   = "Allow"
+        Action   = ["events:PutEvents"]
+        Resource = "arn:aws:events:${var.aws_region}:${data.aws_caller_identity.current.account_id}:event-bus/porth-events-${var.porth_branch}"
+      },
+      {
+        # The audit half (--audit-table). Reasoned, not yet observed: without it
+        # the run reports the trail unwritten and exits 1.
+        Sid      = "RegisterAppPermissionsAudit"
+        Effect   = "Allow"
+        Action   = ["dynamodb:PutItem"]
+        Resource = "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/porth-audit-log-${var.porth_branch}"
+      },
+      {
         Sid      = "CloudFormationPerEnvironmentStacks"
         Effect   = "Allow"
         Action   = "cloudformation:*"

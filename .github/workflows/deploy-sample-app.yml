@@ -569,6 +569,10 @@ jobs:
             --tenants all --tenants-table "$TENANTS_TABLE"
             --environment "$ENVIRONMENT_SLOT"
             --event-bus "$PORTH_EVENT_BUS"
+            # Where the record of what this deploy granted goes: Porth's audit
+            # table, named for the Porth stack's Environment (PORTH_BRANCH). The
+            # deploy role's PutItem on it is ems-install-once's.
+            --audit-table "porth-audit-log-${PORTH_BRANCH}"
           )
 
           # Plan first: the audit trail of what this deploy is about to grant.
@@ -682,6 +686,18 @@ jobs:
           # path collects: a test directory nothing invokes is a test directory
           # that passes.
           python -m pytest ffug/tests sample_app/tests sample_app_callback/tests -q
+
+      # The supplier portal (supplier_portal/) deploys with its own porth-common
+      # (>=0.0.22, for Porth's delegated mint), which cannot share an environment with
+      # the sample app's (<0.0.18). Tested in its own venv, against what it ships with.
+      - name: Run supplier portal unit tests
+        working-directory: supplier_portal
+        run: |
+          set -euo pipefail
+          python -m venv .venv-test
+          .venv-test/bin/pip install --quiet -r requirements.txt pytest httpx "moto[dynamodb]"
+          .venv-test/bin/python -m pytest tests -q
+          rm -rf .venv-test
 
       # ── SAM build + deploy ───────────────────────────────────────────────────────────────
 
