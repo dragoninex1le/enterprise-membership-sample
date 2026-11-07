@@ -1,12 +1,15 @@
 {
   "namespace": "sample-app",
   "permissions": [
-    {"key": "dashboard.read",    "display_name": "View Dashboard",       "category": "Dashboard",           "admin_role": "tenant-admin", "sort_order": 10},
-    {"key": "ar.invoices.read",  "display_name": "View Invoices",        "category": "Accounts Receivable", "admin_role": "tenant-admin", "sort_order": 10},
+    {"key": "dashboard.read", "display_name": "View Dashboard", "category": "Dashboard", "admin_role": "tenant-admin", "sort_order": 10},
+    {"key": "ar.invoices.read", "display_name": "View Invoices", "category": "Accounts Receivable", "admin_role": "tenant-admin", "sort_order": 10},
     {"key": "ar.invoices.write", "display_name": "Create/Edit Invoices", "category": "Accounts Receivable", "admin_role": "tenant-admin", "sort_order": 20},
-    {"key": "ap.bills.read",     "display_name": "View Bills",           "category": "Accounts Payable",    "admin_role": "tenant-admin", "sort_order": 10},
-    {"key": "ap.bills.write",    "display_name": "Create/Edit Bills",    "category": "Accounts Payable",    "admin_role": "tenant-admin", "sort_order": 20},
-    {"key": "approvals.read",    "display_name": "View Approvals",       "category": "Approvals",           "admin_role": "tenant-admin", "sort_order": 10},
-    {"key": "approvals.write",   "display_name": "Approve/Reject",       "category": "Approvals",           "admin_role": "tenant-admin", "sort_order": 20}
+    {"key": "ap.bills.read", "display_name": "View Bills", "category": "Accounts Payable", "admin_role": "tenant-admin", "sort_order": 10},
+    {"key": "ap.bills.write", "display_name": "Create/Edit Bills", "category": "Accounts Payable", "admin_role": "tenant-admin", "sort_order": 20},
+    {"key": "approvals.read", "display_name": "View Approvals", "category": "Approvals", "admin_role": "tenant-admin", "sort_order": 10},
+    {"key": "approvals.write", "display_name": "Approve/Reject", "category": "Approvals", "admin_role": "tenant-admin", "sort_order": 20},
+    {"key": "supplier.invoices.submit", "display_name": "Submit invoices (supplier portal)", "category": "Supplier portal", "admin_role": "tenant-admin", "sort_order": 10},
+    {"key": "supplier.invoices.read", "display_name": "View own invoices (supplier portal)", "category": "Supplier portal", "admin_role": "tenant-admin", "sort_order": 20},
+    {"key": "suppliers.manage", "display_name": "Link the supplier network", "category": "Supplier portal", "admin_role": "tenant-admin", "sort_order": 30}
   ]
 }

@@ -7,7 +7,7 @@ from mangum import Mangum
 from porth_common.internal_plane import log_plane_identity
 from .cors import HostBoundOriginMiddleware
 from .director import DirectorMiddleware, SampleAppDirector
-from .routers import dashboard, ar, ap, approvals, diagnostics
+from .routers import dashboard, ar, ap, approvals, diagnostics, suppliers
 from .accounts_mcp import http as accounts_mcp
 
 # PORTH-622 — set once, for the whole package, at the entry point.
@@ -81,7 +81,38 @@ else:
 # PORTH-613 — the shared Director, not a hand-rolled context. Still innermost,
 # so CORSMiddleware wraps even the early 401/403 responses; a refusal without
 # CORS headers is one the browser hides from the app entirely.
-app.add_middleware(DirectorMiddleware)       # added first → innermost
+
+
+class SupplierBoundary:
+    """A delegated caller — a supplier's contact holding a Porth session the supplier
+    portal obtained for them (``auth_source == "exchange"``) — is served by
+    /suppliers/* and nothing else. Porth says who the caller is and how they were
+    vouched for; which routes that is enough for is this app's decision, and a
+    supplier does not read the buyer's ledgers, approve, administer, or drive the
+    accounts MCP service.
+
+    Innermost, so the Director is attached when it runs. A route added later is
+    closed to suppliers without anyone having to remember to close it.
+    """
+
+    REFUSAL = b'{"detail":"delegated_principal_refused"}'
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and not scope.get("path", "").startswith("/suppliers/"):
+            director = (scope.get("state") or {}).get("director")
+            if director is not None and suppliers.delegated(director):
+                await send({"type": "http.response.start", "status": 403, "headers": [
+                    (b"content-type", b"application/json"), (b"content-length", str(len(self.REFUSAL)).encode())]})
+                await send({"type": "http.response.body", "body": self.REFUSAL})
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(SupplierBoundary)          # added first → innermost (the Director is set by then)
+app.add_middleware(DirectorMiddleware)
 
 app.add_middleware(                          # added last  → outermost
     CORSMiddleware,
@@ -110,6 +141,9 @@ app.include_router(diagnostics.router)
 # The accounts MCP service, at /mcp. Reached only through the app's bearer API
 # (template.yml SampleAppBearerApi); the browser API serves /sample/* alone.
 app.include_router(accounts_mcp.router)
+# The supplier portal's routes for suppliers' contacts, through the SUPPLIERS API
+# (template.yml SampleAppSuppliersApi). See routers/suppliers.py.
+app.include_router(suppliers.router)
 
 # PORTH-623 — say who this deployable is and where it will read, once, on the
 # first invocation. INFO on purpose: this is the post-deploy check, and putting

@@ -27,6 +27,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 ROUTERS = ROOT / "lambdas" / "sample_app" / "routers"
 DECLARED = ROOT / "deploy" / "sample-app" / "permissions.json"
 ROLES = ROOT / "deploy" / "sample-app" / "roles.json"
+#: The supplier portal function enforces its own key on the buyer-link routes, as a
+#: module constant rather than a require_permission call.
+SUPPLIER_PORTAL = ROOT / "supplier_portal" / "supplier_portal" / "web.py"
+_PORTAL_KEY = re.compile(r'^MANAGE = "([^"]+)"', re.M)
 
 _ENFORCED = re.compile(r"require_permission\(\s*[\"']([^\"']+)[\"']\s*\)")
 
@@ -35,6 +39,7 @@ def _enforced() -> set[str]:
     keys: set[str] = set()
     for path in ROUTERS.glob("*.py"):
         keys |= set(_ENFORCED.findall(path.read_text()))
+    keys |= set(_PORTAL_KEY.findall(SUPPLIER_PORTAL.read_text()))
     return keys
 
 
@@ -98,6 +103,8 @@ def test_only_the_controller_can_approve():
     and nobody both authors and approves."""
     roles = json.loads(ROLES.read_text())["roles"]
     approvers = {n for n, g in roles.items() if "approvals.write" in g}
+    assert not set(roles["supplier"]) & {"approvals.write", "ap.bills.read", "ar.invoices.read"}, (
+        "a supplier reads and approves nothing of the buyer's")
     authors = {n for n, g in roles.items() if {"ar.invoices.write", "ap.bills.write"} & set(g)}
     assert approvers == {"controller"}
     assert not approvers & authors
