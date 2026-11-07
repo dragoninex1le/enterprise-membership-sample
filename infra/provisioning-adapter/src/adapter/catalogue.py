@@ -131,7 +131,8 @@ ENTITIES: tuple[Entity, ...] = (
     ),
     Entity(
         id="porth-role-grant",
-        description="Application permissions bound to a role. Unioned, never replaced.",
+        description="Permissions added to a role the seed does not own, such as tenant-admin. Unioned, never "
+                    "replaced. A seeded role's own grants are porth-role's.",
         destructive=True,
         resources=(
             "roles: pk=ENV#{s}#TENANT#{tid}#ROLE#{uuid} sk=PERM#{key} (PORTH-604 tenant-leading; PORTH-609 union)",
@@ -140,10 +141,12 @@ ENTITIES: tuple[Entity, ...] = (
     ),
     Entity(
         id="porth-role",
-        description="Arranged roles, such as a role with no grants for a denial test.",
+        description="The application's roles and the permissions they link to, and arranged roles such as one "
+                    "with no grants for a denial test. A grant must name a permission the install already has.",
         destructive=True,
-        resources=("roles: pk=ENV#{s}#TENANT#{tid} sk=ROLE#{uuid} (not a system role)",),
-        # PRF-18 seeds arranged roles (never system roles); reset of `porth` removes them with the rest.
+        resources=("roles: pk=ENV#{s}#TENANT#{tid} sk=ROLE#{uuid} (not a system role)",
+                   "roles: pk=ENV#{s}#TENANT#{tid}#ROLE#{uuid} sk=PERM#{key} (its grants)"),
+        # PRF-18 seeds roles (never system roles) with their grants; reset of `porth` removes them with the rest.
         verbs=("seed", "teardown"),
     ),
     Entity(
