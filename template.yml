@@ -272,8 +272,11 @@ Parameters:
     Type: String
     Default: ''
     Description: >-
-      The Porth stack's HttpApiId output. Mapped under the `porth` key on both
-      API domains when TenantApiHosts is 'true'; unused otherwise.
+      The Porth API mapped under the `porth` key on both API domains when
+      TenantApiHosts is 'true' (unused otherwise): the Porth stack's
+      BrowserHttpApiId output from Porth 0.4.7, its HttpApiId before that. On
+      those slots PorthAuthorizerFunctionArn and PorthAuthorizerFunctionRoleArn
+      are the browser authorizer's too (deploy-sample-app.yml resolves all three).
 
 Conditions:
 

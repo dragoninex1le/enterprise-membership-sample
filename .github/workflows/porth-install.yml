@@ -77,7 +77,11 @@ on:
         # (backfilled from SAR so the switch-over can be tested at the same code).
         # PORTH-656: 0.4.3 serves tenant API hosts ({tenant}.api.{slot}.{zone}) —
         # host-bound credentials, the `porth` mapping key and per-host CORS.
-        default: '0.4.3'
+        # PORTH-656: 0.4.7 adds the browser surface (BrowserHttpApiId and the
+        # browser authorizer), which deploy-sample-app.yml moves tenant-API-host
+        # slots onto; 0.4.5 clears the drifted authorizer; 0.4.6 reloads the
+        # tenant directory on a login-org miss.
+        default: '0.4.7'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
@@ -143,7 +147,7 @@ env:
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.3' }}
+    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.7' }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
@@ -171,7 +175,7 @@ jobs:
       # also works when triggered by the push shim (inputs are empty on push).
       - name: Resolve effective inputs
         run: |
-          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.3' }}" >> "$GITHUB_ENV"
+          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.7' }}" >> "$GITHUB_ENV"
           echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
           # The configured mode, overridable for one run. Empty IS the mode

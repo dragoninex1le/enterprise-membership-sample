@@ -328,6 +328,29 @@ jobs:
           echo "PORTH_AUTHORIZER_ROLE_ARN=$PORTH_AUTHORIZER_ROLE_ARN" >> $GITHUB_ENV
           echo "✅ Resolved PORTH_AUTHORIZER_ROLE_ARN=$PORTH_AUTHORIZER_ROLE_ARN"
 
+          # PORTH-656 — the browser surface (Porth 0.4.7+). A tenant-API-host slot
+          # serves only the SPA's cookie sessions, so its `porth` mapping, its own
+          # API's authorizer and the role that authorizer assumes all move to the
+          # browser surface. One authorizer per surface: bearer callers stay on
+          # Porth's HttpApiId, and this app has none.
+          if [ "${TENANT_API_HOSTS}" = "true" ]; then
+            BROWSER_API_ID=$(get_output BrowserHttpApiId)
+            BROWSER_AUTHORIZER_ARN=$(get_output BrowserAuthorizerFunctionArn)
+            BROWSER_AUTHORIZER_ROLE_ARN=$(get_output BrowserAuthorizerFunctionRoleArn)
+            if [ -z "$BROWSER_API_ID" ] || [ "$BROWSER_API_ID" == "None" ] \
+               || [ -z "$BROWSER_AUTHORIZER_ARN" ] || [ "$BROWSER_AUTHORIZER_ARN" == "None" ] \
+               || [ -z "$BROWSER_AUTHORIZER_ROLE_ARN" ] || [ "$BROWSER_AUTHORIZER_ROLE_ARN" == "None" ]; then
+              echo "::warning::The Porth install has no browser surface (needs Porth 0.4.7+). This slot stays on the shared authorizer until porth-install.yml upgrades it."
+            else
+              {
+                echo "PORTH_HTTP_API_ID=$BROWSER_API_ID"
+                echo "PORTH_AUTHORIZER_ARN=$BROWSER_AUTHORIZER_ARN"
+                echo "PORTH_AUTHORIZER_ROLE_ARN=$BROWSER_AUTHORIZER_ROLE_ARN"
+              } >> "$GITHUB_ENV"
+              echo "✅ Browser surface: api=$BROWSER_API_ID authorizer=$BROWSER_AUTHORIZER_ARN"
+            fi
+          fi
+
           # PORTH-587 — what ffug needs from the install, read from the install
           # rather than assumed here.
           #
