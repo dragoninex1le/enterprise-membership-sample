@@ -82,7 +82,9 @@ on:
         # slots onto; 0.4.5 clears the drifted authorizer; 0.4.6 reloads the
         # tenant directory on a login-org miss.
         # 0.4.8 names the two Porth APIs (porth-dev-api / porth-dev-browser-api).
-        default: '0.4.8'
+        # 0.4.9 — PORTH-655 bugs (audit slot, org routes platform-only,
+        # legacy-read refusal, connector claim-mapping lineage).
+        default: '0.4.9'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
@@ -147,11 +149,11 @@ env:
   PORTH_INSTALL_VERSION: '0.3.0'
   # PORTH-656: `porth-install check` arrived in 0.4.3. Its own pin, so the
   # install steps above keep the version they were proven with.
-  PORTH_INSTALL_CHECK_VERSION: '0.4.3'
+  PORTH_INSTALL_CHECK_VERSION: '0.4.4'
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.8' }}
+    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.9' }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
@@ -179,7 +181,7 @@ jobs:
       # also works when triggered by the push shim (inputs are empty on push).
       - name: Resolve effective inputs
         run: |
-          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.8' }}" >> "$GITHUB_ENV"
+          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.9' }}" >> "$GITHUB_ENV"
           echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
           # The configured mode, overridable for one run. Empty IS the mode
