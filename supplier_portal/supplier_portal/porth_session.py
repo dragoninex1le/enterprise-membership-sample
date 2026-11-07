@@ -59,8 +59,8 @@ class Outcome:
 def request_body(contact: SupplierContact) -> dict[str, Any]:
     return {
         "connector_type": contact.connector,
-        # Porth renders the associate as {connector}:{external_id}; the contact id is
-        # unique only within its supplier, so the supplier is part of it.
+        # Porth names the delegated principal {connector}:{external_id}; a contact id
+        # is unique only within its supplier, so the supplier is part of it.
         "external_id": f"{contact.supplier}.{contact.contact}",
         "verification": {
             "reference": f"{contact.buyer}/{contact.assertion_id}",
