@@ -1,21 +1,22 @@
-// PORTH-131 — Claim mapping configuration screen
+// PORTH-131 — a tenant's claim mapping. Always one tenant's: a platform admin reaches it from that
+// tenant's page, a tenant admin sees their own. The token tester (PORTH-132) sits under the editor.
 import { useEffect, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
-import { usePorthContext } from '../context/PorthContext'
-import { useHasRole } from '../hooks/useRoles'
-import { PLATFORM_ADMIN, DEFAULT_CLAIM_MAPPING } from '../constants'
+import { Link, useMatch } from 'react-router-dom'
+import { DEFAULT_CLAIM_MAPPING } from '../constants'
 import { claimConfigsApi } from '../api/claimConfigs'
 import type { ClaimMappingConfig } from '../api/types'
+import TokenTester from '../components/TokenTester'
+import { PLATFORM_TENANT_ID, TENANT_PAGE, useManagedTenant } from '../hooks/useManagedTenant'
 
 const DEFAULT_MAPPING = JSON.stringify(DEFAULT_CLAIM_MAPPING, null, 2)
 
 export default function ClaimMappingConfigPage() {
-  const { currentUser } = usePorthContext()
-  const isPlatformAdmin = useHasRole(PLATFORM_ADMIN)
-  const [searchParams] = useSearchParams()
-  const tenantId = isPlatformAdmin
-    ? (searchParams.get('tenantId') ?? '')
-    : (currentUser?.porthUser.tenant_id ?? '')
+  const tenantId = useManagedTenant()
+  const onTenantPage = useMatch(TENANT_PAGE) !== null
+  // The platform tenant's mapping is the install's: bootstrap writes a new version whenever its own
+  // differs, so an edit here would be replaced at the next install. Shown, never edited.
+  const installOwned = tenantId === PLATFORM_TENANT_ID
+  const Heading = onTenantPage ? 'h2' : 'h1'
 
   // Editor state
   const [editorValue, setEditorValue] = useState<string>(DEFAULT_MAPPING)
@@ -113,11 +114,21 @@ export default function ClaimMappingConfigPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-gray-900 mb-6">Claim Mapping Config</h1>
+      <Heading className={`${onTenantPage ? 'text-lg font-semibold' : 'text-2xl font-bold'} text-gray-900 mb-1`}>Claim mapping</Heading>
+      <p className="text-sm text-gray-500 mb-6">
+        How a signed-in user's token claims become this tenant's roles.
+      </p>
 
       {!tenantId && (
         <div className="mb-4 px-4 py-3 bg-yellow-50 border border-yellow-200 text-yellow-800 rounded text-sm">
-          Add <span className="font-mono">?tenantId=your-tenant-id</span> to the URL to load or save a config.
+          No tenant chosen. <Link to="/admin/platform/tenants" className="underline">Choose one from Tenants</Link>.
+        </div>
+      )}
+
+      {installOwned && (
+        <div className="mb-4 px-4 py-3 bg-gray-50 border border-gray-200 text-gray-700 rounded text-sm">
+          The platform tenant's claim mapping is written by the Porth install, and the next install replaces
+          any change made here. It is shown read-only.
         </div>
       )}
 
@@ -137,6 +148,7 @@ export default function ClaimMappingConfigPage() {
               <textarea
                 className="font-mono w-full h-64 border rounded p-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
                 value={editorValue}
+                readOnly={installOwned}
                 onChange={(e) => {
                   setEditorValue(e.target.value)
                   setSaveError(null)
@@ -157,6 +169,7 @@ export default function ClaimMappingConfigPage() {
                 </p>
               )}
 
+              {!installOwned && (
               <div className="mt-3 flex gap-2">
                 <button
                   onClick={handleSave}
@@ -171,6 +184,11 @@ export default function ClaimMappingConfigPage() {
                 >
                   Compile Preview
                 </button>
+              </div>
+              )}
+
+              <div className="mt-8">
+                <TokenTester mapping={editorValue} />
               </div>
             </>
           )}
@@ -193,7 +211,7 @@ export default function ClaimMappingConfigPage() {
               <div className="animate-pulse bg-gray-200 rounded h-6 w-full" />
             </div>
           ) : versions.length === 0 ? (
-            <p className="text-xs text-gray-400">{tenantId ? 'No versions yet.' : 'Select a tenant to view history.'}</p>
+            <p className="text-xs text-gray-400">{tenantId ? 'No versions yet.' : 'Choose a tenant to view its history.'}</p>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-xs text-left border-collapse">
@@ -214,12 +232,14 @@ export default function ClaimMappingConfigPage() {
                         {v.compiled_hash ? v.compiled_hash.slice(0, 8) : '—'}
                       </td>
                       <td className="py-1.5">
-                        <button
-                          onClick={() => handleRollback(v.version)}
-                          className="text-indigo-600 hover:text-indigo-800 hover:underline"
-                        >
-                          Rollback
-                        </button>
+                        {!installOwned && (
+                          <button
+                            onClick={() => handleRollback(v.version)}
+                            className="text-indigo-600 hover:text-indigo-800 hover:underline"
+                          >
+                            Rollback
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}

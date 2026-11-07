@@ -36,4 +36,12 @@ test.describe('Tenants page', () => {
     await page.goto('/admin/platform/tenants')
     await expect(page.getByText('suspended', { exact: true }).first()).toBeVisible()
   })
+
+  test('no tenant is shown as managed until one is chosen', async ({ page }) => {
+    await page.goto('/admin/platform/tenants')
+    await expect(page.getByRole('heading', { name: 'Tenants' })).toBeVisible()
+    await expect(page.getByText('Managing Tenant')).toHaveCount(0)
+    await expect(page.getByRole('link', { name: /Claim Mapping/ })).toHaveCount(0)
+  })
+
 })
