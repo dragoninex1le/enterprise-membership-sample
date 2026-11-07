@@ -16,6 +16,10 @@ on:
       - '.github/workflows/deploy-provisioning-adapter.yml'
       - 'infra/qa-tools/**'
       - '.github/workflows/deploy-qa-tools.yml'
+      # The Porth install has its own pipeline (porth-install.yml); its blob
+      # builder is used by nothing else.
+      - '.github/workflows/porth-install.yml'
+      - 'deploy/porth/scripts/build_auth_blob.py'
   workflow_dispatch:
     inputs:
       # PORTH-656. Empty keeps the ref rule (main → porth-sample, any other

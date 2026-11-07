@@ -744,9 +744,15 @@ jobs:
           # containing JSON. An apostrophe in one of its comments ended the shell
           # string and broke the deploy (PORTH-589); the error read as a bash
           # syntax error pointing at a parenthesis.
+          # PORTH-656: the live blob, so the builder can carry the managed keys
+          # (root_url, environments, tenant_origins) over instead of dropping
+          # them for the seconds until auth-config writes them back.
+          EXISTING_AUTH_BLOB=$(aws ssm get-parameter --name /porth/auth \
+            --query Parameter.Value --output text --region "$AWS_REGION" 2>/dev/null || echo "")
           BLOB=$(
             MANIFEST="$MANIFEST" \
             EFF_FIXED_ENVIRONMENT="$EFF_FIXED_ENV" \
+            EXISTING_AUTH_BLOB="$EXISTING_AUTH_BLOB" \
             python3 deploy/porth/scripts/build_auth_blob.py
           )
 
@@ -754,7 +760,7 @@ jobs:
           aws ssm put-parameter --name /porth/auth --type String --overwrite \
             --value "$BLOB" --region "$AWS_REGION"
           echo "✅ Seeded /porth/auth (issuer $(echo "$BLOB" | python3 -c 'import json,sys; print(json.load(sys.stdin)["issuer"])'))"
-          echo "   (origin policy keys are written by the next step, not this one)"
+          echo "   (origin policy keys carried over from the live blob; the next step conforms them)"
 
       # ── Conform the origin policy — PORTH-588 ───────────────────────────────
       # root_url / environments / tenant_origins are policy.MANAGED_KEYS, owned by
