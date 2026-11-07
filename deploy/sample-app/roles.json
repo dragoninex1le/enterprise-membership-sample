@@ -1,0 +1,10 @@
+{
+  "_comment": "The sample app's business roles and the sample-app permissions each holds. NOT deployed by deploy-sample-app.yml — that deploys the permissions (permissions.json) only. Roles are seeded per tenant by whatever seeds the tenant; this file is what that seeder reads. tenant-admin is not listed: Porth creates it and register-permissions grants it every permission above.",
+  "namespace": "sample-app",
+  "roles": {
+    "viewer":     ["dashboard.read", "ar.invoices.read", "ap.bills.read", "approvals.read"],
+    "ar-clerk":   ["dashboard.read", "ar.invoices.read", "ar.invoices.write"],
+    "ap-clerk":   ["dashboard.read", "ap.bills.read", "ap.bills.write"],
+    "controller": ["dashboard.read", "ar.invoices.read", "ap.bills.read", "approvals.read", "approvals.write"]
+  }
+}
