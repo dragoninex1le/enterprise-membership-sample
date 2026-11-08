@@ -79,6 +79,56 @@ terraform plan
 Both `*.hcl` copies and `*.tfvars` are gitignored. The defaults already name the
 one key this install needs, so a plan takes no var file.
 
+## Porth's install-once, in this state
+
+`porth.tf` calls Porth's `porth-install-once` module (Components) at a pinned
+commit, with its inputs committed here. EMS used to apply that module on its own,
+from a Components checkout, using a gitignored `ems.tfvars`. That left the value
+deciding who may mint a delegated session, `delegated_mint_caller_role_arns`, on one
+machine and empty. Porth then refused every supplier session with a KMS AccessDenied
+on `Sign`.
+
+**Who may mint** is `delegated_mint_caller_slots` in `variables.tf`, keyed by Porth
+environment. Each slot becomes the portal role `template.yml` creates for it,
+`ems-supplier-portal-{slot}`. Porth's key policy grants `kms:Sign` to exactly those
+roles, and that grant is the control; the portal's own IAM is only the other half.
+Adding a slot is a reviewed change. An environment the map does not name gets an
+empty list, so minting is off. `lambdas/sample_app/tests/test_mint_callers.py` keeps
+the list equal to `deploy/porth/environments.json`. After every deploy,
+`deploy-sample-app.yml` reads the live key policy and fails if the slot's role is
+not in it. That includes a role a stack replaced, which the policy shows as a bare
+`AROA…` id until the next apply.
+
+**Adopting it, once.** Porth's resources (8 tables, 3 KMS keys, the alert topic,
+the tenant-host certificates and their SSM parameters) live in the state the
+Components checkout applied, `porth-install-once/dev`. Move them here before the
+first plan:
+
+```bash
+terraform init -backend-config=backend.ems.hcl
+```
+
+```bash
+./adopt-porth-install-once.sh
+```
+
+The script moves both states on private local copies and plans against the result.
+It stops, with nothing remote changed, if that plan would destroy anything, or
+create anything other than the mint callers' invoke permissions and the deploy
+role's read of the key policy. Only after you type `adopt` does it push the moved
+state and rename the old state object `*.retired-<timestamp>`. After that, never
+apply Components' root module with `ems.tfvars` again: its state is retired, and an
+apply from there would create Porth's resources a second time.
+
+Then `terraform plan` should show only:
+- the mint key's policy updated in place, with the callers plus upstream's
+  key-policy fix (Components 94189b7);
+- one `aws_lambda_permission` per caller;
+- `aws_iam_role_policy.deploy_role_mint_caller_check`.
+
+**Moving Porth's install-once on** is a change of `ref` in `porth.tf`. Read the
+plan before applying it, as you would any other change.
+
 ## What one apply produces
 
 Both keys and both trust documents. There is no registration step, nothing to

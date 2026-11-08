@@ -1118,3 +1118,32 @@ jobs:
           aws cloudfront create-invalidation \
             --distribution-id ${{ steps.outputs.outputs.cf_id }} \
             --paths "/*"
+
+      # Porth's mint key policy names who may sign a delegated-mint request, and
+      # nobody else can (template.yml SignMintRequests is only the portal's half).
+      # The names come from delegated_mint_caller_slots in
+      # infra/terraform/ems-install-once. Checked by ARN after every deploy: a role
+      # a stack REPLACED shows in the policy as a bare unique id (AROA...), which
+      # matches nothing, and every supplier session is then refused (KMS
+      # AccessDenied on Sign). Last, so a failure never holds back the app itself.
+      - name: Check the supplier portal may mint
+        run: |
+          set -euo pipefail
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          ROLE="arn:aws:iam::${ACCOUNT}:role/ems-supplier-portal-${ENVIRONMENT_SLOT}"
+          KEY=$(aws ssm get-parameter --name "/porth/${PORTH_BRANCH}/infra/delegated-mint-request-key-arn" \
+            --query Parameter.Value --output text)
+          if ! POLICY=$(aws kms get-key-policy --key-id "$KEY" --policy-name default \
+              --query Policy --output text 2>/tmp/kms-err); then
+            echo "::error::Cannot read the mint key's policy ($(head -c 300 /tmp/kms-err)). Apply infra/terraform/ems-install-once: it grants this role kms:GetKeyPolicy (deploy_role_mint_caller_check)."
+            exit 1
+          fi
+          CALLERS=$(jq -r '.Statement[] | select(.Sid == "PermittedMintCallersMaySign")
+            | .Principal.AWS | if type == "array" then .[] else . end' <<<"$POLICY")
+          echo "Permitted mint callers on ${KEY##*/}:"
+          printf '  %s\n' ${CALLERS:-"(none: minting is off)"}
+          if ! grep -qxF "$ROLE" <<<"$CALLERS"; then
+            echo "::error::${ROLE} is not a permitted mint caller, so Porth refuses every supplier session. Add ${ENVIRONMENT_SLOT} to delegated_mint_caller_slots (infra/terraform/ems-install-once/variables.tf) and apply. If it is already there and a bare AROA... id is listed above, the role was replaced: apply again."
+            exit 1
+          fi
+          echo "${ROLE} may mint."
