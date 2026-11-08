@@ -6,5 +6,8 @@
   "/permissions": "tenant-scoped-rbac",
   "/claim-mapping-configs": "tenant-scoped-rbac",
   "/org-units": "tenant-scoped-rbac",
-  "/provision": "tenant-scoped-user"
+  "/provision": "tenant-scoped-user",
+  "/sample": "tenant-scoped-rbac",
+  "/mcp": "tenant-scoped-rbac",
+  "/suppliers": "tenant-scoped-rbac"
 }

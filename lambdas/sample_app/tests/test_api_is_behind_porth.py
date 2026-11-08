@@ -189,3 +189,32 @@ def test_every_authorized_browser_path_has_an_open_preflight(resources):
 
     missing = sorted(authorized - open_options)
     assert not missing, f"authorized browser paths with no open OPTIONS route of their own: {missing}"
+
+
+# --------------------------------------------------------------------------
+# Porth's execute-api policy index covers every prefix the app serves
+# --------------------------------------------------------------------------
+
+AUTH_POLICY_INDEX = TEMPLATE.parent / "deploy" / "porth" / "auth-policy" / "index.json"
+
+
+def test_porths_policy_index_covers_every_prefix_the_app_serves(resources):
+    """From Porth 0.4.1 (PORTH-642) an authorized path that no entry in
+    /porth/<env>/auth-policy/index covers is DENIED: `deny_reason: no_policy`, a 403
+    with no CORS headers, which the SPA reports only as "Network Error". The index is
+    seeded from deploy/porth/auth-policy/index.json, so it must name every top-level
+    prefix the authorizers see: the browser API's routes, and the bearer APIs'
+    mapping keys (their paths arrive prefixed with the key)."""
+    import json
+
+    index = json.loads(AUTH_POLICY_INDEX.read_text())
+    served = {"/" + path.strip("/").split("/")[0] for path, method, open_ in _browser_routes(resources)
+              if not open_}
+    for res in resources.values():
+        if res.get("Type") == "AWS::ApiGatewayV2::Stage":
+            key = (res["Properties"].get("StageVariables") or {}).get("mapping_key")
+            if key:
+                served.add(f"/{key}")
+
+    missing = sorted(p for p in served if p not in index)
+    assert not missing, f"prefixes the app serves that Porth's policy index does not cover: {missing}"
