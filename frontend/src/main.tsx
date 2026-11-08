@@ -4,6 +4,8 @@ import { PorthAuthProvider } from '@estyn/porth-admin/auth'
 import { useTenantConfig } from './hooks/useTenantConfig'
 import { authBaseUrl as resolveAuthBaseUrl } from './lib/apiHost'
 import App from './App'
+import SignInRefused from './components/SignInRefused'
+import { captureSignInRefusal } from './lib/signInRefusal'
 import './index.css'
 
 // E2E test bypass: VITE_E2E_AUTH=true injects a fake authenticated session so
@@ -26,8 +28,17 @@ const E2E_AUTH = import.meta.env.VITE_E2E_AUTH === 'true'
 // this page's origin only. lib/apiHost.ts decides.
 const authBaseUrl = resolveAuthBaseUrl()
 
+// PORTH-654: a sign-in the identity provider refused comes back here with
+// login_error / login_error_description. Read once, before anything renders, and
+// cleared from the address bar so a reload does not ask again.
+const signInRefusal = captureSignInRefusal()
+
 function TenantBootstrap() {
   const { config, loading, error } = useTenantConfig()
+
+  // Instead of the app, not inside it: the auth provider would otherwise resolve
+  // the session and the sign-in prompt would offer the same refused sign-in again.
+  if (signInRefusal) return <SignInRefused refusal={signInRefusal} />
 
   if (loading) {
     return (
