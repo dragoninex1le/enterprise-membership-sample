@@ -90,6 +90,23 @@ jq -r '.resource_changes[] | select(.change.actions != ["no-op"] and .change.act
 say "    the plan after adoption (action, address, attributes an update changes):"
 if [ -s "$WORK/changes.tsv" ]; then column -t -s $'\t' "$WORK/changes.tsv" | sed 's/^/      /' >&2; else say "      no changes"; fi
 
+# A Porth service document is what callers resolve a service through, so a
+# rewrite of one is shown in full, live against planned. Plain String parameters
+# under Porth's module only: never a SecureString, never a sensitive value.
+jq -c '.resource_changes[]
+  | select(.change.actions == ["update"]
+           and (.address | startswith("module.porth_install_once.aws_ssm_parameter."))
+           and .change.before.type == "String"
+           and (.change.before_sensitive.value // false) == false
+           and .change.before.value != .change.after.value)
+  | {address, live: .change.before.value, planned: .change.after.value}' "$WORK/plan.json" |
+while IFS= read -r doc; do
+  say "    $(jq -r .address <<<"$doc") — live (<) against planned (>):"
+  diff <(jq -r .live <<<"$doc" | jq -S . 2>/dev/null || jq -r .live <<<"$doc") \
+       <(jq -r .planned <<<"$doc" | jq -S . 2>/dev/null || jq -r .planned <<<"$doc") \
+    | sed 's/^/      /' >&2 || true
+done
+
 BAD="$(jq -r --arg ok "$ALLOWED_CREATES" '.resource_changes[]
   | select((.change.actions | index("delete"))
            or ((.change.actions | index("create")) and (.address | test($ok) | not)))
