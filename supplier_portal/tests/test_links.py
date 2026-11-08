@@ -96,3 +96,15 @@ def test_cors_answers_only_this_hosts_own_ui(table):
     ok = c.options("/sample/suppliers/link", headers={"origin": ACME_UI, "access-control-request-method": "PUT"})
     assert ok.status_code == 204 and ok.headers["access-control-allow-origin"] == ACME_UI
     assert c.options("/sample/suppliers/link", headers={"origin": "https://elsewhere.example"}).status_code == 403
+
+
+def test_the_preflight_allows_every_header_the_spa_sends(table):
+    """applyCookieAuth (frontend/src/api/client.ts) sends an empty bearer on every call,
+    plus the CSRF and environment headers. If the preflight leaves one out, the browser
+    refuses it and the Supplier network page shows only "Network Error"."""
+    ok = client(table, admin()).options("/sample/suppliers/link", headers={
+        "origin": ACME_UI, "access-control-request-method": "GET",
+        "access-control-request-headers": "authorization,content-type,x-csrf-token,x-porth-environment"})
+    allowed = {h.strip().lower() for h in ok.headers["access-control-allow-headers"].split(",")}
+    assert ok.status_code == 204
+    assert {"authorization", "content-type", "x-csrf-token", "x-porth-environment"} <= allowed

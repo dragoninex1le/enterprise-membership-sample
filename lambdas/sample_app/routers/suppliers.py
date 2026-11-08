@@ -15,11 +15,14 @@ can widen it. Nothing here approves, and no other route in the app serves a supp
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ..dependencies import porth, require_permission
 from ..director import SampleAppDirector
+from .. import trace
 
 NETWORK = "supplierlink"
 
@@ -33,9 +36,15 @@ def delegated(director) -> dict:
 def supplier_contact(request: Request) -> None:
     director = getattr(request.state, "director", None)
     if director is None or not director.tenant_id:
+        trace.event("suppliers.refused", logging.INFO, reason="no_porth_context", director=director is not None)
         raise HTTPException(401, "No Porth context on this request.")
     ctx = delegated(director)
+    trace.event("suppliers.who", tenant=director.tenant_id, delegated=bool(ctx),
+                connector=ctx.get("connector_type"), supplier=ctx.get("store_external_id"),
+                user=director.porth_user_id or director.user_id)
     if ctx.get("connector_type") != NETWORK or not ctx.get("store_external_id"):
+        trace.event("suppliers.refused", logging.INFO, reason="suppliers_only", connector=ctx.get("connector_type"),
+                    has_supplier=bool(ctx.get("store_external_id")))
         raise HTTPException(403, "suppliers_only")
 
 

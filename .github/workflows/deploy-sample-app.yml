@@ -581,6 +581,74 @@ jobs:
           echo "── apply ──"
           porth-install register-permissions "${ARGS[@]}"
 
+      # From Porth 0.4.1 (PORTH-642) a path no prefix in /porth/{branch}/auth-policy/index
+      # covers is DENIED (`deny_reason: no_policy`): a 403 with no CORS headers, which
+      # the SPA shows only as "Network Error". The app's own prefixes must be in that
+      # index before its routes are used, so the deploy that ships the routes makes
+      # sure of it — before the stack update.
+      #
+      # `check` changes nothing (exit 0 = already as wanted, 3 = an entry needs
+      # updating, 1 = the result would be invalid); `edit` then changes only the
+      # app's entries on the live document, leaving everything else as it is. The
+      # template each prefix gets is read from deploy/porth/auth-policy/index.json,
+      # the file porth-install seeds the whole index from, so the two never differ.
+      - name: Cover the app's prefixes in Porth's policy index
+        env:
+          # Its own venv: register-permissions above stays on its own pin.
+          PORTH_INSTALL_POLICIES_VERSION: '0.4.9'
+          # Every top-level prefix the authorizers see for this app: the browser
+          # API's routes and the bearer APIs' mapping keys. A template test keeps
+          # this list equal to what template.yml serves.
+          APP_PREFIXES: '/sample /mcp /suppliers'
+        run: |
+          set -euo pipefail
+
+          python -m venv .venv-policies
+          aws codeartifact login --tool pip \
+            --domain porth --domain-owner 084847995635 \
+            --repository porth-py --region "$AWS_REGION"
+          .venv-policies/bin/pip install --quiet "porth-install==${PORTH_INSTALL_POLICIES_VERSION}"
+          PI=.venv-policies/bin/porth-install
+          echo "porth-install $(.venv-policies/bin/pip show porth-install | awk '/^Version:/ {print $2}')"
+
+          SET=()
+          for prefix in $APP_PREFIXES; do
+            template=$(jq -r --arg p "$prefix" '.[$p] // empty' deploy/porth/auth-policy/index.json)
+            if [ -z "$template" ]; then
+              echo "::error::$prefix is not in deploy/porth/auth-policy/index.json."
+              exit 1
+            fi
+            SET+=(--set-path "$prefix=$template")
+          done
+
+          echo "── check ──"
+          set +e
+          "$PI" policies check --branch "$PORTH_BRANCH" "${SET[@]}"
+          rc=$?
+          set -e
+          case "$rc" in
+            0) echo "✅ the app's prefixes are already in /porth/${PORTH_BRANCH}/auth-policy/index" ;;
+            3)
+              echo "── edit ──"
+              "$PI" policies edit --branch "$PORTH_BRANCH" "${SET[@]}"
+              echo "✅ /porth/${PORTH_BRANCH}/auth-policy/index updated; the authorizer reads it within 5 minutes"
+              ;;
+            *)
+              echo "::error::porth-install policies check exited $rc — the edited index would be invalid; nothing written."
+              exit "$rc"
+              ;;
+          esac
+
+          # What the authorizer will load, as it stands now. Version and
+          # LastModifiedDate make a later overwrite visible: if the authorizer
+          # denies no_policy after this, compare its cold-start time with a newer
+          # version than the one printed here.
+          echo "── live /porth/${PORTH_BRANCH}/auth-policy/index ──"
+          aws ssm get-parameter --name "/porth/${PORTH_BRANCH}/auth-policy/index" \
+            --query 'Parameter.[Version,LastModifiedDate]' --output text
+          aws ssm get-parameter --name "/porth/${PORTH_BRANCH}/auth-policy/index" \
+            --query 'Parameter.Value' --output text | jq -S .
+
       - name: Resolve sample app stack outputs
         run: |
           STACK=${{ env.SAM_STACK_NAME }}

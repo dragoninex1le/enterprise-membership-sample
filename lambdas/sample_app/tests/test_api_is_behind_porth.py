@@ -160,3 +160,83 @@ def test_every_method_the_app_serves_is_allowed(resources):
     allowed = set(_behaviours(resources)["/sample/*"]["AllowedMethods"])
 
     assert {"POST", "PUT", "PATCH", "DELETE"} <= allowed
+
+
+# --------------------------------------------------------------------------
+# preflights: every authorized browser route has an open OPTIONS route that wins
+# --------------------------------------------------------------------------
+
+
+def _browser_routes(resources):
+    """(path, method, open?) for every HttpApi event on the browser API, any function."""
+    for res in resources.values():
+        for event in (res.get("Properties", {}).get("Events") or {}).values():
+            props = event.get("Properties", {})
+            if event.get("Type") != "HttpApi" or props.get("ApiId") != {"Ref": "SampleAppApi"}:
+                continue
+            open_ = (props.get("Auth") or {}).get("Authorizer") == "NONE"
+            yield props["Path"], props["Method"].upper(), open_
+
+
+def test_every_authorized_browser_path_has_an_open_preflight(resources):
+    """A preflight carries no cookie. API Gateway picks the most specific PATH first and
+    only then the method, so an open `OPTIONS /a/{proxy+}` does not cover an authorized
+    `ANY /a/b`: the preflight lands on `ANY /a/b`, the authorizer denies it (403), and
+    the browser reports a network error. Each authorized path needs OPTIONS on itself."""
+    routes = list(_browser_routes(resources))
+    open_options = {path for path, method, open_ in routes if method == "OPTIONS" and open_}
+    authorized = {path for path, method, open_ in routes if not open_ and method != "OPTIONS"}
+
+    missing = sorted(authorized - open_options)
+    assert not missing, f"authorized browser paths with no open OPTIONS route of their own: {missing}"
+
+
+# --------------------------------------------------------------------------
+# Porth's execute-api policy index covers every prefix the app serves
+# --------------------------------------------------------------------------
+
+AUTH_POLICY_INDEX = TEMPLATE.parent / "deploy" / "porth" / "auth-policy" / "index.json"
+
+
+def test_porths_policy_index_covers_every_prefix_the_app_serves(resources):
+    """From Porth 0.4.1 (PORTH-642) an authorized path that no entry in
+    /porth/<env>/auth-policy/index covers is DENIED: `deny_reason: no_policy`, a 403
+    with no CORS headers, which the SPA reports only as "Network Error". The index is
+    seeded from deploy/porth/auth-policy/index.json, so it must name every top-level
+    prefix the authorizers see: the browser API's routes, and the bearer APIs'
+    mapping keys (their paths arrive prefixed with the key)."""
+    import json
+
+    index = json.loads(AUTH_POLICY_INDEX.read_text())
+    served = {"/" + path.strip("/").split("/")[0] for path, method, open_ in _browser_routes(resources)
+              if not open_}
+    for res in resources.values():
+        if res.get("Type") == "AWS::ApiGatewayV2::Stage":
+            key = (res["Properties"].get("StageVariables") or {}).get("mapping_key")
+            if key:
+                served.add(f"/{key}")
+
+    missing = sorted(p for p in served if p not in index)
+    assert not missing, f"prefixes the app serves that Porth's policy index does not cover: {missing}"
+
+
+def test_the_deploy_covers_every_prefix_the_app_serves(resources):
+    """The deploy's policies step edits the live index for APP_PREFIXES. A prefix the
+    template serves but the step leaves out is denied (no_policy) on every install
+    whose index was not seeded from this repo's file."""
+    import re
+
+    workflow = (TEMPLATE.parent / ".github" / "workflows" / "deploy-sample-app.yml").read_text()
+    m = re.search(r"APP_PREFIXES:\s*'([^']*)'", workflow)
+    assert m, "deploy-sample-app.yml has no APP_PREFIXES for the policies step"
+    deployed = set(m.group(1).split())
+
+    served = {"/" + path.strip("/").split("/")[0] for path, method, open_ in _browser_routes(resources)
+              if not open_}
+    for res in resources.values():
+        if res.get("Type") == "AWS::ApiGatewayV2::Stage":
+            key = (res["Properties"].get("StageVariables") or {}).get("mapping_key")
+            if key:
+                served.add(f"/{key}")
+
+    assert deployed == served, f"APP_PREFIXES {sorted(deployed)} != served {sorted(served)}"

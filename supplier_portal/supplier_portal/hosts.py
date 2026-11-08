@@ -11,6 +11,11 @@ from __future__ import annotations
 
 import os
 
+# What the sample app's CORSMiddleware answers on its preflights (its four, plus the
+# safelisted ones Starlette adds), so the two browser surfaces never differ.
+ALLOW_HEADERS = ("Accept, Accept-Language, Authorization, Content-Language, Content-Type, "
+                 "X-CSRF-Token, X-Porth-Environment")
+
 
 def _slot_base() -> str:
     alias = os.environ.get("CLOUDFRONT_ALIAS", "")
@@ -47,10 +52,20 @@ class OwnUiCors:
         origin, allowed = hdrs.get(b"origin", ""), own_ui(hdrs.get(b"host", ""))
         grant = [(b"access-control-allow-origin", origin.encode()), (b"access-control-allow-credentials", b"true"),
                  (b"vary", b"Origin")] if origin and origin == allowed else []
+        from supplier_portal import trace
+
+        trace.event("cors", method=scope.get("method"), path=scope.get("path"), origin=origin or None,
+                    own_ui=allowed, granted=bool(grant),
+                    requested_method=hdrs.get(b"access-control-request-method"),
+                    requested_headers=hdrs.get(b"access-control-request-headers"))
 
         if scope.get("method") == "OPTIONS":
+            # Every header the SPA's clients send. Authorization above all: applyCookieAuth
+            # (frontend/src/api/client.ts) puts an EMPTY bearer on every call so the
+            # gateway invokes the authorizer. A preflight that does not allow it is refused
+            # by the browser, and the page sees only "Network Error".
             extra = [(b"access-control-allow-methods", b"GET,PUT,DELETE"),
-                     (b"access-control-allow-headers", b"Content-Type,X-CSRF-Token,X-Porth-Environment"),
+                     (b"access-control-allow-headers", ALLOW_HEADERS.encode()),
                      (b"access-control-max-age", b"600")] if grant else []
             await send({"type": "http.response.start", "status": 204 if grant else 403, "headers": grant + extra})
             return await send({"type": "http.response.body", "body": b""})

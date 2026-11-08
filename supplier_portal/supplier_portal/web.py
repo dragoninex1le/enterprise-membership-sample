@@ -30,12 +30,14 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from supplier_portal import assertion, porth_session
+from supplier_portal import assertion, porth_session, trace
 from supplier_portal.links import ClaimedByAnotherTenant, Links
 from supplier_portal.hosts import OwnUiCors, tenant_on
 
 log = logging.getLogger("supplier_portal")
 log.setLevel(os.environ.get("SUPPLIER_PORTAL_LOG_LEVEL", "INFO"))
+# The internal plane's own lines (which mint document and signing alias resolved).
+logging.getLogger("porth_common").setLevel(os.environ.get("PORTH_COMMON_LOG_LEVEL", "INFO"))
 
 MANAGE = "suppliers.manage"
 
@@ -74,12 +76,21 @@ def mint_transport():
 def tenant_admin(request: Request) -> Any:
     who = getattr(request.state, "director", None)
     if who is None or not who.tenant_id:
+        trace.event("link.refused", reason="no_porth_context", director=who is not None)
         raise HTTPException(401, "No Porth context on this request.")
-    if (getattr(who, "_raw_context", None) or {}).get("auth_source") == "exchange":
+    raw = getattr(who, "_raw_context", None) or {}
+    can_manage = who.can_perform(MANAGE)
+    trace.event("link.who", tenant=who.tenant_id, user=who.porth_user_id or who.user_id,
+                auth_source=raw.get("auth_source"), platform_admin=who.is_platform_admin,
+                can_manage=can_manage)
+    if raw.get("auth_source") == "exchange":
+        trace.event("link.refused", reason="delegated_principal")
         raise HTTPException(403, "delegated_principal_refused")
     if who.is_platform_admin:
+        trace.event("link.refused", reason="platform_admin")
         raise HTTPException(403, "A buyer link belongs to one tenant. Sign in to that tenant to link it.")
-    if not who.can_perform(MANAGE):
+    if not can_manage:
+        trace.event("link.refused", reason="missing_permission", permission=MANAGE)
         raise HTTPException(403, f"Missing permission: {MANAGE}")
     return who
 
@@ -94,6 +105,8 @@ def build() -> FastAPI:
     @api.post("/suppliers/session")
     def session(body: SessionRequest, request: Request, store: Links = Depends(links),
                 transport=Depends(mint_transport)) -> Any:
+        host = request.headers.get("host", "")
+        trace.event("session.in", host=host, host_tenant=tenant_on(host), assertion_len=len(body.assertion))
         try:
             key = supplierlink_key()
         except Exception as exc:  # noqa: BLE001 — a missing or unreadable key is configuration, said as such
@@ -102,16 +115,22 @@ def build() -> FastAPI:
             return JSONResponse({"error": "network_key_unavailable"}, status_code=503)
         try:
             contact = assertion.check(body.assertion, public_key=key)
+            trace.event("session.assertion_ok", buyer=contact.buyer, supplier=contact.supplier,
+                        contact=contact.contact, role=contact.role, jti=contact.assertion_id,
+                        valid_until=contact.valid_until)
         except assertion.Unverified as why:
             log.info("supplier_session.rejected why=%s", why.why)
             return JSONResponse({"error": "assertion_rejected"}, status_code=401)
 
         link = store.find(contact.buyer)
+        trace.event("session.link", buyer=contact.buyer, found=link is not None,
+                    link_tenant=link.tenant if link else None)
         if link is None:
             log.info("supplier_session.unlinked buyer=%s", contact.buyer)
             return JSONResponse({"error": "buyer_not_linked"}, status_code=403)
-        if tenant_on(request.headers.get("host", "")) != link.tenant:
-            log.info("supplier_session.wrong_host buyer=%s", contact.buyer)
+        if tenant_on(host) != link.tenant:
+            log.info("supplier_session.wrong_host buyer=%s host_tenant=%s link_tenant=%s",
+                     contact.buyer, tenant_on(host), link.tenant)
             return JSONResponse({"error": "other_tenants_host"}, status_code=403)
 
         from porth_common.context.persisted import PersistedContext, PersistedContextError
@@ -125,7 +144,9 @@ def build() -> FastAPI:
             log.error("supplier_session.link_context_mismatch buyer=%s", contact.buyer)
             return JSONResponse({"error": "porth_unavailable"}, status_code=503)
 
+        trace.event("session.context_ok", tenant=record.tenant_id)
         outcome = porth_session.request_session(record, contact, call=transport)
+        trace.event("session.outcome", granted=outcome.granted, status=outcome.status, code=outcome.code or None)
         if not outcome.granted:
             return JSONResponse({"error": outcome.code}, status_code=outcome.status)
         return {"token": outcome.token, "session_id": outcome.session_id,
@@ -133,7 +154,9 @@ def build() -> FastAPI:
 
     @api.get("/sample/suppliers/link")
     def show(who: Any = Depends(tenant_admin), store: Links = Depends(links)) -> Any:
-        return [l.shown() for l in store.of_tenant(who.tenant_id)]
+        found = store.of_tenant(who.tenant_id)
+        trace.event("link.list", tenant=who.tenant_id, count=len(found))
+        return [l.shown() for l in found]
 
     @api.put("/sample/suppliers/link")
     def link(body: LinkRequest, who: Any = Depends(tenant_admin), store: Links = Depends(links)) -> Any:
@@ -144,6 +167,7 @@ def build() -> FastAPI:
             made = store.link(buyer=body.buyer, tenant=who.tenant_id, porth_context=context,
                               by=who.porth_user_id or who.user_id)
         except ClaimedByAnotherTenant:
+            trace.event("link.refused", reason="claimed_by_another_tenant", buyer=body.buyer)
             raise HTTPException(409, "That SupplierLink buyer account is linked to another tenant.") from None
         log.info("supplier_link.linked tenant=%s buyer=%s", who.tenant_id, body.buyer)
         return made.shown()
@@ -151,6 +175,7 @@ def build() -> FastAPI:
     @api.delete("/sample/suppliers/link/{buyer}")
     def unlink(buyer: str, who: Any = Depends(tenant_admin), store: Links = Depends(links)) -> Any:
         if not store.unlink(buyer=buyer, tenant=who.tenant_id):
+            trace.event("link.refused", reason="not_linked_here", buyer=buyer)
             raise HTTPException(404, f"{buyer} is not linked to this tenant.")
         log.info("supplier_link.unlinked tenant=%s buyer=%s", who.tenant_id, buyer)
         return {"buyer": buyer, "linked": False}

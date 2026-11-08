@@ -449,6 +449,34 @@ resource "aws_iam_role_policy" "deploy_role_async_work" {
         Resource = "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/porth-audit-log-${var.porth_branch}"
       },
       {
+        # The deploy's "Cover the app's prefixes in Porth's policy index" step:
+        # `porth-install policies check`, then `policies edit` only when the check
+        # says an entry is missing. From Porth 0.4.1 a path no auth-policy prefix
+        # covers is denied (no_policy), so the app's /sample, /mcp and /suppliers
+        # must be in the index before its routes are used.
+        #
+        # check/edit read both live indexes (GetParameter, singular, which the
+        # SessionPolicyDocuments statement's GetParameters does not cover) and list
+        # the template names under auth-policy/ to validate the edit. Reads span
+        # both policy trees, like the role's read of /porth/*/signing-keys/*; the
+        # one write below stays the auth-policy index. The session index is written
+        # only when a binding changes, which this step never asks for.
+        Sid    = "AppPolicyTreesRead"
+        Effect = "Allow"
+        Action = ["ssm:GetParameter", "ssm:GetParametersByPath"]
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/porth/${var.porth_branch}/auth-policy",
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/porth/${var.porth_branch}/auth-policy/*",
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/porth/${var.porth_branch}/auth-session-policy/*",
+        ]
+      },
+      {
+        Sid      = "AppPolicyIndexWrite"
+        Effect   = "Allow"
+        Action   = ["ssm:PutParameter"]
+        Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/porth/${var.porth_branch}/auth-policy/index"
+      },
+      {
         Sid      = "CloudFormationPerEnvironmentStacks"
         Effect   = "Allow"
         Action   = "cloudformation:*"

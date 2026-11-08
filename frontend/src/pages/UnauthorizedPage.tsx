@@ -1,8 +1,11 @@
 import { useAuth } from '@estyn/porth-admin/auth'
+// PORTH-654: Porth's logout navigation on the API host. Auth0 refuses a tenant UI
+// origin as a logout return without organisation context, which signoutRedirect sends.
+import { signOutThroughPorth } from '../lib/signInRefusal'
 import { usePorthContext } from '../context/PorthContext'
 
 export default function UnauthorizedPage() {
-  const { isAuthenticated, signoutRedirect, user } = useAuth()
+  const { isAuthenticated, user } = useAuth()
   const { currentUser, userError, tenantConfig } = usePorthContext()
 
   // Roles claim as resolved server-side and passed through on the session
@@ -86,7 +89,7 @@ export default function UnauthorizedPage() {
         {isAuthenticated && (
           <div className="text-center">
             <button
-              onClick={() => signoutRedirect(window.location.origin)}
+              onClick={() => signOutThroughPorth(window.location.origin)}
               className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 transition-colors"
             >
               Sign out

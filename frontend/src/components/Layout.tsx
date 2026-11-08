@@ -1,9 +1,12 @@
 import { Outlet } from 'react-router-dom'
 import { useAuth } from '@estyn/porth-admin/auth'
+// PORTH-654: Porth's logout navigation on the API host. Auth0 refuses a tenant UI
+// origin as a logout return without organisation context, which signoutRedirect sends.
+import { signOutThroughPorth } from '../lib/signInRefusal'
 import Sidebar from './Sidebar'
 
 export default function Layout() {
-  const { isAuthenticated, signinRedirect, signoutRedirect, user } = useAuth()
+  const { isAuthenticated, signinRedirect, user } = useAuth()
 
   if (!isAuthenticated) {
     return (
@@ -31,7 +34,7 @@ export default function Layout() {
           <div className="flex items-center gap-4">
             <span className="text-sm text-gray-700">{user?.email}</span>
             <button
-              onClick={() => signoutRedirect(window.location.origin)}
+              onClick={() => signOutThroughPorth(window.location.origin)}
               className="text-sm text-gray-400 hover:text-gray-700 transition-colors"
             >
               Sign out
