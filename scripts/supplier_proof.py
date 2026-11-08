@@ -5,8 +5,8 @@ simulator key, trades them for Porth delegated sessions at the portal, and uses 
 sessions against the deployed app. No browser, no person, nothing mocked.
 
   S1  the session route refuses what it must: no assertion, a forged one, an unlinked buyer
-  S2  a contact of supplier A gets a session, sees the buyer and their supplier, submits
-      an invoice, and finds it among their own
+  S2  a contact of supplier A gets a session holding only the supplier role's permissions,
+      sees the buyer and their supplier, submits an invoice, and finds it among their own
   S3  a contact of supplier B, same buyer, cannot see supplier A's invoice
   S4  a SupplierLink role the buyer has not mapped gets no session
   S5  an assertion is single-use
@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import sys
 import time
 import urllib.error
@@ -36,6 +37,9 @@ import urllib.request
 import uuid
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+#: What a supplier contact may do: the supplier role in deploy/sample-app/roles.json.
+SUPPLIER_PERMISSIONS = json.loads((ROOT / "deploy" / "sample-app" / "roles.json").read_text())["roles"]["supplier"]
+
 sys.path.insert(0, str(ROOT / "supplier_portal"))
 from supplier_portal.assertion import issue  # noqa: E402
 
@@ -99,7 +103,17 @@ def session(signed: str, host: str = HOST):
     return call("POST", host, "/suppliers/session", body={"assertion": signed})
 
 
+#: A Porth session token. Nothing this job prints may carry one: the repository is
+#: public, so its Actions logs are too (a live token reached one on 2026-11-08).
+_TOKEN = re.compile(r"prth_[A-Za-z0-9_-]+")
+
+
+def redacted(detail: str) -> str:
+    return _TOKEN.sub("prth_<redacted>", detail)
+
+
 def ok(label: str, condition: bool, detail: str = "") -> None:
+    detail = redacted(detail)
     print(("PASS " if condition else "FAIL ") + label + (f" — {detail}" if detail else ""))
     if not condition:
         sys.exit(1)
@@ -131,6 +145,11 @@ def main() -> None:
     status, me = call("GET", HOST, "/suppliers/me", bearer=token_a)
     ok("S2 the session names the buyer and the supplier", status == 200
        and (me.get("buyer_tenant"), me.get("supplier")) == (TENANT, "proof-sup-a"), f"{status} {me}")
+    expected = set(SUPPLIER_PERMISSIONS)
+    held = set(me.get("permissions", []))
+    ok("S2 the session holds the supplier role's permissions and nothing else", held == expected,
+       f"extra {sorted(held - expected)}, missing {sorted(expected - held)}. Fix: make {TENANT}'s supplier "
+       f"role hold exactly {sorted(expected)} (Tenant Admin > Roles)" if held != expected else "")
     reference = f"PROOF-{uuid.uuid4().hex[:8]}"
     status, invoice = call("POST", HOST, "/suppliers/invoices", bearer=token_a,
                            body={"vendor_name": "Proof Supplies A", "amount": 123.45, "supplier_reference": reference})
@@ -141,7 +160,8 @@ def main() -> None:
 
     # S3
     status, granted_b = session(assertion("proof-sup-b", "contact-b"))
-    ok("S3 a second supplier's contact gets a session", status == 200, f"{status} {granted_b}")
+    ok("S3 a second supplier's contact gets a session", status == 200,
+       f"{status} session {granted_b.get('session_id')}" if status == 200 else f"{status} {granted_b}")
     token_b = granted_b["token"]
     ok("S3 they cannot open supplier A's invoice",
        call("GET", HOST, f"/suppliers/invoices/{invoice['bill_id']}", bearer=token_b)[0] == 404)
