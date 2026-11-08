@@ -678,6 +678,14 @@ jobs:
         # to `npm ci` once the lockfile is regenerated against CodeArtifact.
         run: npm install
 
+      # PORTH-655: the browser handle (frontend/src/api/cookieAuth.ts) against
+      # Porth's shared test vector, before anything is built from it. A wrong
+      # handle is refused by the browser authorizer on every call once API
+      # Gateway caches it, so it is cheaper to fail here.
+      - name: Run frontend unit tests
+        working-directory: frontend
+        run: npm test
+
       - name: Build frontend
         working-directory: frontend
         run: npm run build
