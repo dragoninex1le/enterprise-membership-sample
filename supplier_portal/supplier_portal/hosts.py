@@ -52,6 +52,12 @@ class OwnUiCors:
         origin, allowed = hdrs.get(b"origin", ""), own_ui(hdrs.get(b"host", ""))
         grant = [(b"access-control-allow-origin", origin.encode()), (b"access-control-allow-credentials", b"true"),
                  (b"vary", b"Origin")] if origin and origin == allowed else []
+        from supplier_portal import trace
+
+        trace.event("cors", method=scope.get("method"), path=scope.get("path"), origin=origin or None,
+                    own_ui=allowed, granted=bool(grant),
+                    requested_method=hdrs.get(b"access-control-request-method"),
+                    requested_headers=hdrs.get(b"access-control-request-headers"))
 
         if scope.get("method") == "OPTIONS":
             # Every header the SPA's clients send. Authorization above all: applyCookieAuth

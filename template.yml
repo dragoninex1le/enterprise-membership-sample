@@ -78,6 +78,19 @@ Parameters:
       names the resolved path of EVERY parameter read, and the token lifecycle
       (minting/verify/accepted) names the alias and kid each crossing used.
 
+  SupplierPortalLogLevel:
+    Type: String
+    Default: DEBUG
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+    Description: >-
+      The supplier portal's own level. INFO keeps one request.in and one
+      request.out line per request; DEBUG adds a line per decision (CORS, the
+      admin's context, assertion verdict, link lookup, the mint request and the
+      shape of Porth's answer), each tagged rid=<API Gateway request id> — the
+      request_id Porth's authorizers log — so one request is followed across both.
+      Never a token, assertion, cookie value or credential. DEBUG while the
+      delegated-mint path is being proven.
+
   FfugLogLevel:
     Type: String
     Default: INFO
@@ -733,6 +746,10 @@ Resources:
           SUPPLIERLINK_PUBLIC_KEY_PARAMETER: !Sub /ems/${EnvironmentSlot}/suppliers/supplierlink/public-key
           PORTH_BRANCH: !Ref PorthBranch
           CLOUDFRONT_ALIAS: !Ref CloudFrontAlias
+          SUPPLIER_PORTAL_LOG_LEVEL: !Ref SupplierPortalLogLevel
+          # porth.plane.identity / porth.plane.resolved at INFO: which mint service
+          # document and signing alias the delegated-mint call resolved.
+          PORTH_COMMON_LOG_LEVEL: !Ref PorthCommonLogLevel
       Events:
         # The buyer's tenant admin links their SupplierLink account, from the SPA,
         # on the browser API. More specific than /sample/{proxy+}, so it lands here.

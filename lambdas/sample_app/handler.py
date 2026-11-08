@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import time
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
@@ -8,6 +9,7 @@ from porth_common.internal_plane import log_plane_identity
 from .cors import HostBoundOriginMiddleware
 from .director import DirectorMiddleware, SampleAppDirector
 from .mapping_key import restore_mapping_key
+from . import trace
 from .routers import dashboard, ar, ap, approvals, diagnostics, suppliers
 from .accounts_mcp import http as accounts_mcp
 
@@ -105,6 +107,9 @@ class SupplierBoundary:
         if scope.get("type") == "http" and not scope.get("path", "").startswith("/suppliers/"):
             director = (scope.get("state") or {}).get("director")
             if director is not None and suppliers.delegated(director):
+                trace.event("boundary.refused", logging.INFO, path=scope.get("path"),
+                            reason="delegated_principal_outside_suppliers",
+                            connector=suppliers.delegated(director).get("connector_type"))
                 await send({"type": "http.response.start", "status": 403, "headers": [
                     (b"content-type", b"application/json"), (b"content-length", str(len(self.REFUSAL)).encode())]})
                 await send({"type": "http.response.body", "body": self.REFUSAL})
@@ -161,7 +166,39 @@ app.include_router(suppliers.router)
 _asgi = Mangum(app, lifespan="off")
 
 
+#: Authorizer-context values safe to log. Everything else there (credentials
+#: among it) is logged by key name only.
+_CONTEXT_SHOWN = ("tenant_id", "environment", "auth_source", "connector_type", "is_platform_admin")
+
+
 def handler(event, context=None):
     log_plane_identity(SampleAppDirector.SERVICE_ID)
+    rc = event.get("requestContext") or {}
+    http = rc.get("http") or {}
+    headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
+    authorizer = (rc.get("authorizer") or {}).get("lambda") or {}
+    trace.set_request(rc.get("requestId"))
+
     # The bearer and suppliers APIs deliver key-stripped paths; see mapping_key.py.
-    return _asgi(restore_mapping_key(event), context)
+    restored = restore_mapping_key(event)
+    trace.event(
+        "request.in", logging.INFO,
+        method=http.get("method"), route=event.get("routeKey"),
+        raw_path=event.get("rawPath"), path=restored.get("rawPath"),
+        mapping_key=(event.get("stageVariables") or {}).get("mapping_key"),
+        host=headers.get("host"), origin=headers.get("origin"),
+        authorization=trace.authorization_shape(headers.get("authorization")),
+        cookies=trace.cookie_names(event.get("cookies")),
+        csrf_header="x-csrf-token" in headers,
+        authorizer_keys=sorted(authorizer),
+        **{k: authorizer.get(k) for k in _CONTEXT_SHOWN if k in authorizer},
+    )
+    started = time.monotonic()
+    try:
+        response = _asgi(restored, context)
+    except Exception:
+        trace.event("request.crashed", logging.ERROR, ms=round((time.monotonic() - started) * 1000, 1))
+        raise
+    trace.event("request.out", logging.INFO, status=(response or {}).get("statusCode"),
+                ms=round((time.monotonic() - started) * 1000, 1))
+    return response

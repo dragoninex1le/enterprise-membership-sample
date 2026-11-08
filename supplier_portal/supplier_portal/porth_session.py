@@ -21,9 +21,11 @@ role in ``delegated_mint_caller_role_arns``, which is the actual control.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
+from supplier_portal import trace
 from supplier_portal.assertion import SupplierContact
 
 log = logging.getLogger("supplier_portal.porth_session")
@@ -76,11 +78,25 @@ def request_body(contact: SupplierContact) -> dict[str, Any]:
 def request_session(record: Any, contact: SupplierContact, *, call=None) -> Outcome:
     """Ask Porth. ``call`` is the transport (tests replace it); by default porth-common's."""
     send = call or _over_internal_plane
+    body = request_body(contact)
+    # The request carries no secret: ids, the reference, the role word, expiry.
+    trace.event("mint.request", service=SERVICE, tenant=record.tenant_id, **{
+        "connector_type": body["connector_type"], "external_id": body["external_id"],
+        "reference": body["verification"]["reference"], "role_claim": body["role_claim"],
+        "store_external_id": body["store_external_id"],
+        "host_credential_expires_at": body["host_credential_expires_at"]})
+    started = time.monotonic()
     try:
-        answer = send(record, request_body(contact))
+        answer = send(record, body)
     except _Unreachable as exc:
         log.error("porth_session.unreachable reason=%s", exc)
         return Outcome(granted=False, status=503, code="porth_unavailable")
+    finally:
+        trace.event("mint.answered", ms=round((time.monotonic() - started) * 1000, 1))
+    # The answer's shape, never its token.
+    trace.event("mint.answer", ok=isinstance(answer, dict) and answer.get("ok"),
+                keys=sorted(answer) if isinstance(answer, dict) else type(answer).__name__,
+                error=((answer or {}).get("error") if isinstance(answer, dict) else None))
 
     if isinstance(answer, dict) and answer.get("ok") is True:
         token, session_id, expires_at = answer.get("token"), answer.get("session_id"), answer.get("expires_at")

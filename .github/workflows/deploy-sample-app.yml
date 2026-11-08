@@ -639,6 +639,16 @@ jobs:
               ;;
           esac
 
+          # What the authorizer will load, as it stands now. Version and
+          # LastModifiedDate make a later overwrite visible: if the authorizer
+          # denies no_policy after this, compare its cold-start time with a newer
+          # version than the one printed here.
+          echo "── live /porth/${PORTH_BRANCH}/auth-policy/index ──"
+          aws ssm get-parameter --name "/porth/${PORTH_BRANCH}/auth-policy/index" \
+            --query 'Parameter.[Version,LastModifiedDate]' --output text
+          aws ssm get-parameter --name "/porth/${PORTH_BRANCH}/auth-policy/index" \
+            --query 'Parameter.Value' --output text | jq -S .
+
       - name: Resolve sample app stack outputs
         run: |
           STACK=${{ env.SAM_STACK_NAME }}
