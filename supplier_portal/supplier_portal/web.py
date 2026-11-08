@@ -11,6 +11,8 @@ no Porth credential yet. Body: ``{"assertion": "<compact JWS>"}``.
     403 {"error": "other_tenants_host"}    linked, but to another tenant than this host's
     4xx {"error": <Porth's code>}          Porth refused (porth_session.ANSWER_STATUS)
     503 {"error": "porth_unavailable"}
+    503 {"error": "network_key_unavailable"} SupplierLink's public key could not be read
+                                           (ems-install-once not applied for this slot?)
 
 ``GET | PUT /sample/suppliers/link`` and ``DELETE /sample/suppliers/link/{buyer}`` —
 the buyer's tenant admin links their SupplierLink buyer account. On the browser API
@@ -93,7 +95,13 @@ def build() -> FastAPI:
     def session(body: SessionRequest, request: Request, store: Links = Depends(links),
                 transport=Depends(mint_transport)) -> Any:
         try:
-            contact = assertion.check(body.assertion, public_key=supplierlink_key())
+            key = supplierlink_key()
+        except Exception as exc:  # noqa: BLE001 — a missing or unreadable key is configuration, said as such
+            log.error("supplier_session.no_network_key parameter=%s error=%s",
+                      os.environ.get("SUPPLIERLINK_PUBLIC_KEY_PARAMETER"), type(exc).__name__)
+            return JSONResponse({"error": "network_key_unavailable"}, status_code=503)
+        try:
+            contact = assertion.check(body.assertion, public_key=key)
         except assertion.Unverified as why:
             log.info("supplier_session.rejected why=%s", why.why)
             return JSONResponse({"error": "assertion_rejected"}, status_code=401)

@@ -146,3 +146,19 @@ def test_neither_the_session_nor_the_assertion_is_logged(make, network_key, capl
     post(make(linked(), FakePorth()), token)
     assert SECRET_TOKEN not in caplog.text and token not in caplog.text
     assert "session_id=ses-1" in caplog.text
+
+
+def test_an_unreadable_network_key_is_named_not_a_500(network_key, monkeypatch, caplog):
+    """Found live: with the key parameter unreadable every request was a bare 500."""
+    monkeypatch.setattr(web, "_KEY", None)
+    monkeypatch.setenv("SUPPLIERLINK_PUBLIC_KEY_PARAMETER", "/ems/test/suppliers/supplierlink/public-key")
+
+    def no_key():
+        raise RuntimeError("ParameterNotFound")
+
+    monkeypatch.setattr(web, "supplierlink_key", no_key)
+    api = web.build()
+    api.dependency_overrides[web.links] = lambda: OneLink(linked())
+    r = TestClient(api, base_url=f"https://{HOST}").post("/suppliers/session", json={"assertion": "a.b.c"})
+    assert (r.status_code, r.json()) == (503, {"error": "network_key_unavailable"})
+    assert "/ems/test/suppliers/supplierlink/public-key" in caplog.text
