@@ -218,3 +218,25 @@ def test_porths_policy_index_covers_every_prefix_the_app_serves(resources):
 
     missing = sorted(p for p in served if p not in index)
     assert not missing, f"prefixes the app serves that Porth's policy index does not cover: {missing}"
+
+
+def test_the_deploy_covers_every_prefix_the_app_serves(resources):
+    """The deploy's policies step edits the live index for APP_PREFIXES. A prefix the
+    template serves but the step leaves out is denied (no_policy) on every install
+    whose index was not seeded from this repo's file."""
+    import re
+
+    workflow = (TEMPLATE.parent / ".github" / "workflows" / "deploy-sample-app.yml").read_text()
+    m = re.search(r"APP_PREFIXES:\s*'([^']*)'", workflow)
+    assert m, "deploy-sample-app.yml has no APP_PREFIXES for the policies step"
+    deployed = set(m.group(1).split())
+
+    served = {"/" + path.strip("/").split("/")[0] for path, method, open_ in _browser_routes(resources)
+              if not open_}
+    for res in resources.values():
+        if res.get("Type") == "AWS::ApiGatewayV2::Stage":
+            key = (res["Properties"].get("StageVariables") or {}).get("mapping_key")
+            if key:
+                served.add(f"/{key}")
+
+    assert deployed == served, f"APP_PREFIXES {sorted(deployed)} != served {sorted(served)}"
