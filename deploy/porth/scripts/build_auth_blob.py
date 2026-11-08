@@ -87,6 +87,9 @@ def build(manifest: dict, env: dict) -> dict:
         "dns_zone": zone,
         "spa_origins": env.get("PORTH_SPA_ORIGINS_RAW", ""),
         "platform_tenant_id": "platform",
+        # PORTH-654: a platform-console login always asks for credentials, so a
+        # session from another slot or tenant is never reused for the console.
+        "platform_login_prompt": "login",
         "environment": env.get("EFF_FIXED_ENVIRONMENT", ""),
         "sessions_table": env.get("PORTH_SESSIONS_TABLE", ""),
         "session_kms_key_id": env.get("PORTH_SESSION_KMS", ""),
