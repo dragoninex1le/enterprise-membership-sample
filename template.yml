@@ -748,7 +748,20 @@ Resources:
             ApiId: !Ref SampleAppApi
             Path: /sample/suppliers/{proxy+}
             Method: ANY
+        # A preflight carries no cookie, so it needs an open OPTIONS route that WINS on
+        # its path. API Gateway prefers an exact path over a greedy one, whatever the
+        # method: OPTIONS /sample/suppliers/link would otherwise land on the authorized
+        # ANY /sample/suppliers/link above, be denied (403), and the page sees a network
+        # error. Hence one open OPTIONS route per authorized path.
         BuyerLinkPreflight:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SampleAppApi
+            Path: /sample/suppliers/link
+            Method: OPTIONS
+            Auth:
+              Authorizer: NONE
+        BuyerLinkItemPreflight:
           Type: HttpApi
           Properties:
             ApiId: !Ref SampleAppApi

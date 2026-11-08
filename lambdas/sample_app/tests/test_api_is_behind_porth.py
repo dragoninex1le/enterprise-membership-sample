@@ -160,3 +160,32 @@ def test_every_method_the_app_serves_is_allowed(resources):
     allowed = set(_behaviours(resources)["/sample/*"]["AllowedMethods"])
 
     assert {"POST", "PUT", "PATCH", "DELETE"} <= allowed
+
+
+# --------------------------------------------------------------------------
+# preflights: every authorized browser route has an open OPTIONS route that wins
+# --------------------------------------------------------------------------
+
+
+def _browser_routes(resources):
+    """(path, method, open?) for every HttpApi event on the browser API, any function."""
+    for res in resources.values():
+        for event in (res.get("Properties", {}).get("Events") or {}).values():
+            props = event.get("Properties", {})
+            if event.get("Type") != "HttpApi" or props.get("ApiId") != {"Ref": "SampleAppApi"}:
+                continue
+            open_ = (props.get("Auth") or {}).get("Authorizer") == "NONE"
+            yield props["Path"], props["Method"].upper(), open_
+
+
+def test_every_authorized_browser_path_has_an_open_preflight(resources):
+    """A preflight carries no cookie. API Gateway picks the most specific PATH first and
+    only then the method, so an open `OPTIONS /a/{proxy+}` does not cover an authorized
+    `ANY /a/b`: the preflight lands on `ANY /a/b`, the authorizer denies it (403), and
+    the browser reports a network error. Each authorized path needs OPTIONS on itself."""
+    routes = list(_browser_routes(resources))
+    open_options = {path for path, method, open_ in routes if method == "OPTIONS" and open_}
+    authorized = {path for path, method, open_ in routes if not open_ and method != "OPTIONS"}
+
+    missing = sorted(authorized - open_options)
+    assert not missing, f"authorized browser paths with no open OPTIONS route of their own: {missing}"
