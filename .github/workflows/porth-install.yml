@@ -83,7 +83,10 @@ on:
         # 0.4.8 names the two Porth APIs (porth-dev-api / porth-dev-browser-api).
         # 0.4.9 — PORTH-655 bugs (audit slot, org routes platform-only,
         # legacy-read refusal, connector claim-mapping lineage).
-        default: '0.4.14'
+        # 0.4.17 — PORTH-655: path_basis "as_sent" (the policy documents below
+        # key Porth's routes /porth/...), and the browser gateway cache
+        # (browser_gateway_cache_ttl, below).
+        default: '0.4.17'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
@@ -118,6 +121,15 @@ on:
         type: choice
         options: [DEBUG, INFO, WARNING, ERROR, CRITICAL]
         default: 'DEBUG'
+      browser_gateway_cache_ttl:
+        # PORTH-655 (Porth >= 0.4.16): API Gateway caches the browser authorizer
+        # per browser handle (Authorization). Non-zero REQUIRES every browser
+        # caller to send the handle — the SPA, the tier-2 e2e and Prawf still send
+        # the old empty `Bearer ` and would be refused (missing_handle). 0 = cache
+        # off and the handle optional. Raise to 300 once they all send it.
+        description: 'Seconds API Gateway caches a browser-authorizer result (0 = off, handle optional; 300 once every browser caller sends the handle)'
+        required: false
+        default: '0'
       prune_retired:
         description: 'Delete permissions Porth no longer ships (e.g. platform.orgs.*) and every grant to them. Leave OFF: the install always prints the dry run; read it first.'
         required: false
@@ -153,7 +165,7 @@ env:
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.14' }}
+    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.17' }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
@@ -182,7 +194,7 @@ jobs:
       # also works when triggered by the push shim (inputs are empty on push).
       - name: Resolve effective inputs
         run: |
-          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.14' }}" >> "$GITHUB_ENV"
+          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.17' }}" >> "$GITHUB_ENV"
           echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
           # The configured mode, overridable for one run. Empty IS the mode
@@ -191,6 +203,7 @@ jobs:
           # variable is left unset and this resolves empty.
           echo "EFF_FIXED_ENV=${{ inputs.fixed_environment || vars.PORTH_FIXED_ENVIRONMENT || '' }}" >> "$GITHUB_ENV"
           echo "EFF_LOG_LEVEL=${{ inputs.log_level || 'DEBUG' }}" >> "$GITHUB_ENV"
+          echo "EFF_BROWSER_CACHE_TTL=${{ inputs.browser_gateway_cache_ttl || '0' }}" >> "$GITHUB_ENV"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -425,6 +438,13 @@ jobs:
           PARAMS+=( "ParameterKey=AuthorizerLogLevel,ParameterValue=${{ env.EFF_LOG_LEVEL }}" )
           PARAMS+=( "ParameterKey=ApiLogLevel,ParameterValue=${{ env.EFF_LOG_LEVEL }}" )
           echo "Log level: ${{ env.EFF_LOG_LEVEL }} (authorizer + api + auth-proxy)"
+
+          # PORTH-655: the browser gateway cache (Porth >= 0.4.16 has the parameter;
+          # CloudFormation rejects an unknown one, so older releases get nothing).
+          if scripts/porth-version-at-least.sh 0.4.16 "${{ env.EFF_PORTH_VERSION }}"; then
+            PARAMS+=( "ParameterKey=BrowserGatewayCacheTtl,ParameterValue=${{ env.EFF_BROWSER_CACHE_TTL }}" )
+            echo "Browser gateway cache: ${{ env.EFF_BROWSER_CACHE_TTL }} s"
+          fi
 
           # PORTH-655: no AuthTestToken. The static-token bypass is gone from Porth
           # (0.4.14 removes the parameter, so passing it would fail the change set).
@@ -869,13 +889,13 @@ jobs:
             --claim-mapping-configs-table "porth-claim-mapping-configs-${ENV_NAME}" \
             --target-version "${EFF_PORTH_VERSION}"
 
-      # ── Seed SSM auth-policy + session-policy templates ─────────────────────
-      # Components deploy.yml seeds these after every deploy, but porth-install
-      # (SAR consume path) has no equivalent step.  Without these params the
-      # AuthorizerFunction cannot load its policy cache and authorised routes
-      # return 500.  continue-on-error: true so a missing SSM permission doesn't
-      # block the rest of the workflow; an operator can re-run just this step.
-      - name: Seed SSM auth-policy templates
+      # ── The policy documents (auth-policy + auth-session-policy) ────────────
+      # Without them the authorizer cannot resolve a binding or a policy and
+      # every authorised route denies. continue-on-error: if `policies apply`
+      # refuses (an invalid document) or the role lacks an SSM permission, the
+      # documents already live are left untouched — the step's log says why —
+      # and the rest of the install carries on.
+      - name: Write the policy documents (porth-install policies apply)
         continue-on-error: true
         run: |
           ENV="${{ env.EFF_ENV_NAME }}"
@@ -898,106 +918,35 @@ jobs:
           # answer for two.
           ENV_SLOTS="${PORTH_AUTH_ENVIRONMENTS_RAW:-porth-sample}"
 
-          # PORTH-598: payloads live in deploy/porth/ as reviewable JSON.
-          ALLOW_ALL=$(cat deploy/porth/auth-policy/allow-all.json)
-          INDEX=$(cat deploy/porth/auth-policy/index.json)
-
-          for NAME in \
-            "/porth/${ENV}/auth-policy/platform-admin-only:$ALLOW_ALL" \
-            "/porth/${ENV}/auth-policy/tenant-scoped-rbac:$ALLOW_ALL" \
-            "/porth/${ENV}/auth-policy/tenant-scoped-user:$ALLOW_ALL"
-          do
-            PARAM="${NAME%%:*}"
-            VALUE="${NAME#*:}"
-            aws ssm put-parameter \
-              --name "$PARAM" \
-              --value "$VALUE" \
-              --type String \
-              --overwrite \
-              --region "$AWS_REGION" \
-              --no-cli-pager
-            echo "✅ $PARAM"
-          done
-
-          aws ssm put-parameter \
-            --name "/porth/${ENV}/auth-policy/index" \
-            --value "$INDEX" \
-            --type String \
-            --overwrite \
-            --region "$AWS_REGION" \
-            --no-cli-pager
-          echo "✅ /porth/${ENV}/auth-policy/index"
-
-          # ── Session-policy templates ────────────────────────────────────────
-          # This block is a COPY of the canonical seeding in the Porth repo's
-          # deploy.yml. It had drifted three releases behind, and every drift was
-          # silent. Kept byte-compatible with the source now; the duplication is
-          # the real defect and belongs in `porth-install auth-config` instead.
-          TEMPLATE_NAME="tenant-scoped-default"
-          PLATFORM_TEMPLATE_NAME="platform-scoped-default"
-
-          # PORTH-514/530 — LeadingKeys must carry the ENV#$env# prefix; the old
-          # un-prefixed TENANT#$tenant / ORG#$org_id matched no key that exists.
+          # PORTH-655: both policy documents and their templates come from
+          # deploy/porth/ through `porth-install policies apply`, which renders
+          # session-policy/index.template.json over ENV_SLOTS, validates both
+          # documents together (every binding has an auth-policy prefix, every
+          # template exists, the index parses) and writes nothing if anything is
+          # wrong. It replaces hand-written put-parameter calls that nothing
+          # checked. docs/INSTALL.md §3e in Components.
           #
-          # `$env` is substituted by the AUTHORIZER, per request, from the
-          # environment it resolved. That used to be the pinned slot and is now
-          # whichever environment the host belongs to (PORTH-627) — so this one
-          # template narrows correctly in every environment, and is the only
-          # thing separating them now that no envelope carries a pin.
-          TENANT_SESSION_POLICY=$(cat deploy/porth/session-policy/tenant-scoped-default.json)
-          aws ssm put-parameter \
-            --name "/porth/${ENV}/auth-session-policy/${TEMPLATE_NAME}" \
-            --value "$TENANT_SESSION_POLICY" \
-            --type String \
-            --overwrite \
-            --region "$AWS_REGION" \
-            --no-cli-pager
-          echo "✅ /porth/${ENV}/auth-session-policy/${TEMPLATE_NAME}"
-
-          # PORTH-576 — the platform operator's template: cross-TENANT, but NOT
-          # cross-ENVIRONMENT. Without it, a platform admin resolves the tenant
-          # template above with $tenant substituted as the literal "platform" and
-          # can read only TENANT#platform — one partition, for the one operator
-          # whose entire job is cross-tenant.
-          #
-          # Scan is a SEPARATE, unconditioned statement on purpose. A Scan
-          # populates no dynamodb:LeadingKeys, so ForAllValues:StringLike passes
-          # vacuously; folding it in above would read as constrained while
-          # constraining nothing.
-          PLATFORM_SESSION_POLICY=$(cat deploy/porth/session-policy/platform-scoped-default.json)
-          aws ssm put-parameter \
-            --name "/porth/${ENV}/auth-session-policy/${PLATFORM_TEMPLATE_NAME}" \
-            --value "$PLATFORM_SESSION_POLICY" \
-            --type String \
-            --overwrite \
-            --region "$AWS_REGION" \
-            --no-cli-pager
-          echo "✅ /porth/${ENV}/auth-session-policy/${PLATFORM_TEMPLATE_NAME}"
-
-          # PORTH-550 — `paths` values are PATH PREFIXES, matched longest-first by
-          # policy_cache._find_template using path.startswith(key). "default" is
-          # not a prefix of any request path, so it matched NOTHING:
-          # get_session_policy returned None for every request and the authorizer
-          # assumed the tenant role with NO session policy at all — i.e. its full
-          # ceiling, reaching every tenant. "/" is the catch-all prefix that
-          # "default" was meant to express.
-          #
-          # PORTH-576 — platform_paths selects the template for the platform-admin
-          # role.
-          # compose_session_index.py, not render.py: the template describes ONE
-          # environment and this fans it out over ENV_SLOTS, preserving rule
-          # order so the `*` catch-all stays below the specific hosts.
-          SESSION_INDEX=$(python3 deploy/porth/scripts/compose_session_index.py \
-            deploy/porth/session-policy/index.template.json \
-            ENV="$ENV" ENVIRONMENTS="$ENV_SLOTS")
-          aws ssm put-parameter \
-            --name "/porth/${ENV}/auth-session-policy/index" \
-            --value "$SESSION_INDEX" \
-            --type String \
-            --overwrite \
-            --region "$AWS_REGION" \
-            --no-cli-pager
-          echo "✅ /porth/${ENV}/auth-session-policy/index"
+          # The index is "path_basis": "as_sent" — Porth's routes are keyed
+          # /porth/... — which only Porth >= 0.4.17 reads. On an older release
+          # every request would deny, so refuse rather than write it.
+          if ! scripts/porth-version-at-least.sh 0.4.17 "${{ env.EFF_PORTH_VERSION }}"; then
+            echo "::error::deploy/porth/ is path_basis \"as_sent\", which needs Porth >= 0.4.17 (installing ${{ env.EFF_PORTH_VERSION }})."
+            exit 1
+          fi
+          # IAM existence is not checked here (--no-check-iam): this role has no
+          # iam:GetRole. A binding naming a role that does not exist fails at the
+          # assume, which the authorizer logs by name.
+          porth-install policies apply \
+            --dir deploy/porth \
+            --branch "$ENV" \
+            --environments "$ENV_SLOTS" \
+            --no-check-iam \
+            --dry-run
+          porth-install policies apply \
+            --dir deploy/porth \
+            --branch "$ENV" \
+            --environments "$ENV_SLOTS" \
+            --no-check-iam
 
           # PORTH-655: the auth test token is gone from Porth. Remove the SSM
           # fallback it was seeded into, if an earlier install left it.
@@ -1125,5 +1074,5 @@ jobs:
           # The release's own porth-install (from its manifest), so check
           # carries every data and configuration check that release ships.
           PORTH_INSTALL_CHECK_VERSION: ${{ needs.install-or-upgrade.outputs.porth_install_version }}
-          EFF_PORTH_VERSION: ${{ inputs.porth_version || '0.4.14' }}
+          EFF_PORTH_VERSION: ${{ inputs.porth_version || '0.4.17' }}
         run: scripts/porth-install-check.sh

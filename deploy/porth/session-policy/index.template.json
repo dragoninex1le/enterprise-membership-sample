@@ -1,4 +1,5 @@
 {
+  "path_basis": "as_sent",
   "context_rules": [
     {
       "match": {
@@ -17,12 +18,6 @@
         "host_pattern": "api.{{ENV_SLOT}}.ems.estynsoftware.cloud"
       },
       "context_hint": "api-{{ENV_SLOT}}"
-    },
-    {
-      "match": {
-        "host_pattern": "*"
-      },
-      "context_hint": "porth"
     }
   ],
   "bindings": {
@@ -62,17 +57,7 @@
         "arn:aws:iam::{account}:policy/ems-sample-app-${role_type}-session-{{ENV_SLOT}}"
       ]
     },
-    "porth:/": {
-      "role_types": [
-        "tenant",
-        "platform-admin"
-      ],
-      "role_arn": "arn:aws:iam::{account}:role/porth-${role_type}-{{ENV}}",
-      "session_policy_arns": [
-        "arn:aws:iam::{account}:policy/porth-${role_type}-session-{{ENV}}"
-      ]
-    },
-    "api-{{ENV_SLOT}}:/": {
+    "api-{{ENV_SLOT}}:/porth": {
       "role_types": [
         "tenant",
         "platform-admin"
