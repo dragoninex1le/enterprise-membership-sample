@@ -90,14 +90,14 @@ jq -r '.resource_changes[] | select(.change.actions != ["no-op"] and .change.act
 say "    the plan after adoption (action, address, attributes an update changes):"
 if [ -s "$WORK/changes.tsv" ]; then column -t -s $'\t' "$WORK/changes.tsv" | sed 's/^/      /' >&2; else say "      no changes"; fi
 
-# A Porth service document is what callers resolve a service through, so a
-# rewrite of one is shown in full, live against planned. Plain String parameters
-# under Porth's module only: never a SecureString, never a sensitive value.
+# Porth's mint service document is what callers resolve the mint through, so a
+# rewrite of it is shown in full, live against planned. That one parameter only,
+# by address: it holds a name, an address and a PUBLIC key. (The AWS provider
+# marks every parameter's value sensitive, so sensitivity cannot pick it out.)
 jq -c '.resource_changes[]
   | select(.change.actions == ["update"]
-           and (.address | startswith("module.porth_install_once.aws_ssm_parameter."))
+           and .address == "module.porth_install_once.aws_ssm_parameter.delegated_mint_service_document"
            and .change.before.type == "String"
-           and (.change.before_sensitive.value // false) == false
            and .change.before.value != .change.after.value)
   | {address, live: .change.before.value, planned: .change.after.value}' "$WORK/plan.json" |
 while IFS= read -r doc; do
