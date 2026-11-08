@@ -16,7 +16,6 @@
  *   PLAYWRIGHT_BASE_URL             — tenant subdomain URL (used by tenant/controller user tests)
  *   PORTH_PLATFORM_BASE_URL         — platform admin UI URL (root subdomain)
  *   PORTH_API_URL                   — Porth API base URL (no trailing slash)
- *   PORTH_AUTH_TEST_TOKEN           — service token for direct API calls (seeding)
  *   PORTH_PLATFORM_ADMIN_EMAIL / PORTH_PLATFORM_ADMIN_PASSWORD
  *   PORTH_TENANT_CONFIG             — JSON: {"domain":"...","client_id":"...","audience":"..."}
  *   PORTH_TENANT_USER_EMAIL / PORTH_TENANT_USER_PASSWORD   — controller user (validates AR access)
@@ -28,7 +27,6 @@ const PLATFORM_ADMIN_PASSWORD = process.env.PORTH_PLATFORM_ADMIN_PASSWORD ?? ''
 const TENANT_USER_EMAIL = process.env.PORTH_TENANT_USER_EMAIL ?? ''
 const TENANT_USER_PASSWORD = process.env.PORTH_TENANT_USER_PASSWORD ?? ''
 const PORTH_API_URL = (process.env.PORTH_API_URL ?? '').replace(/\/$/, '')
-const PORTH_AUTH_TEST_TOKEN = process.env.PORTH_AUTH_TEST_TOKEN ?? ''
 
 const TENANT_CONFIG: { domain?: string; client_id?: string; audience?: string } = (() => {
   const raw = process.env.PORTH_TENANT_CONFIG
@@ -168,126 +166,11 @@ async function signIn(page: Page, email: string, password: string) {
  * Porth role by the resolve_roles op.
  */
 async function seedPermissionsAndTenantAdminRole(tenantId: string) {
-  if (!PORTH_API_URL || !PORTH_AUTH_TEST_TOKEN) {
-    console.warn('Skipping permission/role seeding: PORTH_API_URL or PORTH_AUTH_TEST_TOKEN not set')
-    return
-  }
-
-  const apiCtx = await playwrightRequest.newContext()
-  const headers = {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${PORTH_AUTH_TEST_TOKEN}`,
-  }
-
-  // Register sample-app permissions for the tenant using the batch endpoint.
-  // The API expects POST /permissions/ (trailing slash) with a single batch body.
-  const permResp = await apiCtx.post(`${PORTH_API_URL}/permissions/`, {
-    headers,
-    data: {
-      tenant_id: tenantId,
-      app_namespace: 'sample-app',
-      permissions: [
-        { key: 'dashboard.read',    display_name: 'View Dashboard',       category: 'Dashboard',           app_namespace: 'sample-app', sort_order: 1  },
-        { key: 'ar.invoices.read',  display_name: 'View Invoices',        category: 'Accounts Receivable', app_namespace: 'sample-app', sort_order: 10 },
-        { key: 'ar.invoices.write', display_name: 'Create/Edit Invoices', category: 'Accounts Receivable', app_namespace: 'sample-app', sort_order: 11 },
-        { key: 'ap.bills.read',     display_name: 'View Bills',           category: 'Accounts Payable',    app_namespace: 'sample-app', sort_order: 20 },
-        { key: 'ap.bills.write',    display_name: 'Create/Edit Bills',    category: 'Accounts Payable',    app_namespace: 'sample-app', sort_order: 21 },
-        { key: 'approvals.read',    display_name: 'View Approval Queue',  category: 'Approvals',           app_namespace: 'sample-app', sort_order: 30 },
-        { key: 'approvals.write',   display_name: 'Approve/Reject',       category: 'Approvals',           app_namespace: 'sample-app', sort_order: 31 },
-      ],
-    },
-  })
-  if (!permResp.ok()) {
-    console.warn(`Failed to batch-register permissions: HTTP ${permResp.status()} — ${await permResp.text()}`)
-  }
-
-  // All sample-app permission keys — tenant-admin gets all of them.
-  // The platform-admin role covers only platform.* permissions; the tenant-admin
-  // role is the inverse: every tenant-level permission, so it has full access to
-  // the functional app (dashboard, AR, AP, approvals).
-  const ALL_SAMPLE_PERMISSIONS = [
-    'dashboard.read',
-    'ar.invoices.read',
-    'ar.invoices.write',
-    'ap.bills.read',
-    'ap.bills.write',
-    'approvals.read',
-    'approvals.write',
-  ]
-
-  // Create tenant-admin role with an explicit source_key so that resolve_roles
-  // can map the JWT claim value "tenant-admin" → this Porth role.
-  // source_key must always be set — omitting it leaves it null and breaks role resolution.
-  const roleResp = await apiCtx.post(`${PORTH_API_URL}/roles/`, {
-    headers,
-    data: {
-      tenant_id: tenantId,
-      name: 'tenant-admin',
-      source_key: 'tenant-admin',
-      description: 'Tenant Administrator — manages roles and claim mapping',
-    },
-  })
-  if (!roleResp.ok() && roleResp.status() !== 409) {
-    console.warn(`Failed to create tenant-admin role: HTTP ${roleResp.status()}`)
-  }
-
-  // Resolve the role_id — from the creation response (201) or by listing roles (409).
-  let roleId: string | null = null
-  if (roleResp.ok()) {
-    const body = await roleResp.json()
-    // API may return id or role_id depending on version
-    roleId = (body.id ?? body.role_id) ?? null
-    console.log(`  Created tenant-admin role — id=${roleId}`)
-  } else if (roleResp.status() === 409) {
-    const listResp = await apiCtx.get(`${PORTH_API_URL}/roles/${tenantId}`, { headers })
-    if (listResp.ok()) {
-      const rawBody = await listResp.json()
-      // Handle both a direct array and a wrapped response (e.g. { items: [...] })
-      const roles: Array<Record<string, unknown>> = Array.isArray(rawBody)
-        ? rawBody
-        : (rawBody.items ?? rawBody.roles ?? rawBody.data ?? [])
-      console.log(`  GET /roles/${tenantId} → ${roles.length} role(s): ${roles.map(r => r.name).join(', ')}`)
-      const existingRole = roles.find(r => r.name === 'tenant-admin') ?? null
-      // API may expose the role PK as id or role_id
-      roleId = (existingRole?.id ?? existingRole?.role_id ?? null) as string | null
-      console.log(`  Resolved tenant-admin roleId=${roleId}`)
-      // Ensure source_key is set — may be null if this role was created before
-      // the admin_role_source_key fix landed on the frontend New Organization form.
-      if (roleId && !existingRole?.source_key) {
-        const patchResp = await apiCtx.patch(`${PORTH_API_URL}/roles/${tenantId}/${roleId}`, {
-          headers,
-          data: { source_key: 'tenant-admin' },
-        })
-        if (!patchResp.ok()) {
-          console.warn(`Failed to patch source_key on tenant-admin role: HTTP ${patchResp.status()} — ${await patchResp.text()}`)
-        } else {
-          console.log('  ✅ Patched source_key on existing tenant-admin role')
-        }
-      }
-    } else {
-      console.warn(`  GET /roles/${tenantId} failed: HTTP ${listResp.status()} — ${await listResp.text()}`)
-    }
-  }
-
-  // Assign all sample-app permissions to the tenant-admin role.
-  // This is the inverse of the platform-admin role: full access to the tenant's
-  // functional app, with no platform-level permissions.
-  if (roleId) {
-    const permAssignResp = await apiCtx.put(
-      `${PORTH_API_URL}/roles/${tenantId}/${roleId}/permissions`,
-      { headers, data: ALL_SAMPLE_PERMISSIONS },
-    )
-    if (!permAssignResp.ok()) {
-      console.warn(`Failed to assign permissions to tenant-admin: HTTP ${permAssignResp.status()} — ${await permAssignResp.text()}`)
-    } else {
-      console.log(`  ✅ Assigned ${ALL_SAMPLE_PERMISSIONS.length} permissions to tenant-admin`)
-    }
-  } else {
-    console.warn('Could not resolve tenant-admin role_id — permissions not assigned')
-  }
-
-  await apiCtx.dispose()
-  console.log(`✅ Permissions and tenant-admin role seeded for ${tenantId}`)
+  // PORTH-655: the static auth test token is gone from Porth, so nothing seeds
+  // through the API front door any more. The install provisions permissions and
+  // the tenant-admin role through porth-install (reconcile-permissions,
+  // tenants apply); this spec relies on that.
+  console.info(`Permissions and tenant-admin role for ${tenantId} come from the Porth install`)
 }
 
 /**

@@ -48,7 +48,6 @@ name: Porth components — install + upgrade
 #   vars.PORTH_FIXED_ENVIRONMENT      ADR-Z8 slot to PIN this install to. UNSET on EMS, which
 #                                     is multi-environment. Presence is the mode (PORTH-557).
 #   secrets.ACM_CERTIFICATE_ARN       cert for the custom domain (us-east-1)
-#   secrets.PORTH_AUTH_TEST_TOKEN     (optional) authorizer test-token bypass
 #
 # Everything above describes the STACK's shape. Identity configuration is not here — it lives
 # in SSM at /porth/config/testbed under `platform.idp`, in the account it authenticates
@@ -84,7 +83,7 @@ on:
         # 0.4.8 names the two Porth APIs (porth-dev-api / porth-dev-browser-api).
         # 0.4.9 — PORTH-655 bugs (audit slot, org routes platform-only,
         # legacy-read refusal, connector claim-mapping lineage).
-        default: '0.4.12'
+        default: '0.4.14'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
@@ -111,20 +110,14 @@ on:
         description: 'Override vars.PORTH_FIXED_ENVIRONMENT for this run only. Leave blank to use the configured value.'
         required: false
         default: ''
-      api_domain_name:
-        description: 'API Gateway custom domain FQDN. Blank = use the vars value.'
-        required: false
-        default: ''
-      acm_certificate_arn:
-        description: 'ACM certificate ARN for the custom domain. Blank = use the secret.'
-        required: false
-        default: ''
       log_level:
-        description: 'Python log level for the authorizer, API and auth-proxy Lambdas. DEBUG for diagnosis; put it back to INFO afterwards.'
+        # EMS is the Porth testbed: DEBUG by default, so every authorizer, API,
+        # auth-proxy and mint decision is in the logs (PORTH-655, Richard 2026-11-07).
+        description: 'Python log level for every Porth Lambda. EMS runs DEBUG.'
         required: false
         type: choice
-        options: [INFO, DEBUG, WARNING, ERROR, CRITICAL]
-        default: 'INFO'
+        options: [DEBUG, INFO, WARNING, ERROR, CRITICAL]
+        default: 'DEBUG'
       prune_retired:
         description: 'Delete permissions Porth no longer ships (e.g. platform.orgs.*) and every grant to them. Leave OFF: the install always prints the dry run; read it first.'
         required: false
@@ -160,7 +153,7 @@ env:
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.12' }}
+    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.14' }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
@@ -189,7 +182,7 @@ jobs:
       # also works when triggered by the push shim (inputs are empty on push).
       - name: Resolve effective inputs
         run: |
-          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.12' }}" >> "$GITHUB_ENV"
+          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.14' }}" >> "$GITHUB_ENV"
           echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
           # The configured mode, overridable for one run. Empty IS the mode
@@ -197,7 +190,7 @@ jobs:
           # slot, so on EMS — which runs porth-sample and porth-dau — the
           # variable is left unset and this resolves empty.
           echo "EFF_FIXED_ENV=${{ inputs.fixed_environment || vars.PORTH_FIXED_ENVIRONMENT || '' }}" >> "$GITHUB_ENV"
-          echo "EFF_LOG_LEVEL=${{ inputs.log_level || 'INFO' }}" >> "$GITHUB_ENV"
+          echo "EFF_LOG_LEVEL=${{ inputs.log_level || 'DEBUG' }}" >> "$GITHUB_ENV"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -220,32 +213,16 @@ jobs:
 
       - name: Validate inputs and resolve domain parameters
         env:
-          ACM_SECRET: ${{ secrets.ACM_CERTIFICATE_ARN }}
-          ACM_LEGACY_VAR: ${{ vars.ACM_CERTIFICATE_ARN }}
-          API_DOMAIN_VAR: ${{ vars.API_DOMAIN_NAME }}
-          API_DOMAIN_LEGACY_VAR: ${{ vars.PORTH_API_DOMAIN_NAME }}
           DNS_ZONE_VAR: ${{ vars.DNS_ZONE }}
           SPA_ORIGINS_VAR: ${{ vars.PORTH_SPA_ORIGINS }}
           ROOT_URL_VAR: ${{ vars.PORTH_ROOT_URL }}
         run: |
           set -euo pipefail
-          # Custom domain: dispatch input wins, then the canonical var, then the legacy name.
-          DOMAIN="${{ inputs.api_domain_name }}"
-          [ -z "$DOMAIN" ] && DOMAIN="${API_DOMAIN_VAR:-}" || true
-          [ -z "$DOMAIN" ] && DOMAIN="${API_DOMAIN_LEGACY_VAR:-}" || true
-
-          # ACM: dispatch input wins, then the secret (canonical), then the legacy var.
-          CERT="${{ inputs.acm_certificate_arn }}"
-          [ -z "$CERT" ] && CERT="${ACM_SECRET:-}" || true
-          [ -z "$CERT" ] && CERT="${ACM_LEGACY_VAR:-}" || true
-
-          if [ -n "$DOMAIN" ] && [ -z "$CERT" ]; then
-            echo "::error::api_domain_name '$DOMAIN' is set but no ACM certificate ARN was provided"
-            exit 1
-          fi
-
-          echo "PORTH_DOMAIN=$DOMAIN" >> "$GITHUB_ENV"
-          echo "PORTH_CERT=$CERT" >> "$GITHUB_ENV"
+          # PORTH-655: no shared Porth API host. Every declared environment is on
+          # tenant API hosts ({tenant}.api.{slot}.{zone}), so the old
+          # porth-api.{zone} custom domain, its certificate and its alias are
+          # retired: the install passes no ApiDomainName/AcmCertificateArn
+          # (CloudFormation deletes the domain and mapping) and removes the alias.
           echo "PORTH_DNS_ZONE=${DNS_ZONE_VAR%.}" >> "$GITHUB_ENV"
           echo "PORTH_SPA_ORIGINS_RAW=${SPA_ORIGINS_VAR:-}" >> "$GITHUB_ENV"
 
@@ -449,29 +426,18 @@ jobs:
           PARAMS+=( "ParameterKey=ApiLogLevel,ParameterValue=${{ env.EFF_LOG_LEVEL }}" )
           echo "Log level: ${{ env.EFF_LOG_LEVEL }} (authorizer + api + auth-proxy)"
 
-          # AuthTestToken enables the Layer 1 JWT bypass in the Lambda authorizer.
-          # Only set if the secret is present — otherwise the bypass is disabled.
-          AUTH_TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
-          if [ -n "$AUTH_TEST_TOKEN" ]; then
-            PARAMS+=( "ParameterKey=AuthTestToken,ParameterValue=$AUTH_TEST_TOKEN" )
-          fi
+          # PORTH-655: no AuthTestToken. The static-token bypass is gone from Porth
+          # (0.4.14 removes the parameter, so passing it would fail the change set).
           # GitHubRepoOwner intentionally omitted → CreateDeployRole condition stays false.
 
-          # Custom domain (PORTH-479): AcmCertificateArn + ApiDomainName together flip the
-          # template's HasCustomDomain condition, creating the ApiGatewayV2 DomainName +
-          # ApiMapping and exporting the regional domain/hosted-zone outputs for the Route53
-          # alias. Without BOTH the API stays on the raw execute-api URL. DnsZone (dot-less)
-          # keeps the authorizer's cookie-domain derivation consistent with the proxy blob.
-          if [ -n "${PORTH_DOMAIN:-}" ] && [ -n "${PORTH_CERT:-}" ]; then
-            PARAMS+=( "ParameterKey=AcmCertificateArn,ParameterValue=${PORTH_CERT}" )
-            PARAMS+=( "ParameterKey=ApiDomainName,ParameterValue=${PORTH_DOMAIN}" )
-            if [ -n "${PORTH_DNS_ZONE:-}" ]; then
-              PARAMS+=( "ParameterKey=DnsZone,ParameterValue=${PORTH_DNS_ZONE}" )
-            fi
-            echo "Custom domain ENABLED: ${PORTH_DOMAIN}"
-          else
-            echo "ℹ️  Custom domain OFF (API domain / ACM cert not both set) — execute-api URL only"
+          # PORTH-655: no shared host. AcmCertificateArn/ApiDomainName are not passed,
+          # so HasCustomDomain is false and CloudFormation deletes the old
+          # porth-api.{zone} DomainName + ApiMapping. DnsZone (dot-less) is still
+          # passed: the authorizer derives tenant origins from it.
+          if [ -n "${PORTH_DNS_ZONE:-}" ]; then
+            PARAMS+=( "ParameterKey=DnsZone,ParameterValue=${PORTH_DNS_ZONE}" )
           fi
+          echo "Shared Porth API host: retired (tenant API hosts only)"
 
           # PORTH-556 (SAR 0.2.0): SpaOrigins was REMOVED as a parameter. The authorizer
           # DERIVES its Origin allow-list from root_url + environments in the
@@ -667,57 +633,15 @@ jobs:
             echo "::warning::SessionsTableName not exported — the BFF may not be present in this Porth version"
           fi
 
-      - name: Upsert Route 53 alias for Porth API custom domain
-        # Idempotent: creates or updates the A-alias record pointing
-        # porth-api.ems.estynsoftware.cloud → API Gateway regional domain.
-        # Skipped if no custom domain was configured (PORTH_DOMAIN empty).
-        # Non-fatal: if IAM perms are missing the operator must create the
-        # record manually; subsequent steps still run.
-        if: env.PORTH_DOMAIN != ''
+      - name: Remove the retired shared-host alias (porth-api.{zone})
+        # PORTH-655: the shared Porth API host is retired; its custom domain goes
+        # with this change set. The alias pointed at it is deleted here — exactly
+        # that one record, and only if it exists. Warn-don't-fail: DNS hygiene
+        # must not fail an install.
         continue-on-error: true
-        run: |
-          set -euo pipefail
-          DOMAIN="${PORTH_DOMAIN}"
-          REGIONAL_DOMAIN="${APIGW_REGIONAL_DOMAIN}"
-          REGIONAL_HZ="${APIGW_REGIONAL_HZ}"
-
-          if [ -z "$REGIONAL_DOMAIN" ] || [ "$REGIONAL_DOMAIN" = "None" ]; then
-            echo "::warning::ApiGatewayRegionalDomainName not in stack outputs — skipping Route 53 upsert"
-            exit 0
-          fi
-
-          # Derive parent zone name (porth-api.ems.estynsoftware.cloud → ems.estynsoftware.cloud)
-          PARENT="${DOMAIN#*.}"
-          HZ_ID=$(aws route53 list-hosted-zones-by-name \
-            --dns-name "${PARENT}." \
-            --query "HostedZones[?Name=='${PARENT}.'].Id" \
-            --output text | head -1 | sed 's|/hostedzone/||')
-
-          if [ -z "$HZ_ID" ]; then
-            echo "::warning::No Route 53 hosted zone found for $PARENT — skipping Route 53 upsert"
-            echo "  Manual step: create ALIAS A record $DOMAIN → $REGIONAL_DOMAIN (hz $REGIONAL_HZ)"
-            exit 0
-          fi
-
-          echo "Upserting: $DOMAIN → $REGIONAL_DOMAIN (apigw hz=$REGIONAL_HZ, r53 hz=$HZ_ID)"
-          aws route53 change-resource-record-sets \
-            --hosted-zone-id "$HZ_ID" \
-            --change-batch "{
-              \"Comment\": \"porth-install.yml: alias for Porth API custom domain\",
-              \"Changes\": [{
-                \"Action\": \"UPSERT\",
-                \"ResourceRecordSet\": {
-                  \"Name\": \"${DOMAIN}.\",
-                  \"Type\": \"A\",
-                  \"AliasTarget\": {
-                    \"HostedZoneId\": \"${REGIONAL_HZ}\",
-                    \"DNSName\": \"${REGIONAL_DOMAIN}.\",
-                    \"EvaluateTargetHealth\": false
-                  }
-                }
-              }]
-            }"
-          echo "✅ Route 53 alias upserted: $DOMAIN → $REGIONAL_DOMAIN"
+        env:
+          RETIRED_HOST: ${{ vars.API_DOMAIN_NAME || vars.PORTH_API_DOMAIN_NAME || format('porth-api.{0}', vars.DNS_ZONE) }}
+        run: scripts/remove-retired-porth-api-dns.sh "$RETIRED_HOST"
 
       # ── Seed the OAuth-proxy config blob (/porth/auth) — PORTH-530 ──────────
       # PORTH-479: the BFF proxy (estyn_platform.config, prefix /porth) reads this
@@ -740,8 +664,8 @@ jobs:
       - name: Seed OAuth-proxy config blob (/porth/auth)
         run: |
           set -euo pipefail
-          if [ -z "${PORTH_DNS_ZONE:-}" ] || [ -z "${PORTH_DOMAIN:-}" ]; then
-            echo "::error::DNS_ZONE / API domain are unset — /porth/auth cannot be built and the proxy would stay inert"
+          if [ -z "${PORTH_DNS_ZONE:-}" ]; then
+            echo "::error::DNS_ZONE is unset — /porth/auth cannot be built and the proxy would stay inert"
             exit 1
           fi
 
@@ -1075,21 +999,15 @@ jobs:
             --no-cli-pager
           echo "✅ /porth/${ENV}/auth-session-policy/index"
 
-          # Seed the auth-test-token SSM fallback. The AuthorizerFunction reads
-          # PORTH_AUTH_TEST_TOKEN env var first (set via CFN AuthTestToken param),
-          # then falls back to this SSM path on cold start.
-          AUTH_TEST_TOKEN="${{ secrets.PORTH_AUTH_TEST_TOKEN }}"
-          if [ -n "$AUTH_TEST_TOKEN" ]; then
-            aws ssm put-parameter \
-              --name "/porth/${ENV}/auth-test-token" \
-              --value "$AUTH_TEST_TOKEN" \
-              --type SecureString \
-              --overwrite \
-              --region "$AWS_REGION" \
-              --no-cli-pager
-            echo "✅ /porth/${ENV}/auth-test-token"
+          # PORTH-655: the auth test token is gone from Porth. Remove the SSM
+          # fallback it was seeded into, if an earlier install left it.
+          if aws ssm get-parameter --name "/porth/${ENV}/auth-test-token" \
+               --region "$AWS_REGION" >/dev/null 2>&1; then
+            aws ssm delete-parameter --name "/porth/${ENV}/auth-test-token" --region "$AWS_REGION" \
+              && echo "🗑️  deleted /porth/${ENV}/auth-test-token" \
+              || echo "::warning::could not delete /porth/${ENV}/auth-test-token — delete it by hand"
           else
-            echo "⚠️  PORTH_AUTH_TEST_TOKEN secret not set — skipping auth-test-token SSM seed"
+            echo "✅ no /porth/${ENV}/auth-test-token"
           fi
 
       - name: Smoke test Porth API
@@ -1118,7 +1036,7 @@ jobs:
             echo "- **Environments:** ${PORTH_AUTH_ENVIRONMENTS_RAW:-'(none)'}"
             echo "- **Log level:** \`${{ env.EFF_LOG_LEVEL }}\` (authorizer + api + auth-proxy)"
             echo "- **Porth API URL:** ${PORTH_API_URL:-'(unresolved)'}"
-            echo "- **Custom domain:** ${PORTH_DOMAIN:-'OFF (execute-api only)'}"
+            echo "- **Shared Porth API host:** retired (tenant API hosts only)"
             echo "- **SPA origins:** ${PORTH_SPA_ORIGINS_RAW:-'(unset — origin gate OFF)'}"
             echo ""
             echo "### Next steps"
@@ -1207,5 +1125,5 @@ jobs:
           # The release's own porth-install (from its manifest), so check
           # carries every data and configuration check that release ships.
           PORTH_INSTALL_CHECK_VERSION: ${{ needs.install-or-upgrade.outputs.porth_install_version }}
-          EFF_PORTH_VERSION: ${{ inputs.porth_version || '0.4.12' }}
+          EFF_PORTH_VERSION: ${{ inputs.porth_version || '0.4.14' }}
         run: scripts/porth-install-check.sh

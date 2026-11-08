@@ -21,7 +21,7 @@ build_auth_blob = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(build_auth_blob)
 
 MANIFEST = {"platform": {"idp": {"issuer": "https://i/", "jwks_uri": "https://i/jwks", "client_id": "c"}}}
-ENV = {"PORTH_DNS_ZONE": "ems.estynsoftware.cloud", "PORTH_DOMAIN": "porth-api.ems.estynsoftware.cloud"}
+ENV = {"PORTH_DNS_ZONE": "ems.estynsoftware.cloud"}
 LIVE = {
     "issuer": "https://old/", "root_url": "ems.estynsoftware.cloud",
     "environments": "porth-sample,porth-dau", "tenant_origins": "required",
@@ -48,3 +48,17 @@ def test_a_first_install_carries_nothing_and_decides_nothing():
 def test_an_unreadable_live_blob_carries_nothing():
     blob = build_auth_blob.build(MANIFEST, {**ENV, "EXISTING_AUTH_BLOB": "not json"})
     assert not set(build_auth_blob.MANAGED_KEYS) & set(blob)
+
+
+def test_the_blob_names_no_shared_host():
+    """PORTH-655: the shared porth-api.{zone} host is retired; the blob has no custom_domain."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[3] / "deploy" / "porth" / "scripts" / "build_auth_blob.py"
+    spec = importlib.util.spec_from_file_location("build_auth_blob_noshared", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    blob = mod.build({"platform": {"idp": {"issuer": "https://i/", "jwks_uri": "https://i/j"}}},
+                     {"PORTH_DNS_ZONE": "ems.estynsoftware.cloud"})
+    assert "custom_domain" not in blob
