@@ -1,0 +1,12 @@
+# The supplier portal function (supplier_portal/). Its own porth-common: Porth's
+# delegated mint rides the internal plane as porth-common 0.0.18+ defines it, and a
+# PersistedContext written by one porth-common must be read by the same shape. The
+# sample app (lambdas/) is held below 0.0.18, so the two are deployed separately.
+# Capped below the next minor so a breaking release is a deliberate bump.
+porth-common>=0.0.22,<0.0.24
+fastapi==0.111.0
+mangum==0.17.0
+boto3>=1.35.0
+# ES256 verification of SupplierLink assertions. porth-common already requires it;
+# stated here because this function uses it directly.
+cryptography>=42.0.0

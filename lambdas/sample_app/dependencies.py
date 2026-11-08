@@ -46,3 +46,11 @@ def require_permission(permission_key: str):
 def porth(director: SampleAppDirector = Depends(get_director)) -> SampleAppDirector:
     """The request's Director, typed for this app. Use as a route dependency."""
     return director
+
+
+def author(director) -> str:
+    """Who to record as having acted. A person's id; or, for a caller Porth minted a
+    delegated session for (a supplier signed in through the supplier network), the
+    ``external_id`` Porth gives it — a delegated session carries no Porth user."""
+    ctx = getattr(director, "_raw_context", None) or {}
+    return director.user_id or director.porth_user_id or ctx.get("external_id", "")

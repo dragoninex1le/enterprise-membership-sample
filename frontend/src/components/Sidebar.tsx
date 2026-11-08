@@ -98,6 +98,9 @@ export default function Sidebar() {
                 <NavLink to={`/admin/tenant/claim-config${tenantId ? `?tenantId=${tenantId}` : ''}`} className={linkClass}>
                   <span>🗒️</span>Claim Mapping
                 </NavLink>
+                <NavLink to="/admin/tenant/suppliers" className={linkClass}>
+                  <span>🤝</span>Supplier network
+                </NavLink>
               </>
             )}
           </>

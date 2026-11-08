@@ -337,6 +337,17 @@ jobs:
           # browser surface. One authorizer per surface: bearer callers stay on
           # Porth's HttpApiId, and this app has none.
           if [ "${TENANT_API_HOSTS}" = "true" ]; then
+            # The BEARER surface, kept before the three values above are
+            # replaced by the browser surface's. The app's own bearer API (/mcp,
+            # and the connector's prth_ callers) is guarded by Porth's bearer
+            # authorizer, and `.well-known` maps to Porth's bearer API, so an MCP
+            # client can discover the door (Porth INSTALL §4a, "The MCP door").
+            {
+              echo "PORTH_BEARER_HTTP_API_ID=$(get_output HttpApiId)"
+              echo "PORTH_BEARER_AUTHORIZER_ARN=$PORTH_AUTHORIZER_ARN"
+              echo "PORTH_BEARER_AUTHORIZER_ROLE_ARN=$PORTH_AUTHORIZER_ROLE_ARN"
+            } >> "$GITHUB_ENV"
+            echo "✅ Bearer surface: api=$(get_output HttpApiId) authorizer=$PORTH_AUTHORIZER_ARN"
             BROWSER_API_ID=$(get_output BrowserHttpApiId)
             BROWSER_AUTHORIZER_ARN=$(get_output BrowserAuthorizerFunctionArn)
             BROWSER_AUTHORIZER_ROLE_ARN=$(get_output BrowserAuthorizerFunctionRoleArn)
@@ -499,15 +510,27 @@ jobs:
       # porth-platform and porth-tenant namespaces; anything this app enforces
       # is this app's to register, from this app's deploy.
       #
-      # That boundary is not a preference. PORTH-609 was a Porth install
-      # deleting these very permissions, and the reason nothing put them back is
-      # that nothing owned them — they had only ever been created by hand. The
-      # app's pages then 403 while Porth's logs stay clean, because Porth
-      # allowed every request it saw and these routes never reach it.
+      # Through Porth's own consumer interface, `porth-install
+      # register-permissions`, from the declaration in
+      # deploy/sample-app/permissions.json. It writes the environment's
+      # catalogue (ENV#{slot}#NS#sample-app), the shape Porth 0.4.1+ reads, and
+      # grants every permission to each existing tenant's tenant-admin role. A
+      # tenant created later gets them at provisioning, from the same
+      # declaration. Additive: it never deletes or revokes.
       #
-      # Converging and additive: registers what is missing, unions the grants,
-      # writes nothing on a second run, and removes nothing ever.
-      - name: Seed the app's own Porth permissions
+      # It replaces scripts/seed_app_permissions.py, which wrote the permission
+      # rows by hand under each TENANT# key. 0.4.1 reads none of those, and the
+      # seeder discovered tenants through an index the porth-sample platform
+      # tenant is missing, so on main it printed "no tenants found" and went
+      # green having deployed nothing.
+      #
+      # Business roles (viewer, ar-clerk, ap-clerk, controller) are not deployed
+      # here; deploy/sample-app/roles.json is what a tenant seeder reads.
+      - name: Register the app's own Porth permissions
+        env:
+          # porth-install is a tool, pinned like every other. Bump deliberately.
+          PORTH_INSTALL_VERSION: '0.4.5'
+          ENVIRONMENT_SLOT: ${{ env.ENVIRONMENT_SLOT }}
         run: |
           set -euo pipefail
 
@@ -517,33 +540,46 @@ jobs:
               --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
               --output text 2>/dev/null || echo ""
           }
+          PERMISSIONS_TABLE=$(get_output PermissionsTableName)
+          ROLES_TABLE=$(get_output RolesTableName)
+          TENANTS_TABLE=$(get_output TenantsTableName)
+          for pair in "PermissionsTableName:$PERMISSIONS_TABLE" "RolesTableName:$ROLES_TABLE" \
+                      "TenantsTableName:$TENANTS_TABLE"; do
+            if [ -z "${pair#*:}" ] || [ "${pair#*:}" = "None" ]; then
+              echo "::error::could not resolve ${pair%%:*} from $STACK. The app's"
+              echo "::error::permissions cannot be registered, so its pages would"
+              echo "::error::403 with nothing in Porth's logs."
+              exit 1
+            fi
+          done
 
-          export PORTH_PERMISSIONS_TABLE=$(get_output PermissionsTableName)
-          export PORTH_ROLES_TABLE=$(get_output RolesTableName)
-          export PORTH_TENANTS_TABLE=$(get_output TenantsTableName)
-          # The ADR-Z8 slot these permission rows are keyed under, and it is
-          # THIS deployment's environment (PORTH-627).
-          #
-          # It was `vars.PORTH_ENV_SCOPE || 'prod'` — one value for an axis that
-          # now has one per deployment. Both environments would have written to
-          # ENV#prod#, and neither environment's authorizer would have looked
-          # there: the app's pages 403 while Porth's logs stay clean, which is
-          # the same failure PORTH-609/610 recorded and the reason the block
-          # above resolves these tables rather than defaulting them.
-          #
-          # No variable override. A single one cannot answer for two
-          # environments, and setting it would quietly re-point both.
-          export PORTH_ENV_SCOPE="${{ env.ENVIRONMENT_SLOT }}"
+          aws codeartifact login --tool pip \
+            --domain porth --domain-owner 084847995635 \
+            --repository porth-py --region "$AWS_REGION"
+          pip install --quiet "porth-install==${PORTH_INSTALL_VERSION}"
+          echo "porth-install $(pip show porth-install | awk '/^Version:/ {print $2}')"
 
-          if [ -z "$PORTH_PERMISSIONS_TABLE" ] || [ "$PORTH_PERMISSIONS_TABLE" = "None" ]; then
-            echo "::error::could not resolve Porth table names from $STACK."
-            echo "::error::The app's permissions cannot be registered, so its"
-            echo "::error::pages will 403 with nothing in Porth's logs."
-            exit 1
-          fi
+          # The slot these rows are keyed under is THIS deployment's environment
+          # (PORTH-627). --event-bus: the repositories publish Permission.* and
+          # role events, and without it they go to a bus the stack never created.
+          ARGS=(
+            --file deploy/sample-app/permissions.json
+            --permissions-table "$PERMISSIONS_TABLE"
+            --roles-table "$ROLES_TABLE"
+            --tenants all --tenants-table "$TENANTS_TABLE"
+            --environment "$ENVIRONMENT_SLOT"
+            --event-bus "$PORTH_EVENT_BUS"
+            # Where the record of what this deploy granted goes: Porth's audit
+            # table, named for the Porth stack's Environment (PORTH_BRANCH). The
+            # deploy role's PutItem on it is ems-install-once's.
+            --audit-table "porth-audit-log-${PORTH_BRANCH}"
+          )
 
-          python -m pip install --quiet boto3
-          python scripts/seed_app_permissions.py
+          # Plan first: the audit trail of what this deploy is about to grant.
+          echo "── plan ──"
+          porth-install register-permissions "${ARGS[@]}" --dry-run
+          echo "── apply ──"
+          porth-install register-permissions "${ARGS[@]}"
 
       - name: Resolve sample app stack outputs
         run: |
@@ -629,7 +665,7 @@ jobs:
       # PORTH-612 — sample_app/tests too, not just ffug. Those tests assert the
       # things this deploy is otherwise free to break silently: that the app's API
       # is behind the Porth authorizer and same-origin, and that the permissions
-      # the seeder registers are the ones the routers enforce. Both failures are
+      # permissions.json declares are the ones the routers enforce. Both failures are
       # invisible from Porth's side, so CI is the only place they surface early.
       - name: Run unit tests (ADR-Z11 PORTH-555, PORTH-612)
         working-directory: lambdas
@@ -650,6 +686,18 @@ jobs:
           # path collects: a test directory nothing invokes is a test directory
           # that passes.
           python -m pytest ffug/tests sample_app/tests sample_app_callback/tests -q
+
+      # The supplier portal (supplier_portal/) deploys with its own porth-common
+      # (>=0.0.22, for Porth's delegated mint), which cannot share an environment with
+      # the sample app's (<0.0.18). Tested in its own venv, against what it ships with.
+      - name: Run supplier portal unit tests
+        working-directory: supplier_portal
+        run: |
+          set -euo pipefail
+          python -m venv .venv-test
+          .venv-test/bin/pip install --quiet -r requirements.txt pytest httpx "moto[dynamodb]"
+          .venv-test/bin/python -m pytest tests -q
+          rm -rf .venv-test
 
       # ── SAM build + deploy ───────────────────────────────────────────────────────────────
 
@@ -772,6 +820,13 @@ jobs:
           OPTIONAL+=("TenantApiHosts=${TENANT_API_HOSTS}")
           if [ -n "${PORTH_HTTP_API_ID:-}" ]; then
             OPTIONAL+=("PorthHttpApiId=${PORTH_HTTP_API_ID}")
+          fi
+          # The bearer surface (/mcp, connector callers). Empty on a shared-host
+          # slot, where the template leaves the bearer API out.
+          if [ -n "${PORTH_BEARER_AUTHORIZER_ARN:-}" ]; then
+            OPTIONAL+=("PorthBearerHttpApiId=${PORTH_BEARER_HTTP_API_ID}")
+            OPTIONAL+=("PorthBearerAuthorizerFunctionArn=${PORTH_BEARER_AUTHORIZER_ARN}")
+            OPTIONAL+=("PorthBearerAuthorizerFunctionRoleArn=${PORTH_BEARER_AUTHORIZER_ROLE_ARN}")
           fi
 
           # EnvironmentSlot and all three domain names come from one place —

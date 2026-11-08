@@ -1,0 +1,100 @@
+name: suppliers — prove the supplier portal, live
+
+# The supplier portal end to end against a deployed slot: this workflow plays the
+# supplier network (SupplierLink) with the slot's simulator key, trades assertions
+# for Porth delegated sessions, and uses them on the app. Checks S1–S9 are listed
+# in scripts/supplier_proof.py; each failure names its fix.
+#
+# Before it can pass (the proof checks these first):
+#   - ems-install-once applied (SupplierLink's key pair for the slot)
+#   - Porth's install Terraform lists ems-supplier-portal-{slot} as a mint caller
+#   - Porth operator: delegated-config put --connector supplierlink --enable --allowed-roles supplier
+#   - the buyer tenant has the supplier role, has linked its SupplierLink buyer
+#     account, and maps NETWORK_ROLE to that role (Tenant Admin > Supplier network)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment_slot:
+        description: 'Which ADR-Z8 environment to prove'
+        type: choice
+        default: porth-dau
+        options: [porth-dau, porth-sample]
+      tenant:
+        description: 'The buyer tenant'
+        required: true
+        default: 'ems-test'
+      buyer:
+        description: "Its SupplierLink buyer account id"
+        required: true
+        default: 'buyer-ems-test'
+      network_role:
+        description: 'A SupplierLink role the buyer has mapped to the supplier role'
+        required: true
+        default: 'billing'
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ENVIRONMENT_SLOT: ${{ inputs.environment_slot || 'porth-dau' }}
+  SAM_STACK_NAME: ${{ (inputs.environment_slot || 'porth-dau') == 'porth-sample' && 'enterprise-membership-sample' || format('enterprise-membership-sample-{0}', inputs.environment_slot || 'porth-dau') }}
+
+jobs:
+  prove:
+    name: S1–S9 — sessions, own invoices only, single use, host binding, boundary, no token in logs
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: sample-app-deploy
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Configure AWS credentials (deploy role, for discovery)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve the stack
+        run: |
+          set -euo pipefail
+          output() {
+            aws cloudformation describe-stacks --stack-name "$SAM_STACK_NAME" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text
+          }
+          SESSION_URL=$(output SupplierSessionUrlPattern)
+          if [ -z "$SESSION_URL" ] || [ "$SESSION_URL" = "None" ]; then
+            echo "::error::$SAM_STACK_NAME has no SupplierSessionUrlPattern output — the supplier"
+            echo "::error::portal is not deployed on $ENVIRONMENT_SLOT. Run Deploy Admin UI for it."
+            exit 1
+          fi
+          APEX=$(aws cloudformation describe-stacks --stack-name "$SAM_STACK_NAME" \
+            --query "Stacks[0].Parameters[?ParameterKey=='CloudFrontApexAlias'].ParameterValue" --output text)
+          {
+            echo "UAT_ROLE_ARN=$(output PorthUatRunnerRoleArn)"
+            echo "API_APEX=$APEX"
+          } >> "$GITHUB_ENV"
+          echo "session: $SESSION_URL"
+
+      - name: Install the proof's dependencies
+        run: python -m pip install --quiet boto3 "cryptography>=42"
+
+      - name: Assume the UAT runner role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.UAT_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: supplier-proof
+
+      - name: Prove it
+        env:
+          TENANT: ${{ inputs.tenant }}
+          BUYER: ${{ inputs.buyer }}
+          NETWORK_ROLE: ${{ inputs.network_role }}
+        run: python scripts/supplier_proof.py

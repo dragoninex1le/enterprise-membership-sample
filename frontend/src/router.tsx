@@ -27,6 +27,7 @@ import { tenantPagePath } from './hooks/useManagedTenant'
 import PermissionsPage from './pages/PermissionsPage'
 import UsersPage from './pages/UsersPage'
 import RolesPage from './pages/RolesPage'
+import SupplierNetworkPage from './pages/SupplierNetworkPage'
 
 /**
  * /admin/tenant/{roles,claim-config} are a tenant admin's own screens. A platform admin manages a
@@ -114,6 +115,7 @@ export const router = createBrowserRouter([
           { path: 'claim-mappings', element: <ClaimMappingsMoved /> },
           { path: 'permissions', element: <PermissionsPage /> },
           { path: 'users', element: <UsersPage /> },
+          { path: 'suppliers', element: <SupplierNetworkPage /> },
         ],
       },
     ],

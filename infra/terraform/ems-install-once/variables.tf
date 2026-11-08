@@ -126,3 +126,12 @@ variable "deploy_role_name" {
   type        = string
   default     = "sample-app-deploy-role"
 }
+
+variable "supplier_portal_slots" {
+  description = <<-EOT
+    The ADR-Z8 environments that run the supplier portal. Each gets its own
+    SupplierLink key pair (suppliers.tf). Every slot in deploy/porth/environments.json.
+  EOT
+  type        = list(string)
+  default     = ["porth-sample", "porth-dau"]
+}

@@ -421,11 +421,19 @@ def test_every_signer_signs_with_the_key_its_direction_entitles_it_to(template):
     cannot mint a request even though both are ffug.
 
     ffug's REQUEST path appears nowhere, and that is what UAT-4 witnesses.
+
+    A fourth signer, outside ffug: the supplier portal signs requests to PORTH's
+    delegated-mint service, on Porth's mint request key — the one key whose
+    holders Porth itself lists (delegated_mint_caller_role_arns). An alias ARN
+    cannot be a kms:Sign Resource, so the grant is key/* narrowed by
+    kms:ResourceAliases to that one alias; the test below pins the condition, or
+    key/* would be every key in the account.
     """
     expected = {
         "SampleAppFunction": {"Ref": "FfugRequestSigningKeyArn"},
         "PorthUatRunnerRole": {"Ref": "PorthContextSigningKeyArn"},
         "FfugWorkerFunctionRole": {"Ref": "FfugResponseSigningKeyArn"},
+        "SupplierPortalRole": {"Sub": "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*"},
     }
     signers = _grants(template, "kms:Sign")
 
@@ -734,3 +742,20 @@ def test_the_ingress_that_only_verifies_holds_no_signing_variable(resources):
     env = _env_of(resources, "SampleAppCallbackFunction")
 
     assert not [v for v in env if "SIGNING_KEY" in v], sorted(env)
+
+
+def test_the_supplier_portal_signs_only_with_porths_mint_key(template):
+    """key/* is the only way to grant kms:Sign by alias, so the alias condition is
+    the whole of the narrowing. Without it the portal could sign as anything."""
+    statements = [
+        stmt
+        for policy in template["Resources"]["SupplierPortalRole"]["Properties"]["Policies"]
+        for stmt in policy["PolicyDocument"]["Statement"]
+        if "kms:Sign" in (stmt["Action"] if isinstance(stmt["Action"], list) else [stmt["Action"]])
+    ]
+    assert len(statements) == 1
+    assert statements[0]["Condition"] == {
+        "ForAnyValue:StringEquals": {
+            "kms:ResourceAliases": {"Sub": "alias/porth-delegated-mint-request-${PorthBranch}"}
+        }
+    }

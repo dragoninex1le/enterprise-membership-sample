@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from ..dependencies import porth, require_permission
+from ..dependencies import author, porth, require_permission
 from ..director import SampleAppDirector
 from ..repository import TransitionNotAllowedError
 
@@ -18,7 +18,7 @@ def list_bills(director: SampleAppDirector = Depends(porth)) -> list[dict]:
 @router.post("/bills", dependencies=[Depends(require_permission("ap.bills.write"))])
 def create_bill(body: CreateBillRequest, director: SampleAppDirector = Depends(porth)) -> dict:
     return director.repository.create_bill(
-        {**body.model_dump(), "created_by": director.user_id},
+        {**body.model_dump(), "created_by": author(director)},
     )
 
 
@@ -33,7 +33,7 @@ def submit_bill(record_id: str, director: SampleAppDirector = Depends(porth)) ->
     """
     try:
         return director.repository.submit_for_approval(
-            "bill", record_id, by=director.user_id
+            "bill", record_id, by=author(director)
         )
     except TransitionNotAllowedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

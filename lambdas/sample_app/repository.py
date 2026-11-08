@@ -266,6 +266,34 @@ class SampleAppRepository:
         self.table.put_item(Item=item)
         return item
 
+    # -- the supplier portal -----------------------------------------------------
+    #
+    # A supplier's invoice is a BILL in the buyer's payables, recorded with the
+    # supplier it came from. The supplier id is Porth's (the delegated session's
+    # store_external_id), never the request's, so a supplier can only ever read
+    # and write under their own id.
+
+    def create_supplier_invoice(self, *, supplier_id: str, submitted_by: str, data: dict) -> dict:
+        bill_id = str(uuid.uuid4())
+        item = {
+            "pk": self.partition, "sk": f"BILL#{bill_id}",
+            "bill_id": bill_id, "tenant_id": self.tenant_id, "environment": self.environment,
+            "vendor_name": data["vendor_name"], "amount": str(data["amount"]),
+            "status": "pending", "due_date": data.get("due_date", ""),
+            "supplier_reference": data.get("supplier_reference", ""),
+            "supplier_id": supplier_id, "source": "supplier-portal",
+            "created_by": submitted_by, "created_at": _now(),
+        }
+        self.table.put_item(Item=item)
+        return item
+
+    def supplier_invoices(self, supplier_id: str) -> list[dict]:
+        return [b for b in self.list_bills() if b.get("supplier_id") == supplier_id]
+
+    def supplier_invoice(self, supplier_id: str, bill_id: str) -> dict | None:
+        item = self.table.get_item(Key={"pk": self.partition, "sk": f"BILL#{bill_id}"}).get("Item")
+        return item if item and item.get("supplier_id") == supplier_id else None
+
     def submit_for_approval(self, record_type: str, record_id: str, *, by: str) -> dict:
         """Move a record from its own working state into the approval queue.
 
