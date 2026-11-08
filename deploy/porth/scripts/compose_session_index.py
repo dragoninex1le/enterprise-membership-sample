@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Expand the session-policy index template once per ADR-Z8 environment.
 
+PORTH-655: the install writes the index with `porth-install policies apply`,
+which renders the same way. This script stays as the tests' renderer, so the
+tests see the document the install writes.
+
     compose_session_index.py index.template.json ENV=dev ENVIRONMENTS=a,b
 
 The authorizer picks a binding by matching the request host to a `context_rule`
@@ -70,7 +74,11 @@ def compose(template: dict, env: str, environments: list[str]) -> dict:
         else:
             bindings.update(_render(pair, {"ENV": env}))
 
-    return {"context_rules": rules, "bindings": bindings}
+    # Other top-level keys (PORTH-655's "path_basis") pass through unchanged,
+    # as `porth-install policies apply` — which now writes the index — keeps them.
+    out = {k: v for k, v in template.items() if k not in ("context_rules", "bindings")}
+    out.update(context_rules=rules, bindings=bindings)
+    return out
 
 
 def main(argv: list[str]) -> int:

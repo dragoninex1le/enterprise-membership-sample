@@ -1,0 +1,5 @@
+{
+  "platform-admin-only": "allow-all.json",
+  "tenant-scoped-rbac": "allow-all.json",
+  "tenant-scoped-user": "allow-all.json"
+}
