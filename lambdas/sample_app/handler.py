@@ -10,7 +10,7 @@ from .cors import HostBoundOriginMiddleware
 from .director import DirectorMiddleware, SampleAppDirector
 from .mapping_key import restore_mapping_key
 from . import trace
-from .routers import dashboard, ar, ap, approvals, diagnostics, suppliers
+from .routers import dashboard, ar, ap, approvals, bearer, diagnostics, suppliers
 from .accounts_mcp import http as accounts_mcp
 
 # PORTH-622 — set once, for the whole package, at the entry point.
@@ -147,6 +147,9 @@ app.include_router(diagnostics.router)
 # The accounts MCP service, at /mcp. Reached only through the app's bearer API
 # (template.yml SampleAppBearerApi); the browser API serves /sample/* alone.
 app.include_router(accounts_mcp.router)
+# GET /mcp/whoami: how the bearer surface accepted a token, for the SPA's
+# session-bound bearer test. Same bearer API; see routers/bearer.py.
+app.include_router(bearer.router)
 # The supplier portal's routes for suppliers' contacts, through the SUPPLIERS API
 # (template.yml SampleAppSuppliersApi). See routers/suppliers.py.
 app.include_router(suppliers.router)

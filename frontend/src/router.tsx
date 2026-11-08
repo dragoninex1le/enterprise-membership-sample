@@ -28,6 +28,7 @@ import PermissionsPage from './pages/PermissionsPage'
 import UsersPage from './pages/UsersPage'
 import RolesPage from './pages/RolesPage'
 import SupplierNetworkPage from './pages/SupplierNetworkPage'
+import BearerTokenPage from './pages/BearerTokenPage'
 
 /**
  * /admin/tenant/{roles,claim-config} are a tenant admin's own screens. A platform admin manages a
@@ -55,6 +56,9 @@ export const router = createBrowserRouter([
     element: <Layout />,
     children: [
       { index: true, element: <RootRedirect /> },
+
+      // Diagnostics: any signed-in user. The session-bound bearer test.
+      { path: 'diagnostics/bearer-token', element: <BearerTokenPage /> },
 
       // ── Functional areas ──────────────────────────────────────────────────
       {

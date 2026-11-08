@@ -77,10 +77,14 @@ def test_every_bearer_route_is_authorized(resources):
     routes = [r for r in resources.values() if r["Type"] == "AWS::ApiGatewayV2::Route"
               and r["Properties"]["ApiId"] == {"Ref": "SampleAppBearerApi"}]
     # $default: a request for exactly .../mcp has an empty path (test_mapping_key.py).
-    assert {r["Properties"]["RouteKey"] for r in routes} == {"ANY /", "ANY /{proxy+}", "$default"}
-    for r in routes:
-        assert r["Properties"]["AuthorizationType"] == "CUSTOM"
-        assert r["Properties"]["AuthorizerId"] == {"Ref": "SampleAppBearerAuthorizer"}
+    # OPTIONS /{proxy+}: the one open route, a browser preflight, which carries no
+    # Authorization and would otherwise be refused before the app answers CORS.
+    keys = {r["Properties"]["RouteKey"]: r["Properties"] for r in routes}
+    assert set(keys) == {"ANY /", "ANY /{proxy+}", "$default", "OPTIONS /{proxy+}"}
+    assert keys.pop("OPTIONS /{proxy+}")["AuthorizationType"] == "NONE"
+    for props in keys.values():
+        assert props["AuthorizationType"] == "CUSTOM"
+        assert props["AuthorizerId"] == {"Ref": "SampleAppBearerAuthorizer"}
 
 
 def test_mcp_and_well_known_are_mapped_on_both_api_domains(resources):

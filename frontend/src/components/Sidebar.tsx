@@ -105,6 +105,11 @@ export default function Sidebar() {
             )}
           </>
         )}
+
+        {sectionLabel('Diagnostics')}
+        <NavLink to="/diagnostics/bearer-token" className={linkClass}>
+          <span>🔑</span>Bearer token test
+        </NavLink>
       </div>
     </nav>
   )

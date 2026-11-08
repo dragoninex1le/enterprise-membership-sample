@@ -579,6 +579,22 @@ Resources:
       AuthorizerId: !Ref SampleAppBearerAuthorizer
       Target: !Sub integrations/${SampleAppBearerIntegration}
 
+  # A browser preflight carries no Authorization, so on the authorized routes the
+  # identity source refuses it (401) before the app could answer CORS. This open
+  # OPTIONS route wins over ANY /{proxy+} on method, and the app's CORSMiddleware
+  # answers it, granting only the host tenant's own UI (cors.py). It serves the
+  # SPA's calls under /mcp/* — the session-bound bearer check, GET /mcp/whoami.
+  # Exactly .../mcp cannot be preflighted: it reaches only $default, which stays
+  # authorized, and MCP clients are not browsers.
+  SampleAppBearerPreflightRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: HasBearerSurface
+    Properties:
+      ApiId: !Ref SampleAppBearerApi
+      RouteKey: OPTIONS /{proxy+}
+      AuthorizationType: NONE
+      Target: !Sub integrations/${SampleAppBearerIntegration}
+
   # A request for exactly the mapping key (`.../mcp`) arrives with an empty
   # path, which no other route matches; $default catches it, behind the same
   # authorizer.
