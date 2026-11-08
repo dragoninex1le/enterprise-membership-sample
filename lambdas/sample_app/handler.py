@@ -7,6 +7,7 @@ from mangum import Mangum
 from porth_common.internal_plane import log_plane_identity
 from .cors import HostBoundOriginMiddleware
 from .director import DirectorMiddleware, SampleAppDirector
+from .mapping_key import restore_mapping_key
 from .routers import dashboard, ar, ap, approvals, diagnostics, suppliers
 from .accounts_mcp import http as accounts_mcp
 
@@ -162,4 +163,5 @@ _asgi = Mangum(app, lifespan="off")
 
 def handler(event, context=None):
     log_plane_identity(SampleAppDirector.SERVICE_ID)
-    return _asgi(event, context)
+    # The bearer and suppliers APIs deliver key-stripped paths; see mapping_key.py.
+    return _asgi(restore_mapping_key(event), context)

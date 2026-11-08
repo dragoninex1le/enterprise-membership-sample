@@ -48,7 +48,7 @@ def test_any_algorithm_but_es256(network_key):
         assert rejected(f"{head}.{good.split('.', 1)[1]}", network_key) == "algorithm"
 
 
-@pytest.mark.parametrize("token", ["", "x", "a.b", "a.b.c", "a.b.c.d"])
+@pytest.mark.parametrize("token", ["", "x", "a.b", "a.b.c", "a.b.c.d", "not.an.assertion"])
 def test_not_an_assertion(network_key, token):
     assert rejected(token, network_key) in {"shape", "encoding", "json"}
 

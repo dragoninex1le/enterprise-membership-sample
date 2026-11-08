@@ -566,6 +566,19 @@ Resources:
       AuthorizerId: !Ref SampleAppBearerAuthorizer
       Target: !Sub integrations/${SampleAppBearerIntegration}
 
+  # A request for exactly the mapping key (`.../mcp`) arrives with an empty
+  # path, which no other route matches; $default catches it, behind the same
+  # authorizer.
+  SampleAppBearerDefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: HasBearerSurface
+    Properties:
+      ApiId: !Ref SampleAppBearerApi
+      RouteKey: $default
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref SampleAppBearerAuthorizer
+      Target: !Sub integrations/${SampleAppBearerIntegration}
+
   SampleAppBearerStage:
     Type: AWS::ApiGatewayV2::Stage
     Condition: HasBearerSurface
@@ -573,6 +586,10 @@ Resources:
       ApiId: !Ref SampleAppBearerApi
       StageName: $default
       AutoDeploy: true
+      # The key this API is mapped under. API Gateway hands the function the path
+      # without it; the function puts it back before routing (mapping_key.py).
+      StageVariables:
+        mapping_key: mcp
 
   SampleAppBearerInvokePermission:
     Type: AWS::Lambda::Permission
@@ -804,6 +821,19 @@ Resources:
       AuthorizerId: !Ref SampleAppSuppliersAuthorizer
       Target: !Sub integrations/${SampleAppSuppliersAppIntegration}
 
+  # A request for exactly the mapping key (`.../suppliers`) arrives with an empty
+  # path, which no other route matches; $default catches it, behind the same
+  # authorizer.
+  SampleAppSuppliersDefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: HasBearerSurface
+    Properties:
+      ApiId: !Ref SampleAppSuppliersApi
+      RouteKey: $default
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref SampleAppSuppliersAuthorizer
+      Target: !Sub integrations/${SampleAppSuppliersAppIntegration}
+
   SampleAppSuppliersStage:
     Type: AWS::ApiGatewayV2::Stage
     Condition: HasBearerSurface
@@ -811,6 +841,10 @@ Resources:
       ApiId: !Ref SampleAppSuppliersApi
       StageName: $default
       AutoDeploy: true
+      # The key this API is mapped under. API Gateway hands the function the path
+      # without it; the function puts it back before routing (mapping_key.py).
+      StageVariables:
+        mapping_key: suppliers
 
   SampleAppSuppliersSessionPermission:
     Type: AWS::Lambda::Permission

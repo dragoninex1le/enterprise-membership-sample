@@ -87,7 +87,7 @@ def check(assertion: str, *, public_key: ec.EllipticCurvePublicKey, now: float |
     head_txt, body_txt, sig_txt = pieces
     try:
         head, body = json.loads(_unb64(head_txt)), json.loads(_unb64(body_txt))
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:  # JSONDecodeError, and UnicodeDecodeError for bytes that are not text
         raise Unverified("json") from exc
     if not isinstance(head, dict) or not isinstance(body, dict):
         raise Unverified("json")

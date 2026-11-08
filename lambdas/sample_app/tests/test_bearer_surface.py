@@ -76,7 +76,8 @@ def test_a_tokenless_call_is_a_401_and_no_answer_is_cached(resources):
 def test_every_bearer_route_is_authorized(resources):
     routes = [r for r in resources.values() if r["Type"] == "AWS::ApiGatewayV2::Route"
               and r["Properties"]["ApiId"] == {"Ref": "SampleAppBearerApi"}]
-    assert {r["Properties"]["RouteKey"] for r in routes} == {"ANY /", "ANY /{proxy+}"}
+    # $default: a request for exactly .../mcp has an empty path (test_mapping_key.py).
+    assert {r["Properties"]["RouteKey"] for r in routes} == {"ANY /", "ANY /{proxy+}", "$default"}
     for r in routes:
         assert r["Properties"]["AuthorizationType"] == "CUSTOM"
         assert r["Properties"]["AuthorizerId"] == {"Ref": "SampleAppBearerAuthorizer"}
