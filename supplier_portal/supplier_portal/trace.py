@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import re
 from typing import Any
 
 log = logging.getLogger("supplier_portal.trace")
@@ -44,8 +45,13 @@ def _value(v: Any) -> str:
     return json.dumps(text) if (not text or any(c.isspace() for c in text)) else text
 
 
+#: PORTH-655's browser handle: base64url of an HMAC-SHA256, 43 characters, no padding.
+_HANDLE = re.compile(r"[A-Za-z0-9_-]{43}")
+
+
 def authorization_shape(value: str | None) -> str:
-    """``none`` | ``bearer-empty`` | ``bearer-prth(len=N)`` | ``bearer-jwt(len=N)`` | ``other``."""
+    """``none`` | ``bearer-empty`` | ``bearer-handle(len=43)`` | ``bearer-prth(len=N)`` |
+    ``bearer-jwt(len=N)`` | ``bearer-opaque(len=N)`` | ``other``."""
     if not value:
         return "none"
     scheme, _, credential = value.partition(" ")
@@ -54,7 +60,8 @@ def authorization_shape(value: str | None) -> str:
     credential = credential.strip()
     if not credential:
         return "bearer-empty"
-    kind = "prth" if credential.startswith("prth_") else "jwt" if credential.count(".") == 2 else "opaque"
+    kind = ("prth" if credential.startswith("prth_") else "jwt" if credential.count(".") == 2
+            else "handle" if _HANDLE.fullmatch(credential) else "opaque")
     return f"bearer-{kind}(len={len(credential)})"
 
 

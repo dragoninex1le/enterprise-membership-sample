@@ -82,6 +82,7 @@ def test_the_preflight_decision_is_traced(entry, caplog):
 @pytest.mark.parametrize("value,shape", [
     (None, "none"), ("Bearer ", "bearer-empty"), ("Bearer prth_abc", "bearer-prth(len=8)"),
     ("Bearer a.b.c", "bearer-jwt(len=5)"), ("Basic x", "other"),
+    ("Bearer Miw64bqIzHpZkm5IPKFrJqtDBhWiHfAAMmp3z_3ifL4", "bearer-handle(len=43)"),
 ])
 def test_authorization_is_logged_by_shape_only(value, shape):
     assert trace.authorization_shape(value) == shape

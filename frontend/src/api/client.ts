@@ -1,4 +1,6 @@
 import axios, { type InternalAxiosRequestConfig } from 'axios'
+import { browserHandle, clearSessionCsrf } from '@estyn/porth-admin/auth'
+import { applyBrowserHandle } from './cookieAuth'
 import { onAuthError } from '../lib/sessionExpiry'
 import { authBaseUrl, porthApiBaseUrl } from '../lib/apiHost'
 
@@ -18,18 +20,9 @@ export const apiClient = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
-// The API Gateway Lambda authorizer's identity source is the Authorization header,
-// so a cookie-only request is 401'd by the gateway BEFORE the authorizer runs. We
-// send an EMPTY bearer: the gateway then invokes the authorizer, which sees a blank
-// token and falls through to the session-cookie path. The browser never holds a
-// real token — this header exists purely to trigger authorizer invocation.
-const EMPTY_BEARER = 'Bearer '
-
-// CSRF: the authorizer requires the session's synchroniser token on cookie-authed
-// mutating requests. Delivered to the SPA by GET /auth/me; fetched lazily and
-// cached, since it is stable for the life of the session.
-const MUTATING = new Set(['post', 'put', 'patch', 'delete'])
-
+// The session's CSRF secret, delivered by GET /auth/me; fetched lazily and cached,
+// since it is stable for the life of the session. It is the key of the browser
+// handle on EVERY call (cookieAuth.ts), and the X-CSRF-Token value on writes.
 let _csrf: string | null = null
 
 async function getCsrf(): Promise<string | null> {
@@ -51,23 +44,21 @@ async function getCsrf(): Promise<string | null> {
 /** Drop the cached secret — call on logout so the next session fetches its own. */
 export function clearCsrfCache(): void {
   _csrf = null
+  clearSessionCsrf()
 }
 
 /**
- * Apply the cookie-mode auth headers. Shared with the sample-app client so the
- * two cannot drift — a client missing the empty bearer 401s at the gateway, and
- * one missing the CSRF header fails every write, both in ways that look like a
- * Porth fault rather than a client one.
+ * Apply the cookie-mode auth headers: the browser handle in Authorization on every
+ * call, and X-CSRF-Token on writes (cookieAuth.ts). Shared with the sample-app
+ * client so the two cannot drift — a client without the handle is refused by
+ * Porth's browser authorizer once API Gateway caches it (missing_handle), and one
+ * without the CSRF header fails every write, both in ways that look like a Porth
+ * fault rather than a client one.
  */
 export async function applyCookieAuth(
   config: InternalAxiosRequestConfig,
 ): Promise<InternalAxiosRequestConfig> {
-  config.headers.Authorization = EMPTY_BEARER
-  if (MUTATING.has((config.method ?? 'get').toLowerCase())) {
-    const csrf = await getCsrf()
-    if (csrf) config.headers['X-CSRF-Token'] = csrf
-  }
-  return config
+  return applyBrowserHandle(config, await getCsrf(), browserHandle)
 }
 
 apiClient.interceptors.request.use(applyCookieAuth)
