@@ -86,7 +86,9 @@ on:
         # 0.4.17 — PORTH-655: path_basis "as_sent" (the policy documents below
         # key Porth's routes /porth/...), and the browser gateway cache
         # (browser_gateway_cache_ttl, below).
-        default: '0.4.17'
+        # 0.4.19 — PORTH-655: the authorizers restore the API mapping key, so
+        # the as_sent index below matches /porth/..., /mcp and /suppliers.
+        default: '0.4.19'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
@@ -165,7 +167,7 @@ env:
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.17' }}
+    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.19' }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
@@ -194,7 +196,7 @@ jobs:
       # also works when triggered by the push shim (inputs are empty on push).
       - name: Resolve effective inputs
         run: |
-          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.17' }}" >> "$GITHUB_ENV"
+          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.19' }}" >> "$GITHUB_ENV"
           echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
           # The configured mode, overridable for one run. Empty IS the mode
@@ -926,10 +928,16 @@ jobs:
           # wrong. It replaces hand-written put-parameter calls that nothing
           # checked. docs/INSTALL.md §3e in Components.
           #
-          # PORTH-655: the index stays on the default "stripped" path basis. An
-          # "as_sent" index (Porth's routes keyed /porth/...) denied every Porth
-          # route on 2026-11-08: the authorizer's rawPath does not carry the
-          # API mapping key, so /porth/users/me arrives as /users/me.
+          # The index is "path_basis": "as_sent" — Porth's routes are keyed
+          # /porth/..., the app's /sample, /mcp, /suppliers. API Gateway removes
+          # the mapping key before the authorizer runs (/porth/users/me arrives
+          # as /users/me); Porth 0.4.19 puts it back from the account's API
+          # mappings. 0.4.17/0.4.18 read as_sent but cannot restore the key, so
+          # every keyed route denied (2026-11-08, #168). Refuse below 0.4.19.
+          if ! scripts/porth-version-at-least.sh 0.4.19 "${{ env.EFF_PORTH_VERSION }}"; then
+            echo "::error::deploy/porth/ is path_basis \"as_sent\", which needs Porth >= 0.4.19 (installing ${{ env.EFF_PORTH_VERSION }})."
+            exit 1
+          fi
           # IAM existence is not checked here (--no-check-iam): this role has no
           # iam:GetRole. A binding naming a role that does not exist fails at the
           # assume, which the authorizer logs by name.
@@ -1071,5 +1079,5 @@ jobs:
           # The release's own porth-install (from its manifest), so check
           # carries every data and configuration check that release ships.
           PORTH_INSTALL_CHECK_VERSION: ${{ needs.install-or-upgrade.outputs.porth_install_version }}
-          EFF_PORTH_VERSION: ${{ inputs.porth_version || '0.4.17' }}
+          EFF_PORTH_VERSION: ${{ inputs.porth_version || '0.4.19' }}
         run: scripts/porth-install-check.sh
