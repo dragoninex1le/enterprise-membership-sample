@@ -1,0 +1,11 @@
+{
+  "_comment": "Which connectors Porth lets this app mint delegated sessions for, per slot (ADR-Z12). porth-install.yml applies each entry with `porth-install delegated-config put --environment {env} --slot {slot} --connector {connector} --enable|--disable --allowed-roles {roles} --apply`, dry run first. allowed_roles is a CEILING of role NAMES (deploy/sample-app/roles.json): a mapped role outside it is refused (role_exceeds_ceiling), not filtered. Enabling is only Porth's half: the slot's portal role must also be a mint caller (infra/terraform/ems-install-once, delegated_mint_caller_slots), and each buyer tenant maps its SupplierLink roles on the Supplier network page. lambdas/sample_app/tests/test_delegated_connectors.py keeps these in step.",
+  "connectors": [
+    {
+      "connector": "supplierlink",
+      "enabled": true,
+      "allowed_roles": ["supplier"],
+      "slots": ["porth-sample", "porth-dau"]
+    }
+  ]
+}

@@ -28,6 +28,7 @@ quotes.
 | `session-policy/index.template.json` | `…/index` | Maps path prefixes and role keys to templates. Rendered with `{{ENV}}` |
 | `auth-policy/allow-all.json` | `/porth/{env}/auth-policy/{name}` | The API-Gateway policy the authorizer returns |
 | `auth-policy/index.json` | `/porth/{env}/auth-policy/index` | Route prefix → policy name |
+| `delegated-connectors.json` | Porth's claim-mapping-configs table, one `delegated-config put` per connector and slot | Which connectors may mint delegated sessions, and the role ceiling. Applied by `porth-install.yml` |
 | `scripts/build_auth_blob.py` | `/porth/auth` | Builds the OAuth-proxy config from the testbed manifest |
 | `scripts/render.py` | — | Substitutes `{{PLACEHOLDER}}` tokens and validates the result |
 
