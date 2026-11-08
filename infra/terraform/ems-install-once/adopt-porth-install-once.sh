@@ -78,14 +78,22 @@ EOF
   && terraform show -json "$WORK/plan.bin" > "$WORK/plan.json") \
   || die "the dry-run plan failed; nothing remote was changed"
 
-jq -r '.resource_changes[] | select(.change.actions != ["no-op"])
-       | "\(.change.actions | join("+"))\t\(.address)"' "$WORK/plan.json" > "$WORK/changes.tsv"
-say "    the plan after adoption:"
-if [ -s "$WORK/changes.tsv" ]; then sed 's/^/      /' "$WORK/changes.tsv" >&2; else say "      no changes"; fi
+# One line per change: actions, address, and for an update the attributes it
+# changes, so a re-tag or a policy edit is visible rather than just "update".
+jq -r '.resource_changes[] | select(.change.actions != ["no-op"] and .change.actions != ["read"])
+       | .change as $c
+       | "\($c.actions | join("+"))\t\(.address)\t\(
+           if $c.actions == ["update"] then
+             [ (($c.after // {}) + ($c.after_unknown // {})) | keys[]
+               | select(($c.before // {})[.] != ($c.after // {})[.]) ] | join(",")
+           else "" end)"' "$WORK/plan.json" > "$WORK/changes.tsv"
+say "    the plan after adoption (action, address, attributes an update changes):"
+if [ -s "$WORK/changes.tsv" ]; then column -t -s $'\t' "$WORK/changes.tsv" | sed 's/^/      /' >&2; else say "      no changes"; fi
 
-BAD="$(awk -F'\t' -v ok="$ALLOWED_CREATES" '
-  $1 ~ /delete/ { print; next }
-  $1 ~ /create/ && $2 !~ ok { print }' "$WORK/changes.tsv")"
+BAD="$(jq -r --arg ok "$ALLOWED_CREATES" '.resource_changes[]
+  | select((.change.actions | index("delete"))
+           or ((.change.actions | index("create")) and (.address | test($ok) | not)))
+  | "\(.change.actions | join("+"))  \(.address)"' "$WORK/plan.json")"
 [ -z "$BAD" ] || die "the plan would destroy or create what it must not:
 $BAD
 Nothing remote was changed."

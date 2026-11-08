@@ -23,7 +23,18 @@ locals {
   ]
 }
 
+# Porth's resources are Porth's, tagged by Porth's module (Project=Porth,
+# Module=porth-install-once). Without its own provider the module would inherit
+# this one's default_tags and every Porth table, key and certificate would be
+# re-tagged as EMS's on the first apply.
+provider "aws" {
+  alias  = "porth_install_once"
+  region = var.aws_region
+}
+
 module "porth_install_once" {
+  providers = { aws = aws.porth_install_once }
+
   source = "git::https://github.com/dragoninex1le/Components.git//infra/terraform/porth-install-once?ref=7e1ec2ed57a659abfb6c46a6b00f5dc88d7d94f8"
 
   # Porth's DEPLOYMENT axis, `dev` on EMS — the stack's Environment parameter. A

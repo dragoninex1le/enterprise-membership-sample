@@ -126,6 +126,10 @@ Then `terraform plan` should show only:
 - one `aws_lambda_permission` per caller;
 - `aws_iam_role_policy.deploy_role_mint_caller_check`.
 
+Porth's module has its own provider, `aws.porth_install_once`, with no default
+tags. Porth's resources keep the tags Porth's module gives them; with this
+module's provider, every Porth table, key and certificate would be re-tagged as EMS's.
+
 **Moving Porth's install-once on** is a change of `ref` in `porth.tf`. Read the
 plan before applying it, as you would any other change.
 
