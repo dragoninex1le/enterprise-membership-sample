@@ -25,13 +25,6 @@ name: E2E Tests
 # Restoring them without fixing the suite first just reinstates the noise.
 on:
   workflow_dispatch:
-    inputs:
-      tier1_only:
-        # Tier 2 signs in to the LIVE site with stored credentials and changes its
-        # data. A branch's UI change is checked by Tier 1 (mocked API) alone.
-        description: 'Run only Tier 1 (mocked API); skip Tier 2 against the live site'
-        type: boolean
-        default: false
 
 # PORTH-540 removed the OIDC grant as vestigial, noting to restore it when the suite
 # needs credentials. That moment is PORTH-531: @estyn/porth-admin resolves from the Porth
@@ -109,7 +102,7 @@ jobs:
         if: |
           (github.event_name == 'workflow_run' &&
           github.event.workflow_run.conclusion == 'success') ||
-          (github.event_name == 'workflow_dispatch' && !inputs.tier1_only)
+          github.event_name == 'workflow_dispatch'
         run: npx playwright test tests/e2e/tier2/
         working-directory: frontend
         env:
