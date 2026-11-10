@@ -109,8 +109,8 @@ only GitHub reference is `AWS_ROLE_ARN`.
 
 | Parameter | | |
 |---|---|---|
-| `/porth/config/testbed` | in | The manifest: `platform` (its IdP config + admin identity) and `tenants` (each with its own `idp` block). Operator-authored — see `infra/qa-tools/testbed-manifest.example.json`. Read by the seed Lambda directly, so it never transits CI. String or SecureString both work |
-| `/porth/testbed/tenants` | out | The **resolved** set the seeder publishes — org/role UUIDs plus each admin's email and secret name. The PORTH-494 config and Tier 2 are generated from this |
+| `/porth/config/testbed` | in | The manifest: `platform` (its IdP config + admin identity) and `tenants` (each with its own `idp` block). Operator-authored — see `infra/qa-tools/testbed-manifest.example.json`. `porth-install` reads its `platform` block. The `tenants` block was the retired testbed seeder's (2026-11-10, code at tag `qa-seeder-retired`); kept as the record of the testbed. Seeding is prawf's now. String or SecureString both work |
+| `/porth/testbed/tenants` | out | The **resolved** set the retired seeder last published — org/role UUIDs plus each admin's email and secret name. Kept, not rewritten |
 | `/porth/auth` | out | The BFF proxy's runtime config, written by `porth-install` from `platform.idp` merged with the stack outputs |
 
 **Secrets Manager** — `porth/testbed/platform/password`, `porth/testbed/tenants/<id>/password`.
