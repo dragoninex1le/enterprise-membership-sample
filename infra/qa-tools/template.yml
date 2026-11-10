@@ -61,7 +61,14 @@ Resources:
                 - dynamodb:BatchWriteItem
                 - dynamodb:DeleteItem
                 - dynamodb:DescribeTable
-              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-*
+              # Every table EMS holds (Richard, 2026-11-10): Porth's, EMS's own per slot, and prawf's
+              # ledger. Named families only - never a wildcard over the account.
+              Resource:
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/porth-*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/ems-sample-app-*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/ems-supplier-links-*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/ems-ffug-*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/prawf-adapter-audit
   # Refills what QaCleanupFunction empties. Writes DynamoDB directly rather than calling the
   # Porth API: the API path needs EventBridge PutEvents (which this role deliberately lacks)
   # and an auth token, so writing records directly means no Porth API credential has to exist.
