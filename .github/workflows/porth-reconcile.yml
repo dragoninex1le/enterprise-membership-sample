@@ -11,7 +11,7 @@ name: Porth — reconcile permissions
 # catalogue re-created PORTH-597's retired platform.orgs.* / platform.settings.*
 # on every install, at the pre-0.4.1 keys the migration had just removed.
 #
-# Called by porth-install.yml and reset-env.yml. Under the install role (the
+# Called by porth-install.yml. Under the install role (the
 # porth-install environment), which reads CodeArtifact; the bootstrap role does not.
 
 on:

@@ -994,7 +994,7 @@ jobs:
             echo "- **SPA origins:** ${PORTH_SPA_ORIGINS_RAW:-'(unset — origin gate OFF)'}"
             echo ""
             echo "### Next steps"
-            echo "- Seed test tenants via the (separate) porth-seed-testbed workflow"
+            echo "- Deploy the app (deploy-sample-app) for each environment, bootstrap each with the prawf adapter, then seed with prawf-runner (Components)"
             echo "- Then run the PORTH-494 security suite against this install"
           } >> "$GITHUB_STEP_SUMMARY"
 
