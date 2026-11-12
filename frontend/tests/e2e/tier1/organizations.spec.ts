@@ -48,6 +48,8 @@ test.describe('Organizations page', () => {
     await page.getByLabel('Server URL', { exact: true }).fill('https://keycloak.example.com')
     await page.getByLabel('Realm', { exact: true }).fill('acme')
     await page.getByLabel('Client ID', { exact: true }).fill('acme-client')
+    // PORTH-669: a Keycloak tenant names its Keycloak organization by alias.
+    await page.getByLabel('Organization alias', { exact: true }).fill('ems-keycloak')
     await page.getByRole('button', { name: 'Next' }).click()
 
     await expect(page.getByLabel('Roles Claim', { exact: true })).toHaveValue('realm_access.roles')

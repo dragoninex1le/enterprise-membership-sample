@@ -82,18 +82,26 @@ export function idpFromForm(f: IdpForm, base?: TenantIdpConfig): TenantIdpConfig
       const issuer = `${serverOf(f.idp_domain)}/realms/${f.idp_realm.trim()}`
       return {
         ...kept, ...shared,
-        protocol: 'oidc',
+        // PORTH-669: the provider type. Porth signs this tenant in through
+        // Keycloak itself, asks for the organization as scope
+        // organization:<alias> and reads it back from the `organization` claim.
+        protocol: 'keycloak',
         issuer,
         jwks_uri: `${issuer}/protocol/openid-connect/certs`,
         authorization_endpoint: `${issuer}/protocol/openid-connect/auth`,
         token_endpoint: `${issuer}/protocol/openid-connect/token`,
+        end_session_endpoint: `${issuer}/protocol/openid-connect/logout`,
+        revocation_endpoint: `${issuer}/protocol/openid-connect/revoke`,
+        provider_org_id: f.idp_org_id.trim() || undefined,
       }
     }
   }
 }
 
-/** Which provider a stored config belongs to. Keycloak's issuer always ends in its realm. */
+/** Which provider a stored config belongs to: its provider type, or — for a
+ * Keycloak tenant saved as generic "oidc" before PORTH-669 — an issuer ending in a realm. */
 function providerOf(cfg?: TenantIdpConfig): IdpProvider {
+  if (cfg?.protocol === 'keycloak') return 'keycloak'
   return cfg?.protocol !== 'auth0' && /\/realms\/[^/]+\/?$/.test(cfg?.issuer ?? '') ? 'keycloak' : 'auth0'
 }
 
@@ -165,6 +173,15 @@ export function IdpFields<T extends IdpForm>(
           placeholder="https://your-api.example.com"
           className={input} />
       </div>
+      {keycloak && (
+        <div>
+          <label htmlFor={`${prefix}-idp-org`} className="block text-sm font-medium text-gray-700 mb-1">Organization alias</label>
+          <input id={`${prefix}-idp-org`} type="text" value={form.idp_org_id}
+            onChange={e => setForm(f => ({ ...f, idp_org_id: e.target.value }))}
+            className={input} />
+          <p className="mt-1 text-xs text-gray-400">The Keycloak organization this tenant's users belong to. Logins are scoped to it, and a token for any other organization is refused.</p>
+        </div>
+      )}
       {!keycloak && (
         <div>
           <label htmlFor={`${prefix}-idp-org`} className="block text-sm font-medium text-gray-700 mb-1">Auth0 Organization ID</label>
