@@ -37,10 +37,13 @@ export interface TenantIdpConfig {
   jwks_uri: string
   client_id: string
   audience?: string
-  /** Defaults to "oidc" server-side. An Auth0 tenant must say "auth0". */
-  protocol?: 'auth0' | 'oidc'
+  /** The provider type (PORTH-669). Defaults to "oidc" server-side. An Auth0
+   * tenant must say "auth0"; a Keycloak tenant "keycloak". */
+  protocol?: 'auth0' | 'keycloak' | 'oidc'
   authorization_endpoint?: string
   token_endpoint?: string
+  end_session_endpoint?: string
+  revocation_endpoint?: string
   provider_org_id?: string
 }
 
