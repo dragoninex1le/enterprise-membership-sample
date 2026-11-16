@@ -2,16 +2,17 @@ name: Deploy Porth QA Tools
 
 # Deploys infra/qa-tools into THIS account (195950944420) under EMS's own OIDC role.
 #
-# The stack is a prerequisite for two other workflows:
-#   * reset-env.yml     — resolves QaCleanupFunctionArn to wipe the Porth tables
-#   * porth-seed-testbed.yml — resolves QaSeedFunctionArn to refill them
+# The stack is a prerequisite for reset-env.yml, which resolves QaCleanupFunctionArn to empty
+# every table EMS holds.
 #
-# Both fail with an actionable message if it is absent.
+# It held a testbed seeder too (QaSeedFunction, porth-seed-testbed.yml), retired 2026-11-10:
+# seeding is prawf's now (Components). Its code is at the tag qa-seeder-retired; the data it read
+# and wrote - /porth/config/testbed, /porth/testbed/*, and the testbed passwords in Secrets
+# Manager - was never the stack's, and stays where it is.
 #
 # These Lambdas previously lived in the private Components repo, which would have required a
-# cross-account deploy role for Components CI to reach this account. They are EMS's tooling —
-# the seeder's reserved-name guard protects an e2e spec in this repo — so they live here and
-# no cross-account credential exists.
+# cross-account deploy role for Components CI to reach this account. They are EMS's tooling, so
+# they live here and no cross-account credential exists.
 
 on:
   push:

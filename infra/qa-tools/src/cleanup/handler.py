@@ -6,14 +6,22 @@ POST /qa/cleanup with a JSON body:
         "prefix": "TENANT#test-tenant-001"  // optional PK prefix filter
     }
 
-If prefix is omitted, ALL items in the table are deleted.
-Returns: { "deleted": N, "table": "..." }
+If prefix is omitted, ALL items in the table are deleted. With "dry_run": true nothing is deleted
+and "deleted" is the number of items that would be.
+Returns: { "deleted": N, "table": "...", "dry_run": bool }
+
+Which tables (Richard, 2026-11-10: reset clears every table EMS holds, so the install can start
+from nothing and be bootstrapped clean):
+- Porth's: 'porth-*' carrying the deployed env suffix (porth-tenants-dev, porth-audit-log-dev, ...)
+- EMS's own, one set per slot: ems-sample-app-{slot}, ems-supplier-links-{slot}, ems-ffug-{slot}
+- prawf's ledger and baselines: prawf-adapter-audit
+Nothing else - the role grants exactly these families, and the name is checked here as well.
 
 Safety:
 - Only deployed to dev/staging (SAM template restricts Environment param)
-- Rejects table names that don't start with 'porth-'
+- Rejects any table outside the families above
 - Rejects table names containing '-prod'
-- Environment-bound: table name must contain the deployed env suffix
+- Environment-bound: a Porth table name must contain the deployed env suffix
 - AWS_IAM auth on the API Gateway route
 - Logs every invocation with table name and item count
 """
@@ -21,6 +29,7 @@ Safety:
 import json
 import logging
 import os
+import re
 
 import boto3
 from boto3.dynamodb.conditions import Attr
@@ -28,6 +37,11 @@ from botocore.exceptions import ClientError
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+#: EMS's own tables, one per slot (template.yml: ems-sample-app-${EnvironmentSlot}, ...).
+EMS_TABLE = re.compile(r"^ems-(sample-app|supplier-links|ffug)-[a-z0-9][a-z0-9-]*$")
+#: prawf's ledger and baselines (infra/provisioning-adapter/template.yml).
+PRAWF_TABLES = ("prawf-adapter-audit",)
 
 
 def handler(event, context):
@@ -39,14 +53,16 @@ def handler(event, context):
 
     table_name = body.get("table_name")
     prefix = body.get("prefix")  # optional PK prefix filter
+    dry_run = body.get("dry_run") is True
 
     # --- Validation -----------------------------------------------------------
     if not table_name:
         return _response(400, {"error": "table_name is required"})
 
-    if not table_name.startswith("porth-"):
+    porth_table = table_name.startswith("porth-")
+    if not (porth_table or EMS_TABLE.fullmatch(table_name) or table_name in PRAWF_TABLES):
         return _response(400, {
-            "error": f"Refused: table name '{table_name}' does not start with 'porth-'"
+            "error": f"Refused: table name '{table_name}' is not Porth's, EMS's or prawf's"
         })
 
     # Extra safety: reject anything that looks like prod
@@ -63,7 +79,7 @@ def handler(event, context):
         })
 
     expected_suffix = f"-{porth_env}"
-    if expected_suffix not in table_name:
+    if porth_table and expected_suffix not in table_name:
         return _response(403, {
             "error": (
                 f"Refused: table name '{table_name}' does not match "
@@ -116,7 +132,9 @@ def handler(event, context):
             resp = table.scan(**scan_kwargs)
             items = resp.get("Items", [])
 
-            if items:
+            if items and dry_run:
+                deleted += len(items)
+            elif items:
                 with table.batch_writer() as batch:
                     for item in items:
                         key = {k: item[k] for k in key_attrs}
@@ -141,12 +159,13 @@ def handler(event, context):
             "table": table_name,
         })
 
-    logger.info("QA cleanup complete: table=%s deleted=%d", table_name, deleted)
+    logger.info("QA cleanup complete: table=%s deleted=%d dry_run=%s", table_name, deleted, dry_run)
 
     return _response(200, {
         "deleted": deleted,
         "table": table_name,
         "prefix": prefix,
+        "dry_run": dry_run,
     })
 
 
