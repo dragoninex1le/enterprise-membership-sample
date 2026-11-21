@@ -256,7 +256,7 @@ jobs:
               ;;
           esac
 
-      # SlotMap is the template's default: porth-dau and porth-sample, both disposable.
+      # The slot map is written in the template's SlotMapParameter resource: porth-dau and porth-sample, both disposable.
       #
       # CallerRoleArn comes from vars.PRAWF_CALLER_ROLE_ARN (PRF-10). Unset, no cross-account
       # permission exists and the adapter is in-account only. Set, it must be EXACTLY a prawf-runner
