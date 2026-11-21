@@ -1,0 +1,76 @@
+name: Porth — delegated connectors
+
+# PRF-22: enable the delegated-mint connectors EMS uses (ADR-Z12) in every
+# declared environment, from deploy/porth/delegated/connectors.json. Without it
+# every supplier session is refused as connector_not_enabled.
+#
+# Called by porth-install.yml after the bootstrap; dispatch it alone to apply a
+# connectors.json change without reinstalling Porth. Converges: a configured
+# environment gets the same row again.
+
+on:
+  workflow_call:
+    inputs:
+      env_scopes:
+        description: 'JSON array of declared environments, e.g. ["porth-sample","porth-dau"]'
+        required: true
+        type: string
+      environment_name:
+        description: 'Table-name suffix (the Porth stack Environment)'
+        required: false
+        type: string
+        default: 'dev'
+      porth_install_version:
+        description: "porth-install to run. Empty = the installed Porth release's, from its manifest."
+        required: false
+        type: string
+        default: ''
+  workflow_dispatch:
+    inputs:
+      env_scopes:
+        description: 'JSON array of declared environments'
+        required: true
+        type: string
+        default: '["porth-sample","porth-dau"]'
+      environment_name:
+        description: 'Table-name suffix (the Porth stack Environment)'
+        required: false
+        type: string
+        default: 'dev'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  delegated:
+    name: Enable delegated connectors
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: porth-install
+    env:
+      AWS_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Resolve porth-install (given, or the installed release's)
+        env:
+          GIVEN: ${{ inputs.porth_install_version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$GIVEN" ]; then
+            echo "PORTH_INSTALL_VERSION=$GIVEN" >> "$GITHUB_ENV"
+          else
+            scripts/resolve-porth-release.sh "$(scripts/installed-porth-version.sh)"
+          fi
+      - name: delegated-config put, per environment and connector
+        env:
+          ENV_NAME: ${{ inputs.environment_name || 'dev' }}
+          ENV_SCOPES: ${{ inputs.env_scopes }}
+        run: scripts/porth-delegated-config.sh

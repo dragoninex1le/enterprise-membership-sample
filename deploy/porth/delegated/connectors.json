@@ -1,0 +1,8 @@
+{
+  "connectors": {
+    "supplierlink": {
+      "allowed_roles": ["supplier"],
+      "why": "The supplier portal (supplier_portal/) trades a SupplierLink assertion for a Porth delegated token; /suppliers/* authorizes every call with it. The ceiling is the supplier role: a buyer's mapping can never grant a supplier more."
+    }
+  }
+}

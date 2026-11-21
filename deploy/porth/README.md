@@ -30,6 +30,7 @@ quotes.
 | `auth-policy/index.json` | `/porth/{env}/auth-policy/index` | Route prefix → policy name |
 | `scripts/build_auth_blob.py` | `/porth/auth` | Builds the OAuth-proxy config from the testbed manifest |
 | `scripts/render.py` | — | Substitutes `{{PLACEHOLDER}}` tokens and validates the result |
+| `delegated/connectors.json` | Porth's claim-mapping table (`delegated-config put`, per environment) | The delegated-mint connectors EMS uses and each one's role ceiling (PRF-22). `porth-delegated-config.yml` |
 
 ## Two substitution syntaxes, and they are not interchangeable
 
