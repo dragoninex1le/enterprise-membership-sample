@@ -22,13 +22,6 @@ Description: >
 # and no other. Snapshots too big for an audit item go to prawf's own bucket, under the slot's prefix.
 
 Parameters:
-  SlotMap:
-    Type: String
-    Default: '{"slots":{"porth-dau":{"environment_id":"ems-porth-dau","environment_class":"disposable"},"porth-sample":{"environment_id":"ems-porth-sample","environment_class":"disposable"}}}'
-    Description: >
-      The target's own list of its slots. Both EMS slots, both disposable: prawf may reset either to
-      its sealed baseline (Richard, 2026-11-21). With two slots every call must name one - contract
-      1.1 - and a 1.0.0 call, which cannot, is refused.
   PorthStackName:
     Type: String
     Default: serverlessrepo-porth-components
@@ -320,7 +313,12 @@ Resources:
     Properties:
       Name: /prawf/adapter/slot-map
       Type: String
-      Value: !Ref SlotMap
+      # The target's own list of its slots, written here rather than taken from a parameter: sam deploy
+      # keeps an existing stack's previous parameter values, so a changed parameter default never
+      # reached the stack (2026-11-21). Both EMS slots, both disposable - prawf may reset either to its
+      # sealed baseline (Richard, 2026-11-21). With two slots every call names one (contract 1.1); a
+      # 1.0.0 call, which cannot, is refused.
+      Value: '{"slots":{"porth-dau":{"environment_id":"ems-porth-dau","environment_class":"disposable"},"porth-sample":{"environment_id":"ems-porth-sample","environment_class":"disposable"}}}'
       Description: The target's own list of its slots. Read by the adapter on every call.
 
   AdapterLogGroup:

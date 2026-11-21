@@ -188,9 +188,11 @@ def test_the_deploy_releases_the_caller_grant_before_granting_it():
 
 def test_the_default_slot_map_serves_both_ems_slots_as_disposable(tpl):
     """Both EMS slots, both resettable by prawf (Richard, 2026-11-21). Contract 1.1 names the slot on
-    every call, so two slots are safe; a 1.0.0 call, which cannot name one, is refused (slots.resolve)."""
+    every call, so two slots are safe; a 1.0.0 call, which cannot name one, is refused (slots.resolve).
+    Written in the resource, never a parameter: sam deploy keeps a stack's previous parameter values."""
+    assert "SlotMap" not in tpl["Parameters"], "a parameter would keep its old value across deploys"
     import json
-    default = json.loads(tpl["Parameters"]["SlotMap"]["Default"])
+    default = json.loads(tpl["Resources"]["SlotMapParameter"]["Properties"]["Value"])
     assert default["slots"] == {
         "porth-dau": {"environment_id": "ems-porth-dau", "environment_class": "disposable"},
         "porth-sample": {"environment_id": "ems-porth-sample", "environment_class": "disposable"},
