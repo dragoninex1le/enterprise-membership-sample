@@ -256,7 +256,7 @@ jobs:
               ;;
           esac
 
-      # SlotMap is left at the template's single-slot default until PRF-19 publishes contract 1.1.0.
+      # SlotMap is the template's default: porth-dau and porth-sample, both disposable.
       #
       # CallerRoleArn comes from vars.PRAWF_CALLER_ROLE_ARN (PRF-10). Unset, no cross-account
       # permission exists and the adapter is in-account only. Set, it must be EXACTLY a prawf-runner
@@ -337,11 +337,13 @@ jobs:
             aws lambda invoke --function-name "$STACK_NAME" --region "$AWS_REGION" \
               --cli-binary-format raw-in-base64-out --payload "$1" "$2" > /dev/null
           }
-          invoke '{"contract_version":"1.0.0","verb":"capabilities"}' caps.json
-          SLOT=$(python -c 'import json; print(json.load(open("caps.json"))["results"][0]["environment"]["slot"])')
-          invoke "{\"contract_version\":\"1.1\",\"verb\":\"capabilities\",\"slot\":\"$SLOT\"}" caps11.json
-          invoke '{"contract_version":"1.0.0","verb":"seed","run":{"run_id":"deploy-proof"},"entity":"porth-app-permission"}' unsupported.json
-          invoke '{"contract_version":"1.0.0","verb":"seed","run":{"run_id":"deploy-proof"},"entity":"porth-tables"}' unknown.json
+          # The adapter serves two slots, so every call names one (contract 1.1); the proof uses porth-dau.
+          SLOT=porth-dau
+          invoke "{\"contract_version\":\"1.1\",\"verb\":\"capabilities\",\"slot\":\"$SLOT\"}" caps.json
+          invoke "{\"contract_version\":\"1.1\",\"verb\":\"capabilities\",\"slot\":\"porth-sample\"}" caps-sample.json
+          invoke '{"contract_version":"1.0.0","verb":"capabilities"}' caps10.json
+          invoke "{\"contract_version\":\"1.1\",\"verb\":\"seed\",\"slot\":\"$SLOT\",\"run\":{\"run_id\":\"deploy-proof\"},\"entity\":\"porth-app-permission\"}" unsupported.json
+          invoke "{\"contract_version\":\"1.1\",\"verb\":\"seed\",\"slot\":\"$SLOT\",\"run\":{\"run_id\":\"deploy-proof\"},\"entity\":\"porth-tables\"}" unknown.json
           python - <<'PY' > dryrun-request.json
           import hashlib, json
           body = {"id": "prawf.deploy-probe", "version": "1.0.0", "form": "enumerated", "resources": [
@@ -349,13 +351,13 @@ jobs:
                   {"tenant_tier": "sandbox", "org": "ems", "admin_role_source_key": "tenant-admin"}}}]}
           digest = "sha256:" + hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"),
                                                          ensure_ascii=False).encode()).hexdigest()
-          print(json.dumps({"contract_version": "1.0.0", "verb": "seed", "entity": "porth-tenant",
+          print(json.dumps({"contract_version": "1.1", "verb": "seed", "entity": "porth-tenant", "slot": "porth-dau",
                             "run": {"run_id": "deploy-proof", "dry_run": True},
                             "payload": {"dataset": {**body, "digest": digest}}}))
           PY
           invoke "$(cat dryrun-request.json)" dryrun.json
           invoke "{\"contract_version\":\"1.1\",\"verb\":\"bootstrap\",\"entity\":\"porth\",\"slot\":\"$SLOT\",\"run\":{\"run_id\":\"deploy-proof\",\"dry_run\":true},\"payload\":{\"installed_version\":\"deploy-proof\"}}" bootstrap.json
-          invoke '{"contract_version":"1.0.0","verb":"reset","entity":"porth-session","run":{"run_id":"deploy-proof","dry_run":true},"payload":{"confirm_environment_class":"disposable"}}' reset.json
+          invoke "{\"contract_version\":\"1.1\",\"verb\":\"reset\",\"entity\":\"porth-session\",\"slot\":\"$SLOT\",\"run\":{\"run_id\":\"deploy-proof\",\"dry_run\":true},\"payload\":{\"confirm_environment_class\":\"disposable\"}}" reset.json
 
           python - <<'PY'
           import json, os
@@ -371,21 +373,25 @@ jobs:
           assert caps["outcome"] == "ok", caps
           result = validate_capabilities(caps["results"][0])
           assert result.valid, [str(e) for e in result.errors]
+          assert caps["contract_version"] == "1.1", caps
           body = caps["results"][0]
-          assert body["verbs"] == ["capabilities", "seed", "reset", "teardown"], body["verbs"]
+          assert body["verbs"] == ["capabilities", "bootstrap", "seed", "reset", "teardown", "prune"], body["verbs"]
           declared = {e["id"]: e["verbs"] for e in body["entities"]}
           assert declared["porth-tenant"] == ["seed", "teardown"], declared
-          assert declared["porth"] == [], declared
-          assert body["environment"].get("slot"), "environment.slot must be populated"
-
-          # Contract 1.1, against prawf-schemas 1.1 like the rest.
-          caps11 = load("caps11.json")
-          assert (caps11["outcome"], caps11["contract_version"]) == ("ok", "1.1"), caps11
-          result = validate_capabilities(caps11["results"][0])
-          assert result.valid, [str(e) for e in result.errors]
-          assert caps11["environment"]["slot"] == body["environment"]["slot"], caps11["environment"]
-          kinds = {e["id"]: e.get("baseline_kind") for e in caps11["results"][0]["entities"] if e.get("baseline_kind")}
+          assert body["environment"]["slot"] == "porth-dau", body["environment"]
+          kinds = {e["id"]: e.get("baseline_kind") for e in body["entities"] if e.get("baseline_kind")}
           assert kinds == {"porth": "snapshot"}, kinds
+
+          # Both slots are served, each answering with its own identity, and both are disposable.
+          sample = load("caps-sample.json")
+          assert sample["outcome"] == "ok", sample
+          sbody = sample["results"][0]
+          assert (sbody["environment"]["id"], sbody["environment"]["slot"]) == ("ems-porth-sample", "porth-sample"), sbody["environment"]
+          assert (body["environment_class"], sbody["environment_class"]) == ("disposable", "disposable")
+
+          # A 1.0.0 call cannot name a slot, so with two slots it is refused - never answered from a default.
+          caps10 = load("caps10.json")
+          assert (caps10["outcome"], caps10["reason_code"]) == ("refused", "scope_violation"), caps10
 
           unsupported = load("unsupported.json")
           assert (unsupported["outcome"], unsupported["reason_code"]) == ("unsupported", "not_implemented"), unsupported
@@ -410,8 +416,9 @@ jobs:
               "",
               f"- **environment**: `{env['id']}`, slot `{env['slot']}`, Porth `{env.get('candidate_version', 'unknown')}`",
               f"- **environment_class**: `{body['environment_class']}`",
-              f"- **adapter**: `{body['adapter_version']}`, contract {', '.join(body['contract_versions'])} and 1.1",
-              f"- **verbs**: {', '.join(body['verbs'])} (1.1 adds bootstrap and prune on porth)",
+              f"- **adapter**: `{body['adapter_version']}`, contract {', '.join(body['contract_versions'])}",
+              f"- **slots**: porth-dau and porth-sample (`{sbody['environment']['id']}`), both `disposable`; a 1.0.0 call is refused (`scope_violation`)",
+              f"- **verbs**: {', '.join(body['verbs'])}",
               f"- **entities**: {', '.join(e['id'] for e in body['entities'])}",
               "- `seed porth-app-permission` -> `unsupported / not_implemented`",
               "- `seed porth-tables` -> `refused / unknown_entity`",
