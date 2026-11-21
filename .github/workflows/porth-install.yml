@@ -58,40 +58,21 @@ on:
   workflow_dispatch:
     inputs:
       porth_version:
-        # Kept current deliberately. A stale default is not a harmless
-        # convenience: the dispatch form prefills it, so leaving 0.2.0 here
-        # meant an upgrade silently asked for a release older than the one
-        # installed, and the change set was refused with an error that reads as
-        # a stack problem rather than a wrong input. Bump this with each Porth
-        # release the consumer is expected to move to.
-        description: 'Porth release version to install/upgrade to (must be published: s3://porth-releases-084847995635/porth/<version>/manifest.json)'
-        required: true
-        # 0.3.1 is what run 32524612746 installed on 2026-08-21. It said 0.3.0,
-        # which is the stale-default trap the comment above describes, one
-        # release later: accepting the prefilled box asks for an OLDER version
-        # than the one deployed and the change set is refused with an error that
-        # reads as a stack problem.
+        # No default, deliberately (Richard, 2026-11-21): the version is a parameter
+        # chosen at each dispatch, never a committed value to keep bumping. An empty
+        # box also cannot do what a stale prefilled default did twice (0.2.0, 0.3.0):
+        # silently ask for a release older than the one installed, refused with an
+        # error that reads as a stack problem.
         #
-        # PORTH-657: 0.4.2 is the first version published to the S3 release bucket
-        # (backfilled from SAR so the switch-over can be tested at the same code).
-        # PORTH-656: 0.4.3 serves tenant API hosts ({tenant}.api.{slot}.{zone}) —
-        # host-bound credentials, the `porth` mapping key and per-host CORS.
-        # PORTH-656: 0.4.7 adds the browser surface (BrowserHttpApiId and the
-        # browser authorizer), which deploy-sample-app.yml moves tenant-API-host
-        # slots onto; 0.4.5 clears the drifted authorizer; 0.4.6 reloads the
-        # tenant directory on a login-org miss.
-        # 0.4.8 names the two Porth APIs (porth-dev-api / porth-dev-browser-api).
-        # 0.4.9 — PORTH-655 bugs (audit slot, org routes platform-only,
-        # legacy-read refusal, connector claim-mapping lineage).
-        # 0.4.17 — PORTH-655: path_basis "as_sent" (the policy documents below
-        # key Porth's routes /porth/...), and the browser gateway cache
-        # (browser_gateway_cache_ttl, below).
-        # 0.4.19 — PORTH-655: the authorizers restore the API mapping key, so
-        # the as_sent index below matches /porth/..., /mcp and /suppliers.
-        # 0.4.23 — PORTH-669: a tenant whose IdP config names a different IdP
-        #   (e.g. protocol "keycloak") signs in through that IdP. The new-tenant
-        #   wizard saves Keycloak tenants with protocol "keycloak" and an org alias.
-        default: '0.4.23'
+        # What releases brought, for choosing one (the steps below need 0.4.19+):
+        # 0.4.2 first in the S3 release bucket (PORTH-657); 0.4.3 tenant API hosts
+        # (PORTH-656); 0.4.7 the browser surface; 0.4.8 named APIs; 0.4.9 PORTH-655
+        # fixes; 0.4.17 path_basis "as_sent" and the browser gateway cache; 0.4.19
+        # the authorizers restore the API mapping key; 0.4.23 IdP-protocol sign-in
+        # (PORTH-669); 0.4.24 boto3 clients only (PORTH-658), porth-install 0.4.14.
+        description: 'Porth release version to install/upgrade to, e.g. 0.4.24 (must be published: s3://porth-releases-084847995635/porth/<version>/manifest.json)'
+        required: true
+        type: string
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
@@ -170,7 +151,7 @@ env:
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.23' }}
+    name: Install or upgrade Porth ${{ inputs.porth_version }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
@@ -199,7 +180,7 @@ jobs:
       # also works when triggered by the push shim (inputs are empty on push).
       - name: Resolve effective inputs
         run: |
-          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.23' }}" >> "$GITHUB_ENV"
+          echo "EFF_PORTH_VERSION=${{ inputs.porth_version }}" >> "$GITHUB_ENV"
           echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
           # The configured mode, overridable for one run. Empty IS the mode
@@ -1096,5 +1077,5 @@ jobs:
           # The release's own porth-install (from its manifest), so check
           # carries every data and configuration check that release ships.
           PORTH_INSTALL_CHECK_VERSION: ${{ needs.install-or-upgrade.outputs.porth_install_version }}
-          EFF_PORTH_VERSION: ${{ inputs.porth_version || '0.4.23' }}
+          EFF_PORTH_VERSION: ${{ inputs.porth_version }}
         run: scripts/porth-install-check.sh
