@@ -186,10 +186,15 @@ def test_the_deploy_releases_the_caller_grant_before_granting_it():
     assert "CallerBinding" not in wf
 
 
-def test_the_default_slot_map_is_single_slot_until_prf_19(tpl):
+def test_the_default_slot_map_serves_both_ems_slots_as_disposable(tpl):
+    """Both EMS slots, both resettable by prawf (Richard, 2026-11-21). Contract 1.1 names the slot on
+    every call, so two slots are safe; a 1.0.0 call, which cannot name one, is refused (slots.resolve)."""
     import json
     default = json.loads(tpl["Parameters"]["SlotMap"]["Default"])
-    assert len(default["slots"]) == 1, "a 1.0.0 caller cannot name a slot, and a multi-slot map refuses it"
+    assert default["slots"] == {
+        "porth-dau": {"environment_id": "ems-porth-dau", "environment_class": "disposable"},
+        "porth-sample": {"environment_id": "ems-porth-sample", "environment_class": "disposable"},
+    }
 
 
 def test_every_sid_is_alphanumeric(tpl):

@@ -24,10 +24,11 @@ Description: >
 Parameters:
   SlotMap:
     Type: String
-    Default: '{"slots":{"porth-dau":{"environment_id":"ems-porth-dau","environment_class":"disposable"}}}'
+    Default: '{"slots":{"porth-dau":{"environment_id":"ems-porth-dau","environment_class":"disposable"},"porth-sample":{"environment_id":"ems-porth-sample","environment_class":"disposable"}}}'
     Description: >
-      The target's own list of its slots. Single-slot until PRF-19 publishes contract 1.1.0, because
-      a 1.0.0 caller cannot name a slot and a multi-slot adapter refuses a call that does not.
+      The target's own list of its slots. Both EMS slots, both disposable: prawf may reset either to
+      its sealed baseline (Richard, 2026-11-21). With two slots every call must name one - contract
+      1.1 - and a 1.0.0 call, which cannot, is refused.
   PorthStackName:
     Type: String
     Default: serverlessrepo-porth-components
