@@ -1055,9 +1055,23 @@ jobs:
       porth_install_version: ${{ needs.install-or-upgrade.outputs.porth_install_version }}
       prune_retired: ${{ inputs.prune_retired }}
 
+  # PRF-22: the delegated-mint connectors EMS uses (deploy/porth/delegated/
+  # connectors.json), enabled in every declared environment. Install
+  # configuration like the permissions: without it every supplier session is
+  # refused as connector_not_enabled. See porth-delegated-config.yml.
+  delegated:
+    name: Enable delegated connectors
+    needs: [install-or-upgrade, bootstrap]
+    if: ${{ !cancelled() && needs.install-or-upgrade.result == 'success' }}
+    uses: ./.github/workflows/porth-delegated-config.yml
+    with:
+      env_scopes: ${{ needs.install-or-upgrade.outputs.env_scopes }}
+      environment_name: ${{ inputs.environment_name || 'dev' }}
+      porth_install_version: ${{ needs.install-or-upgrade.outputs.porth_install_version }}
+
   check:
     name: Check the install against the declared environments
-    needs: [install-or-upgrade, bootstrap, reconcile]
+    needs: [install-or-upgrade, bootstrap, reconcile, delegated]
     if: ${{ !cancelled() && needs.install-or-upgrade.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
