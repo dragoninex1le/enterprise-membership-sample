@@ -91,7 +91,9 @@ on:
         # 0.4.23 — PORTH-669: a tenant whose IdP config names a different IdP
         #   (e.g. protocol "keycloak") signs in through that IdP. The new-tenant
         #   wizard saves Keycloak tenants with protocol "keycloak" and an org alias.
-        default: '0.4.23'
+        # 0.4.24 — PORTH-658: boto3 clients only, one configured DynamoDB client
+        #   per function (the delegated mint's latency). porth-install 0.4.14.
+        default: '0.4.24'
       stack_name:
         description: 'CloudFormation stack name in EMS'
         required: false
@@ -170,7 +172,7 @@ env:
 
 jobs:
   install-or-upgrade:
-    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.23' }}
+    name: Install or upgrade Porth ${{ inputs.porth_version || '0.4.24' }}
     runs-on: ubuntu-latest
     environment: porth-install
     timeout-minutes: 30
@@ -199,7 +201,7 @@ jobs:
       # also works when triggered by the push shim (inputs are empty on push).
       - name: Resolve effective inputs
         run: |
-          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.23' }}" >> "$GITHUB_ENV"
+          echo "EFF_PORTH_VERSION=${{ inputs.porth_version || '0.4.24' }}" >> "$GITHUB_ENV"
           echo "EFF_STACK_NAME=${{ inputs.stack_name || 'serverlessrepo-porth-components' }}" >> "$GITHUB_ENV"
           echo "EFF_ENV_NAME=${{ inputs.environment_name || 'dev' }}" >> "$GITHUB_ENV"
           # The configured mode, overridable for one run. Empty IS the mode
@@ -1096,5 +1098,5 @@ jobs:
           # The release's own porth-install (from its manifest), so check
           # carries every data and configuration check that release ships.
           PORTH_INSTALL_CHECK_VERSION: ${{ needs.install-or-upgrade.outputs.porth_install_version }}
-          EFF_PORTH_VERSION: ${{ inputs.porth_version || '0.4.23' }}
+          EFF_PORTH_VERSION: ${{ inputs.porth_version || '0.4.24' }}
         run: scripts/porth-install-check.sh
