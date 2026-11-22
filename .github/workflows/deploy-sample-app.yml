@@ -886,6 +886,8 @@ jobs:
           # PORTH-656. Always passed, so a slot taken off the list goes back to
           # 'false' rather than keeping the last deploy's value.
           OPTIONAL+=("TenantApiHosts=${TENANT_API_HOSTS}")
+          # PORTH-658, from deploy/porth/environments.json (mint_warm). Always passed.
+          OPTIONAL+=("PorthMintWarm=${PORTH_MINT_WARM:-0}")
           if [ -n "${PORTH_HTTP_API_ID:-}" ]; then
             OPTIONAL+=("PorthHttpApiId=${PORTH_HTTP_API_ID}")
           fi

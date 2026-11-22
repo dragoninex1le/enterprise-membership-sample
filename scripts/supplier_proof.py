@@ -8,7 +8,9 @@ sessions against the deployed app. No browser, no person, nothing mocked.
   S2  a contact of supplier A gets a session, sees the buyer and their supplier, submits
       an invoice, and finds it among their own
   S3  a contact of supplier B, same buyer, cannot see supplier A's invoice
-  S4  a SupplierLink role the buyer has not mapped gets no session
+  S4  a contact the buyer's mapping does not cover gets no session: an unmapped
+      SupplierLink role (METHOD=role) or SupplierLink permissions that mean a set no
+      role holds exactly (METHOD=permissions)
   S5  an assertion is single-use
   S6  a session is bound to the buyer's API host, and a buyer's assertion cannot be
       traded on another tenant's host
@@ -21,7 +23,15 @@ Prerequisites, checked first, each failure naming its fix: the buyer account lin
 operator enabling the supplierlink connector, and Porth's Terraform listing the portal's
 role as a mint caller. Exits 1 at the first failure; never prints a token.
 
-Environment: ENVIRONMENT_SLOT, API_APEX, TENANT, BUYER, NETWORK_ROLE (mapped), UNMAPPED_ROLE.
+METHOD says which of Porth's two claim-mapping routes the buyer's mapping uses, and so
+what the assertions carry (PORTH-658; both stay tested, Porth supports both):
+  role         a SupplierLink role, looked up in the buyer's role table
+  permissions  SupplierLink permissions, expanded to EMS permissions; the role holding
+               exactly that set (Porth >= 0.4.26)
+
+Environment: ENVIRONMENT_SLOT, API_APEX, TENANT, BUYER, METHOD (role), NETWORK_ROLE
+(mapped), UNMAPPED_ROLE, NETWORK_PERMISSIONS (mapped to exactly the supplier role's set,
+comma-separated), PARTIAL_PERMISSIONS (mapped to a set no role holds).
 """
 
 from __future__ import annotations
@@ -41,14 +51,23 @@ from supplier_portal.assertion import issue  # noqa: E402
 
 SLOT, APEX = os.environ["ENVIRONMENT_SLOT"], os.environ["API_APEX"]
 TENANT, BUYER = os.environ["TENANT"], os.environ["BUYER"]
+METHOD = os.environ.get("METHOD") or "role"
 NETWORK_ROLE = os.environ.get("NETWORK_ROLE", "billing")
 UNMAPPED_ROLE = os.environ.get("UNMAPPED_ROLE", "proof-unmapped-role")
+NETWORK_PERMISSIONS = [p for p in os.environ.get("NETWORK_PERMISSIONS", "invoices:submit,invoices:view").split(",") if p]
+PARTIAL_PERMISSIONS = [p for p in os.environ.get("PARTIAL_PERMISSIONS", "invoices:view").split(",") if p]
+if METHOD not in ("role", "permissions"):
+    raise SystemExit(f"METHOD must be role or permissions, not {METHOD!r}")
 HOST, ELSEWHERE = f"{TENANT}.api.{APEX}", f"api.{APEX}"
 BEGAN_MS = int(time.time() * 1000)
 
 FIX = {
     "buyer_not_linked": f"Link SupplierLink buyer account {BUYER} to {TENANT} (Tenant Admin > Supplier network).",
-    "unmapped_role_claim": f"Map SupplierLink role '{NETWORK_ROLE}' to the supplier role in {TENANT}, and seed that role.",
+    "unmapped_role_claim": (f"Map SupplierLink role '{NETWORK_ROLE}' to the supplier role in {TENANT}, and seed that role."
+                            if METHOD == "role" else
+                            f"{TENANT}'s supplierlink mapping is by role; this run is METHOD=permissions."),
+    "no_role_for_permissions": (f"Map SupplierLink permissions {NETWORK_PERMISSIONS} in {TENANT} to exactly the supplier "
+                                "role's permissions (Supplier network > By SupplierLink permissions)."),
     "connector_not_enabled": ("Porth operator: porth-install delegated-config put --environment dev "
                               f"--slot {SLOT} --connector supplierlink --enable --allowed-roles supplier --apply"),
     "role_exceeds_ceiling": "The mapped EMS role is outside the connector's --allowed-roles (Porth operator).",
@@ -70,10 +89,16 @@ def network_key():
 KEY = None
 
 
-def assertion(supplier: str, contact: str, role: str = NETWORK_ROLE, buyer: str = BUYER) -> str:
+def assertion(supplier: str, contact: str, *, covered: bool = True, buyer: str = BUYER) -> str:
+    """A contact the buyer's mapping covers, or (covered=False) one it does not —
+    by role or by permissions, as METHOD says."""
     now = int(time.time())
+    if METHOD == "role":
+        says = {"role": NETWORK_ROLE if covered else UNMAPPED_ROLE}
+    else:
+        says = {"permissions": NETWORK_PERMISSIONS if covered else PARTIAL_PERMISSIONS}
     return issue({"iss": "supplierlink", "aud": "ems-accounts", "sub": contact, "jti": uuid.uuid4().hex,
-                  "iat": now, "exp": now + 180, "buyer": buyer, "supplier": supplier, "role": role},
+                  "iat": now, "exp": now + 180, "buyer": buyer, "supplier": supplier, **says},
                  private_key=KEY)
 
 
@@ -113,7 +138,7 @@ def fix_for(answer) -> str:
 def main() -> None:
     global KEY
     KEY = network_key()
-    print(f"supplier proof: buyer {BUYER} -> tenant {TENANT} on {HOST} (slot {SLOT})\n")
+    print(f"supplier proof: buyer {BUYER} -> tenant {TENANT} on {HOST} (slot {SLOT}), mapped by {METHOD}\n")
 
     status, granted = session(assertion("proof-sup-a", "contact-a"))
     ok("prerequisites: a mapped supplier contact gets a session", status == 200,
@@ -149,8 +174,9 @@ def main() -> None:
     ok("S3 nor see it listed", status == 200 and reference not in {i.get("supplier_reference") for i in theirs})
 
     # S4
-    ok("S4 an unmapped SupplierLink role", session(assertion("proof-sup-a", "contact-c", role=UNMAPPED_ROLE))
-       == (403, {"error": "unmapped_role_claim"}))
+    refusal = "unmapped_role_claim" if METHOD == "role" else "no_role_for_permissions"
+    answer = session(assertion("proof-sup-a", "contact-c", covered=False))
+    ok(f"S4 a contact the mapping does not cover ({METHOD})", answer == (403, {"error": refusal}), f"{answer}")
 
     # S5
     once = assertion("proof-sup-a", "contact-a")

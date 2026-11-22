@@ -30,7 +30,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from supplier_portal import assertion, porth_session, trace
+from supplier_portal import CONNECTOR, assertion, porth_session, trace
 from supplier_portal.links import ClaimedByAnotherTenant, Links
 from supplier_portal.hosts import OwnUiCors, tenant_on
 
@@ -73,6 +73,41 @@ def mint_transport():
     return None
 
 
+def warm_transport():
+    """The warm call to Porth. A dependency so tests can stand in for Porth."""
+    return None
+
+
+def start_warm(host: str, store: Links, transport) -> Any:
+    """Start Porth's warm call for the HOST's tenant, or None.
+
+    Nothing from the assertion chooses anything here: the tenant is the host's, and the
+    context is any buyer link that tenant holds (the handler later refuses a link to any
+    other tenant, so the warm call and the mint always name the same tenant). A host
+    with no linked buyer, or anything at all going wrong, means no warm call — the mint
+    then runs cold, as it would have."""
+    if not porth_session.warming_on():
+        return None
+    tenant = tenant_on(host)
+    try:
+        if not tenant:
+            return None
+        linked = store.of_tenant(tenant)
+        if not linked:
+            trace.event("warm.skipped", reason="no_linked_buyer", tenant=tenant)
+            return None
+        from porth_common.context.persisted import PersistedContext
+
+        record = PersistedContext.restore(linked[0].porth_context)
+        if record.tenant_id != tenant:
+            trace.event("warm.skipped", reason="link_context_mismatch", tenant=tenant)
+            return None
+        return porth_session.start_warm(record, CONNECTOR, call=transport)
+    except Exception as exc:  # noqa: BLE001 — a warm call must never fail a login
+        trace.event("warm.skipped", reason=type(exc).__name__, tenant=tenant)
+        return None
+
+
 def tenant_admin(request: Request) -> Any:
     who = getattr(request.state, "director", None)
     if who is None or not who.tenant_id:
@@ -104,9 +139,11 @@ def build() -> FastAPI:
 
     @api.post("/suppliers/session")
     def session(body: SessionRequest, request: Request, store: Links = Depends(links),
-                transport=Depends(mint_transport)) -> Any:
+                transport=Depends(mint_transport), warm=Depends(warm_transport)) -> Any:
         host = request.headers.get("host", "")
         trace.event("session.in", host=host, host_tenant=tenant_on(host), assertion_len=len(body.assertion))
+        # First, before the network key and the assertion: that work is what it overlaps.
+        warming = start_warm(host, store, warm)
         try:
             key = supplierlink_key()
         except Exception as exc:  # noqa: BLE001 — a missing or unreadable key is configuration, said as such
@@ -116,7 +153,8 @@ def build() -> FastAPI:
         try:
             contact = assertion.check(body.assertion, public_key=key)
             trace.event("session.assertion_ok", buyer=contact.buyer, supplier=contact.supplier,
-                        contact=contact.contact, role=contact.role, jti=contact.assertion_id,
+                        contact=contact.contact, role=contact.role or None,
+                        permissions=list(contact.permissions) or None, jti=contact.assertion_id,
                         valid_until=contact.valid_until)
         except assertion.Unverified as why:
             log.info("supplier_session.rejected why=%s", why.why)
@@ -145,7 +183,7 @@ def build() -> FastAPI:
             return JSONResponse({"error": "porth_unavailable"}, status_code=503)
 
         trace.event("session.context_ok", tenant=record.tenant_id)
-        outcome = porth_session.request_session(record, contact, call=transport)
+        outcome = porth_session.request_session(record, contact, call=transport, warming=warming)
         trace.event("session.outcome", granted=outcome.granted, status=outcome.status, code=outcome.code or None)
         if not outcome.granted:
             return JSONResponse({"error": outcome.code}, status_code=outcome.status)
