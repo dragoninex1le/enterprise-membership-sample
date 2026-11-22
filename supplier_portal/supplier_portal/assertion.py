@@ -14,7 +14,14 @@ An assertion is a compact JWS:
              "iat", "exp": exp - iat <= 300,
              "buyer":    the SupplierLink buyer account the invoice is for,
              "supplier": the supplier's id at SupplierLink,
-             "role":     the contact's role, as SupplierLink names it}
+             "role":        the contact's role, as SupplierLink names it,
+             "permissions": the contact's permissions, as SupplierLink names them}
+
+``role`` and ``permissions`` are each optional; an assertion carries at least one. They
+are the two ways Porth can map a delegated caller to a role (Porth docs/delegated-mint.md):
+the buyer's mapping for this network reads one of them — a SupplierLink role looked up in
+a table, or SupplierLink permissions expanded and matched to the role holding exactly them.
+EMS forwards whichever the assertion carries and never chooses between them.
 """
 
 from __future__ import annotations
@@ -37,6 +44,9 @@ AUDIENCE = "ems-accounts"
 LONGEST = 300
 CLOCK_SLACK = 10
 _TOKEN_SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$")
+#: Porth's own bounds on ``permission_claims`` (docs/delegated-mint.md, Request).
+MOST_PERMISSIONS = 256
+LONGEST_PERMISSION = 128
 
 
 class Unverified(Exception):
@@ -56,6 +66,8 @@ class SupplierContact:
     assertion_id: str
     checked_at: int
     valid_until: int
+    #: SupplierLink's words, exactly as signed, in the order signed.
+    permissions: tuple[str, ...] = ()
 
     @property
     def connector(self) -> str:
@@ -119,19 +131,36 @@ def check(assertion: str, *, public_key: ec.EllipticCurvePublicKey, now: float |
         raise Unverified("audience")
 
     fields = {}
-    for name in ("sub", "jti", "buyer", "supplier", "role"):
-        value = body.get(name)
-        if not isinstance(value, str) or not _TOKEN_SAFE.match(value.strip() or "-"):
-            raise Unverified(f"claim_{name}")
-        fields[name] = value.strip()
+    for name in ("sub", "jti", "buyer", "supplier"):
+        fields[name] = _token(body.get(name), name)
     if "@" in fields["sub"]:
         # Porth keeps the external id pseudonymous; an email is not.
         raise Unverified("claim_sub_not_opaque")
+    role = _token(body["role"], "role") if "role" in body else ""
+    permissions = _permissions(body["permissions"]) if "permissions" in body else ()
+    if not role and not permissions:
+        raise Unverified("claim_role_or_permissions")
 
     return SupplierContact(
-        contact=fields["sub"], supplier=fields["supplier"], buyer=fields["buyer"], role=fields["role"],
-        assertion_id=fields["jti"], checked_at=int(clock), valid_until=exp,
+        contact=fields["sub"], supplier=fields["supplier"], buyer=fields["buyer"], role=role,
+        assertion_id=fields["jti"], checked_at=int(clock), valid_until=exp, permissions=permissions,
     )
+
+
+def _token(value, name: str) -> str:
+    if not isinstance(value, str) or not _TOKEN_SAFE.match(value.strip() or "-"):
+        raise Unverified(f"claim_{name}")
+    return value.strip()
+
+
+def _permissions(value) -> tuple[str, ...]:
+    """The list as signed. Within Porth's bounds; not reshaped — the buyer's mapping
+    decides what each word means, and a word it does not list means nothing."""
+    if not isinstance(value, list) or not value or len(value) > MOST_PERMISSIONS:
+        raise Unverified("claim_permissions")
+    if not all(isinstance(p, str) and 1 <= len(p) <= LONGEST_PERMISSION for p in value):
+        raise Unverified("claim_permissions")
+    return tuple(value)
 
 
 def issue(claims: dict, *, private_key: ec.EllipticCurvePrivateKey, kid: str | None = None) -> str:

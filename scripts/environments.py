@@ -101,6 +101,9 @@ def resolve(envs: dict, ref: str, override: str = "", expected: str = "") -> dic
     return {
         "ENVIRONMENT_SLOT": slot,
         "TENANT_API_HOSTS": "true" if envs[slot].get("tenant_api_hosts") else "false",
+        # PORTH-658: the supplier portal warms Porth's mint before a login. Only for a
+        # slot whose Porth is 0.4.26 or later — an older one refuses `warm`.
+        "PORTH_MINT_WARM": "1" if envs[slot].get("mint_warm") else "0",
     }
 
 

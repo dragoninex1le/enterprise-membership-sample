@@ -2,8 +2,10 @@
 # delegated mint rides the internal plane as porth-common 0.0.18+ defines it, and a
 # PersistedContext written by one porth-common must be read by the same shape. The
 # sample app (lambdas/) is held below 0.0.18, so the two are deployed separately.
-# Capped below the next minor so a breaking release is a deliberate bump.
-porth-common>=0.0.22,<0.0.24
+# Capped below the next release so a breaking one is a deliberate bump. 0.0.28
+# (Porth 0.4.26): every ServiceClient in a process shares one Lambda client, so the
+# mint goes out on the connection the warm call opened.
+porth-common>=0.0.28,<0.0.29
 fastapi==0.111.0
 mangum==0.17.0
 boto3>=1.35.0

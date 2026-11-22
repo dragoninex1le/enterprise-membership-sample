@@ -10,7 +10,10 @@ name: suppliers — prove the supplier portal, live
 #   - Porth's install Terraform lists ems-supplier-portal-{slot} as a mint caller
 #   - Porth operator: delegated-config put --connector supplierlink --enable --allowed-roles supplier
 #   - the buyer tenant has the supplier role, has linked its SupplierLink buyer
-#     account, and maps NETWORK_ROLE to that role (Tenant Admin > Supplier network)
+#     account, and maps it (Tenant Admin > Supplier network) by the method chosen:
+#     role — NETWORK_ROLE to that role; permissions (Porth >= 0.4.26) — the
+#     SupplierLink permissions invoices:submit and invoices:view to exactly that
+#     role's permissions (supplier.invoices.submit, supplier.invoices.read)
 
 on:
   workflow_dispatch:
@@ -28,8 +31,13 @@ on:
         description: "Its SupplierLink buyer account id"
         required: true
         default: 'buyer-ems-test'
+      method:
+        description: "Which of Porth's claim-mapping routes the buyer's mapping uses"
+        type: choice
+        default: role
+        options: [role, permissions]
       network_role:
-        description: 'A SupplierLink role the buyer has mapped to the supplier role'
+        description: 'A SupplierLink role the buyer has mapped to the supplier role (method role)'
         required: true
         default: 'billing'
 
@@ -97,4 +105,5 @@ jobs:
           TENANT: ${{ inputs.tenant }}
           BUYER: ${{ inputs.buyer }}
           NETWORK_ROLE: ${{ inputs.network_role }}
+          METHOD: ${{ inputs.method }}
         run: python scripts/supplier_proof.py
