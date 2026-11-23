@@ -118,6 +118,10 @@ export const router = createBrowserRouter([
           { path: 'suppliers', element: <SupplierNetworkPage /> },
         ],
       },
+      // /admin on its own, and any address this app does not have, lands where / does
+      // instead of on React Router's "Unexpected Application Error! 404".
+      { path: 'admin', element: <RootRedirect /> },
+      { path: '*', element: <RootRedirect /> },
     ],
   },
   { path: '/unauthorized', element: <UnauthorizedPage /> },
