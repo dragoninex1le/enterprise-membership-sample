@@ -1,4 +1,4 @@
-"""The simulator signs logins the supplier portal accepts, and sends them to the right host.
+"""The simulator API signs logins the supplier portal accepts, and sends them to the right host.
 
 The portal's own checker (supplier_portal.assertion.check) is the judge of the format, so
 a change on either side that breaks the other fails here, not on a live slot.
@@ -84,18 +84,9 @@ def test_a_base64_body_is_read(monkeypatch):
     assert json.loads(app.handler(event, None)["body"])["status"] == 200
 
 
-def test_the_page_has_every_control_a_test_drives():
-    response = app.handler(request("GET", "/"), None)
-    assert response["statusCode"] == 200
-    for control in ("signin.form.tenant", "signin.form.buyer", "signin.form.supplier", "signin.form.contact",
-                    "signin.form.by-role", "signin.form.by-permissions", "signin.form.role",
-                    "signin.form.permissions", "signin.form.sign-in", "signin.result.status",
-                    "signin.result.ems-ms", "signin.result.token", "signin.result.answer"):
-        assert f'data-prawfid="{control}"' in response["body"]
-
-
 def test_anything_else_is_not_found():
-    assert app.handler(request("GET", "/other"), None)["statusCode"] == 404
+    assert app.handler(request("GET", "/"), None)["statusCode"] == 404
+    assert app.handler(request("POST", "/other", {}), None)["statusCode"] == 404
 
 
 def request(method, path, body=None):

@@ -1,8 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  SupplierLink sign-in simulator - a page that signs a supplier login as SupplierLink and
-  trades it at the EMS supplier portal for a Porth token. Its own stack; EMS is unchanged.
+  SupplierLink simulator API - signs a supplier login as SupplierLink and trades it at the
+  EMS supplier portal for a Porth token. Called by the /supplierlink page in the EMS
+  frontend. Its own stack; EMS's stack is unchanged.
 
 Parameters:
   EnvironmentSlot:
@@ -41,8 +42,16 @@ Resources:
                   StringEquals:
                     kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
 
+  # Called from the SupplierLink sign-in page in the EMS frontend (/supplierlink), so it
+  # answers CORS. No credentials are sent, so any origin may call it.
   SimulatorApi:
     Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins: ['*']
+        AllowMethods: [POST]
+        AllowHeaders: [content-type]
+        MaxAge: 600
 
   SimulatorFunction:
     Type: AWS::Serverless::Function
@@ -59,14 +68,11 @@ Resources:
           ENVIRONMENT_SLOT: !Ref EnvironmentSlot
           API_APEX: !Ref ApiApex
       Events:
-        Page:
-          Type: HttpApi
-          Properties: { ApiId: !Ref SimulatorApi, Path: /, Method: GET }
         Login:
           Type: HttpApi
           Properties: { ApiId: !Ref SimulatorApi, Path: /login, Method: POST }
 
 Outputs:
   SimulatorUrl:
-    Description: Open this in a browser.
+    Description: The API base the /supplierlink page calls (POST login).
     Value: !Sub https://${SimulatorApi}.execute-api.${AWS::Region}.amazonaws.com/
