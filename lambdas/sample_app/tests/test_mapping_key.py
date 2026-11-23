@@ -12,19 +12,11 @@ import pathlib
 
 import pytest
 
-from sample_app.mapping_key import restore_mapping_key
+from sample_app.mapping_key import with_key
 from sample_app.tests.test_bearer_surface import _template
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 ROLES = json.loads((ROOT / "deploy" / "sample-app" / "roles.json").read_text())["roles"]
-
-
-def event(path: str, key: str | None, **extra) -> dict:
-    e = {"rawPath": path, "requestContext": {"http": {"path": path, "method": "GET"}}}
-    if key is not None:
-        e["stageVariables"] = {"mapping_key": key}
-    e.update(extra)
-    return e
 
 
 @pytest.mark.parametrize("path,key,expected", [
@@ -36,15 +28,8 @@ def event(path: str, key: str | None, **extra) -> dict:
     ("/suppliers/me", "suppliers", "/suppliers/me"),
     ("/sample/ar/invoices", None, "/sample/ar/invoices"),  # browser API: no key
 ])
-def test_restore(path, key, expected):
-    out = restore_mapping_key(event(path, key))
-    assert out["rawPath"] == expected and out["requestContext"]["http"]["path"] == expected
-
-
-def test_the_callers_event_is_not_mutated():
-    original = event("/session", "suppliers")
-    restore_mapping_key(original)
-    assert original["rawPath"] == "/session"
+def test_with_key(path, key, expected):
+    assert with_key(path, key) == expected
 
 
 def test_mcp_with_the_key_stripped_reaches_the_service_through_the_real_handler():

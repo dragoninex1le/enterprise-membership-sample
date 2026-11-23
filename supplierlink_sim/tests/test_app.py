@@ -27,12 +27,12 @@ client = TestClient(app.app)
 
 @pytest.fixture(autouse=True)
 def signing_key(monkeypatch):
-    monkeypatch.setattr(app, "_private_key", KEY)
+    monkeypatch.setattr(app.app.state, "key", KEY, raising=False)
     monkeypatch.setattr(app, "API_APEX", "porth-dau.ems.estynsoftware.cloud")
 
 
 def test_a_role_login_is_accepted_by_the_portal():
-    contact = assertion.check(app.sign(app.claims(app.SignIn(**FORM))), public_key=KEY.public_key())
+    contact = assertion.check(app.sign(app.claims(app.SignIn(**FORM)), KEY), public_key=KEY.public_key())
     assert (contact.buyer, contact.supplier, contact.contact, contact.role) == \
         ("buyer-ems-test", "proof-sup-a", "contact-a", "billing")
     assert contact.permissions == ()
@@ -40,7 +40,7 @@ def test_a_role_login_is_accepted_by_the_portal():
 
 def test_a_permissions_login_is_accepted_by_the_portal():
     form = app.SignIn(**{**FORM, "method": "permissions"})
-    contact = assertion.check(app.sign(app.claims(form)), public_key=KEY.public_key())
+    contact = assertion.check(app.sign(app.claims(form), KEY), public_key=KEY.public_key())
     assert contact.permissions == ("invoices:submit", "invoices:view")
     assert contact.role == ""
 

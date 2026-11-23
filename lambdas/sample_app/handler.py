@@ -1,14 +1,15 @@
 import logging
 import os
 import re
-import time
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
 from porth_common.internal_plane import log_plane_identity
 from .cors import HostBoundOriginMiddleware
 from .director import DirectorMiddleware, SampleAppDirector
-from .mapping_key import restore_mapping_key
+from .mapping_key import RestoreMappingKey
 from . import trace
 from .routers import dashboard, ar, ap, approvals, diagnostics, suppliers
 from .accounts_mcp import http as accounts_mcp
@@ -51,7 +52,16 @@ logging.getLogger("porth_common").setLevel(
 )
 
 
-app = FastAPI(title="Porth Sample App")
+@asynccontextmanager
+async def lifespan(app):
+    # PORTH-623 — say who this deployable is and where it will read. INFO on purpose:
+    # this is the post-deploy check. Mangum runs the lifespan around every invocation;
+    # log_plane_identity writes once per container and is a no-op after that.
+    log_plane_identity(SampleAppDirector.SERVICE_ID)
+    yield
+
+
+app = FastAPI(title="Porth Sample App", lifespan=lifespan)
 
 # Allow the CloudFront-hosted frontend to call this API.
 # CLOUDFRONT_ALIAS may be a wildcard subdomain pattern (e.g. "*.example.com").
@@ -133,9 +143,11 @@ app.add_middleware(                          # added last  → outermost
     max_age=600,
 )
 
-# PORTH-656 — outermost of all: on an API host, only that host's own UI origin
+# PORTH-656 — outside CORSMiddleware: on an API host, only that host's own UI origin
 # reaches CORSMiddleware. See cors.py.
 app.add_middleware(HostBoundOriginMiddleware)
+app.add_middleware(trace.RequestTrace)        # request.in / request.out for every request
+app.add_middleware(RestoreMappingKey)         # added last: outermost, everything sees the keyed path
 app.include_router(dashboard.router)
 app.include_router(ar.router)
 app.include_router(ap.router)
@@ -151,54 +163,4 @@ app.include_router(accounts_mcp.router)
 # (template.yml SampleAppSuppliersApi). See routers/suppliers.py.
 app.include_router(suppliers.router)
 
-# PORTH-623 — say who this deployable is and where it will read, once, on the
-# first invocation. INFO on purpose: this is the post-deploy check, and putting
-# it behind DEBUG would mean only someone who already suspects a problem can
-# see the answer.
-#
-# It resolves nothing and reads nothing, so it costs one line and cannot fail
-# in a way that matters. A wrong PORTH_BRANCH shows up here as a wrong path
-# rather than three layers down as a refusal.
-#
-# Wrapped rather than called at import: the log level is configured in this
-# module, and a line emitted during import races that. `log_plane_identity` is
-# once-per-process itself, so the wrapper stays a no-op after the first call.
-_asgi = Mangum(app, lifespan="off")
-
-
-#: Authorizer-context values safe to log. Everything else there (credentials
-#: among it) is logged by key name only.
-_CONTEXT_SHOWN = ("tenant_id", "environment", "auth_source", "connector_type", "is_platform_admin")
-
-
-def handler(event, context=None):
-    log_plane_identity(SampleAppDirector.SERVICE_ID)
-    rc = event.get("requestContext") or {}
-    http = rc.get("http") or {}
-    headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
-    authorizer = (rc.get("authorizer") or {}).get("lambda") or {}
-    trace.set_request(rc.get("requestId"))
-
-    # The bearer and suppliers APIs deliver key-stripped paths; see mapping_key.py.
-    restored = restore_mapping_key(event)
-    trace.event(
-        "request.in", logging.INFO,
-        method=http.get("method"), route=event.get("routeKey"),
-        raw_path=event.get("rawPath"), path=restored.get("rawPath"),
-        mapping_key=(event.get("stageVariables") or {}).get("mapping_key"),
-        host=headers.get("host"), origin=headers.get("origin"),
-        authorization=trace.authorization_shape(headers.get("authorization")),
-        cookies=trace.cookie_names(event.get("cookies")),
-        csrf_header="x-csrf-token" in headers,
-        authorizer_keys=sorted(authorizer),
-        **{k: authorizer.get(k) for k in _CONTEXT_SHOWN if k in authorizer},
-    )
-    started = time.monotonic()
-    try:
-        response = _asgi(restored, context)
-    except Exception:
-        trace.event("request.crashed", logging.ERROR, ms=round((time.monotonic() - started) * 1000, 1))
-        raise
-    trace.event("request.out", logging.INFO, status=(response or {}).get("statusCode"),
-                ms=round((time.monotonic() - started) * 1000, 1))
-    return response
+handler = Mangum(app, lifespan="on")

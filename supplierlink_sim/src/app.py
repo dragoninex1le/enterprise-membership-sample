@@ -24,9 +24,10 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from mangum import Mangum
 from pydantic import BaseModel
 
@@ -36,8 +37,6 @@ KEY_PARAMETER = f"/ems/{SLOT}/suppliers/supplierlink/simulator-private-key"
 ISSUER = "supplierlink"
 AUDIENCE = "ems-accounts"
 LOGIN_LIFETIME_SECONDS = 180
-
-_private_key = None
 
 
 class SignIn(BaseModel):
@@ -59,14 +58,23 @@ class SignInResult(BaseModel):
     answer: Any  # EMS's answer: token, session_id, expires_at, api_base_url, or an error code
 
 
-app = FastAPI(title="SupplierLink simulator")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Mangum runs this around every invocation, so the key is read once per container.
+    if not hasattr(app.state, "key"):
+        app.state.key = read_key()
+    yield
+
+
+app = FastAPI(title="SupplierLink simulator", lifespan=lifespan)
+handler = Mangum(app, lifespan="on")
 
 
 @app.post("/login")
-def login(form: SignIn) -> SignInResult:
+def login(form: SignIn, request: Request) -> SignInResult:
     """Sign a SupplierLink login, trade it at EMS, and report EMS's answer."""
     tenant = required(form.tenant, "tenant")
-    assertion = sign(claims(form))
+    assertion = sign(claims(form), request.app.state.key)
     url = f"https://{tenant}.api.{API_APEX}/suppliers/session"
 
     started = time.perf_counter()
@@ -76,9 +84,6 @@ def login(form: SignIn) -> SignInResult:
     print(json.dumps({"event": "supplierlink_sim.login", "tenant": tenant, "status": status,
                       "ems_ms": ems_ms, "error": answer.get("error") if isinstance(answer, dict) else None}))
     return SignInResult(session_url=url, status=status, ems_ms=ems_ms, answer=answer)
-
-
-handler = Mangum(app, lifespan="off")
 
 
 def claims(form: SignIn) -> dict:
@@ -104,7 +109,7 @@ def claims(form: SignIn) -> dict:
     return said
 
 
-def sign(payload: dict) -> str:
+def sign(payload: dict, key) -> str:
     """An ES256 JWT, the format the supplier portal checks."""
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import ec
@@ -113,20 +118,17 @@ def sign(payload: dict) -> str:
     header = {"alg": "ES256", "typ": "JWT"}
     signing_input = (f"{b64(json.dumps(header, separators=(',', ':')).encode())}."
                      f"{b64(json.dumps(payload, separators=(',', ':'), sort_keys=True).encode())}")
-    r, s = decode_dss_signature(private_key().sign(signing_input.encode(), ec.ECDSA(hashes.SHA256())))
+    r, s = decode_dss_signature(key.sign(signing_input.encode(), ec.ECDSA(hashes.SHA256())))
     return f"{signing_input}.{b64(r.to_bytes(32, 'big') + s.to_bytes(32, 'big'))}"
 
 
-def private_key():
-    """The slot's SupplierLink signing key, read from Parameter Store once per container."""
-    global _private_key
-    if _private_key is None:
-        import boto3
-        from cryptography.hazmat.primitives import serialization
+def read_key():
+    """The slot's SupplierLink signing key, from Parameter Store."""
+    import boto3
+    from cryptography.hazmat.primitives import serialization
 
-        pem = boto3.client("ssm").get_parameter(Name=KEY_PARAMETER, WithDecryption=True)["Parameter"]["Value"]
-        _private_key = serialization.load_pem_private_key(pem.encode(), password=None)
-    return _private_key
+    pem = boto3.client("ssm").get_parameter(Name=KEY_PARAMETER, WithDecryption=True)["Parameter"]["Value"]
+    return serialization.load_pem_private_key(pem.encode(), password=None)
 
 
 def post(url: str, body: dict) -> tuple[int, object]:

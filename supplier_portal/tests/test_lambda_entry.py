@@ -1,5 +1,5 @@
 """The suppliers API hands the portal /session for /suppliers/session (found live on
-porth-dau); the entry point restores the key before FastAPI routes."""
+porth-dau); RestoreMappingKey restores the key before FastAPI routes."""
 
 import asyncio
 import json
@@ -13,7 +13,7 @@ def test_a_key_stripped_session_request_reaches_the_session_route(network_key, m
 
     # The links table is not consulted for an assertion that fails verification,
     # but FastAPI resolves the dependency first.
-    lambda_entry._adapter.app.dependency_overrides[web.links] = lambda: None
+    lambda_entry.handler.app.dependency_overrides[web.links] = lambda: None
 
     event = {
         "version": "2.0", "routeKey": "POST /session", "rawPath": "/session", "rawQueryString": "",

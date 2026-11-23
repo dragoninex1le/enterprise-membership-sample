@@ -38,9 +38,9 @@ def entry(monkeypatch):
     monkeypatch.setattr(web, "_KEY", None)
     from supplier_portal import lambda_entry
 
-    lambda_entry._adapter.app.dependency_overrides[web.links] = lambda: None
+    lambda_entry.handler.app.dependency_overrides[web.links] = lambda: None
     yield lambda_entry
-    lambda_entry._adapter.app.dependency_overrides.clear()
+    lambda_entry.handler.app.dependency_overrides.clear()
 
 
 def test_a_request_is_followable_and_leaks_nothing(entry, caplog):

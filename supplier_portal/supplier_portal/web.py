@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 
 from supplier_portal import CONNECTOR, assertion, porth_session, trace
 from supplier_portal.links import ClaimedByAnotherTenant, Links
+from supplier_portal.mapping_key import RestoreMappingKey
 from supplier_portal.hosts import OwnUiCors, tenant_on
 
 log = logging.getLogger("supplier_portal")
@@ -136,6 +137,8 @@ def build() -> FastAPI:
     api = FastAPI(title="EMS supplier portal")
     api.add_middleware(DirectorMiddleware)
     api.add_middleware(OwnUiCors)
+    api.add_middleware(trace.RequestTrace)
+    api.add_middleware(RestoreMappingKey)  # added last: outermost, so everything sees the keyed path
 
     @api.post("/suppliers/session")
     def session(body: SessionRequest, request: Request, store: Links = Depends(links),
