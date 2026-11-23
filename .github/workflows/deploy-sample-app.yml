@@ -680,10 +680,15 @@ jobs:
         # to `npm ci` once the lockfile is regenerated against CodeArtifact.
         run: npm install
 
+      # The /supplierlink test page calls the SupplierLink simulator API (its own stack).
+      - name: Find the SupplierLink simulator API
+        run: bash supplierlink_sim/scripts/sim-url.sh
+
       - name: Build frontend
         working-directory: frontend
         run: npm run build
         env:
+          VITE_SUPPLIERLINK_SIM_URL: ${{ env.SUPPLIERLINK_SIM_URL }}
           # PORTH-531: the SPA calls the Porth API same-origin under the /porth
           # prefix (a CloudFront behaviour strips it — see template.yml). The
           # absolute PorthApiUrl must NOT be baked into the bundle: a

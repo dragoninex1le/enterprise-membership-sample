@@ -10,6 +10,8 @@ interface ImportMetaEnv {
   readonly VITE_E2E_AUTH?: string
   /** PORTH-656: 'true' on a tenant-API-host slot — see src/lib/apiHost.ts. */
   readonly VITE_TENANT_API_HOSTS?: string
+  /** The SupplierLink simulator API the /supplierlink page calls (supplierlink_sim stack output). */
+  readonly VITE_SUPPLIERLINK_SIM_URL?: string
 }
 
 interface ImportMeta {

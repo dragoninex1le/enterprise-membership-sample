@@ -6,6 +6,7 @@ import { authBaseUrl as resolveAuthBaseUrl } from './lib/apiHost'
 import App from './App'
 import SignInRefused from './components/SignInRefused'
 import { captureSignInRefusal } from './lib/signInRefusal'
+import SupplierLinkPage from './pages/SupplierLinkPage'
 import './index.css'
 
 // E2E test bypass: VITE_E2E_AUTH=true injects a fake authenticated session so
@@ -76,8 +77,12 @@ function TenantBootstrap() {
   )
 }
 
+// /supplierlink is a test page that plays the supplier network, not part of the EMS app:
+// it needs no EMS login and no tenant configuration, so it renders before either.
+const isSupplierLinkPage = window.location.pathname.replace(/\/$/, '') === '/supplierlink'
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <TenantBootstrap />
+    {isSupplierLinkPage ? <SupplierLinkPage /> : <TenantBootstrap />}
   </React.StrictMode>,
 )
