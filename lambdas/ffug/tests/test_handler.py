@@ -47,7 +47,7 @@ def verified_context(tenant_id="acme", environment="prod", source="porth"):
         "_boundary": "service",
         "tenant_id": tenant_id,
         "environment": environment,
-        "source_service": source,
+        "called_service": source,
         "trace_id": "trace-1",
         "organization_id": "",
         "user_id": "",
@@ -210,7 +210,7 @@ def test_a_verified_envelope_from_an_unaccepted_service_is_its_own_fault(porth, 
     configuration, and they want different people looking at them."""
     porth.raises(exc)
 
-    assert err(h.handler({"operation": "hash", "payload": 1})) == "source_service_refused"
+    assert err(h.handler({"operation": "hash", "payload": 1})) == "service_refused"
 
 
 def test_a_narrowing_failure_is_not_answered_it_is_raised(porth, monkeypatch):

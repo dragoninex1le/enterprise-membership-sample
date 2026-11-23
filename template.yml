@@ -2083,32 +2083,20 @@ Resources:
                   - dynamodb:Query
                   - dynamodb:Scan
                 Resource: !GetAtt FfugTable.Arn
-              # PORTH-587 — the signer. Without this NOTHING in this account can
-              # mint a context token, so the internal plane has no caller and
-              # ADR-Z11's UAT-2/3/4 cannot run at all. Porth's own dev-class
-              # grant (PorthContextDeveloperSignPolicy) is emitted only when the
-              # install passes DeveloperSignRoleArns, and porth-install.yml never
-              # does — a green install with no signer and no error anywhere.
-              #
-              # Granting it here works because the context key's policy allows
-              # the account root and denies only cross-account use, so
-              # authorisation is delegated to IAM identity policies. That is
-              # itself a finding, recorded in Components PR #294: the dev-class
-              # condition governs what PORTH's template emits, not who in the
-              # account can sign. If that hole is later closed with an explicit
-              # key-policy Deny, THIS ROLE must be on the allow-list or the ffug
-              # UAT stops working.
-              #
-              # ffug's request-path role holds NO KMS at all — it verifies
-              # locally against the trust document (PORTH-623). The split is
-              # the point: a compromised receiver cannot mint context for
-              # another tenant (H1), and now it has nothing to mint with.
+              # The signer (PORTH-587). porth-common 0.0.18+: a caller signs with
+              # the CALLED service's request key, found through that service's
+              # document. The proof calls ffug, so it signs with ffug's request key,
+              # exactly as the sample app does. ffug's own request-path role still
+              # holds no KMS: a receiver has nothing to mint with (H1).
               - !If
-                - HasContextSigningKey
+                - HasFfugRequestSigningKey
                 - Effect: Allow
-                  Action: kms:Sign
-                  Resource: !Ref PorthContextSigningKeyArn
+                  Action: [kms:Sign, kms:DescribeKey]
+                  Resource: !Ref FfugRequestSigningKeyArn
                 - !Ref AWS::NoValue
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/porth/${PorthBranch}/services/*
 
   # ── S3 bucket for React SPA static assets ────────────────────────────────
 

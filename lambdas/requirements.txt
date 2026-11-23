@@ -29,13 +29,12 @@ fastapi==0.111.0
 # under signing-keys/* for documents that no longer exist, deliver its callbacks
 # to the wrong function, and refuse the declaration this app now makes.
 #
-# And the ceiling (PORTH-634, folded in from #127): 0.0.18 is a breaking release.
-# The context envelope moves to wire v2, a caller has no identity on the
-# internal plane, and `Director.source_service` becomes `called_service` - which
-# ffug's handler and worker, the sample-app callback and the approvals router
-# all still call. Without the cap every build resolves the newest release and
-# ships code that raises AttributeError on first use. Lift it in the migration.
-porth-common>=0.0.17,<0.0.18
+#   0.0.18  (breaking) wire v2: a caller has no identity on the internal plane and
+#           signs with the CALLED service's request key; Director.source_service
+#           became called_service; context_hash takes service_id.
+#   0.0.28  the release Porth 0.4.26 ships, and the one supplier_portal uses, so
+#           every EMS function now speaks the same porth-common.
+porth-common>=0.0.28,<0.0.29
 mangum==0.17.0
 # The accounts MCP service (sample_app/accounts_mcp): the SDK's FastMCP server in
 # stateless JSON mode. <2: the 2.x line renames FastMCP and changes the transport.

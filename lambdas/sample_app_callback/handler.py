@@ -152,7 +152,7 @@ def _build_director(event: dict[str, Any], context: Any) -> CallbackDirector:
         # Verified, and from a service this install will not accept completions
         # from. A different fault from a bad signature and worth its own code:
         # one is forgery, the other is configuration.
-        raise CallbackRefused("source_service_refused", str(exc)) from exc
+        raise CallbackRefused("service_refused", str(exc)) from exc
     except ServicesConfigError as exc:
         raise CallbackRefused("services_config_unreadable", str(exc)) from exc
 
@@ -250,10 +250,10 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
 
         log.debug(
             "sample_app.callback.verified environment=%s tenant_id=%s "
-            "source_service=%s internal=%s trace_id=%s",
+            "called_service=%s internal=%s trace_id=%s",
             director.environment,
             director.tenant_id,
-            director.source_service or "-",
+            director.called_service or "-",
             getattr(director, "is_internal_call", "?"),
             director.trace_id or "-",
         )
@@ -271,8 +271,8 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
         result = fn(event.get("payload") or {}, director)
         log.info(
             "sample_app.callback.served operation=%s tenant_id=%s "
-            "source_service=%s trace_id=%s",
-            op, director.tenant_id, director.source_service or "-", director.trace_id or "-",
+            "called_service=%s trace_id=%s",
+            op, director.tenant_id, director.called_service or "-", director.trace_id or "-",
         )
         return result
     except CallbackRefused as exc:

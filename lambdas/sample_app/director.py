@@ -63,12 +63,10 @@ class SampleAppDirector(PorthDirector):
     #: one service here, and `services/ffug` is its whole description: status,
     #: both ingress addresses, and a key per direction.
     #:
-    #: This is the identity that MINTS, and porth-common resolves the signing
-    #: key from it: "a service mints AS itself, so source_service IS the
-    #: identity whose key should sign". So declaring `ffug` is what makes this
-    #: function sign with ffug's REQUEST key — the key that exists for requests
-    #: going into ffug — instead of a second request authority invented for the
-    #: same party.
+    #: Since porth-common 0.0.18 a caller signs with the CALLED service's request
+    #: key and carries no identity of its own, so this app signing with ffug's
+    #: REQUEST key is the model, not a workaround. The id also anchors the
+    #: correlation hash approvals commits and the callback ingress recomputes.
     SERVICE_ID = "ffug"
 
     @property

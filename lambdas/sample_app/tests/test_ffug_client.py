@@ -145,9 +145,9 @@ def test_the_callback_declares_the_operation_and_this_apps_own_address(monkeypat
     already has.
 
     That the far end does not check this value is deliberate, and safe for a
-    reason that is not about this line: ffug mints the completion for the
-    VERIFIED `source_service` of the request, so an answer delivered anywhere
-    else carries the wrong `aud` and is refused before its payload is read.
+    reason that is not about this line: a completion is signed with ffug's own RESPONSE key and bound to the work by the correlation hash,
+    so an answer delivered to an ingress that did not start the work is refused
+    before its payload is read.
     """
     recorder = _client(monkeypatch, _accepted())
 
