@@ -1,1 +1,4 @@
+# fastapi without its "standard" extras (>=0.112): no uvicorn or CLI in a Lambda.
+fastapi==0.115.6
+mangum==0.17.0
 cryptography>=42
