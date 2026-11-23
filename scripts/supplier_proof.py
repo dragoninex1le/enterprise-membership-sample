@@ -166,7 +166,9 @@ def main() -> None:
 
     # S3
     status, granted_b = session(assertion("proof-sup-b", "contact-b"))
-    ok("S3 a second supplier's contact gets a session", status == 200, f"{status} {granted_b}")
+    # The answer carries the session token: shown only on failure, when it has none.
+    ok("S3 a second supplier's contact gets a session", status == 200,
+       "" if status == 200 else f"{status} {granted_b}")
     token_b = granted_b["token"]
     ok("S3 they cannot open supplier A's invoice",
        call("GET", HOST, f"/suppliers/invoices/{invoice['bill_id']}", bearer=token_b)[0] == 404)
