@@ -332,7 +332,7 @@ def stage_c(tenants: list[dict]) -> None:
         )
     row = named[0]
     print(f"    {row['attempt']}")
-    print(f"    outcome: {row['outcome']}   allowed: {row['allowed']}")
+    print(f"    detail: {row['detail']}   allowed: {row['allowed']}")
     if row["allowed"]:
         fail(
             f"{environment}'s credentials READ {other}'s partition.",
