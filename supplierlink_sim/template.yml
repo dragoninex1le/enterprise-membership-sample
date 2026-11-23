@@ -71,8 +71,14 @@ Resources:
         Login:
           Type: HttpApi
           Properties: { ApiId: !Ref SimulatorApi, Path: /login, Method: POST }
+        Docs:
+          Type: HttpApi
+          Properties: { ApiId: !Ref SimulatorApi, Path: /docs, Method: GET }
+        OpenApi:
+          Type: HttpApi
+          Properties: { ApiId: !Ref SimulatorApi, Path: /openapi.json, Method: GET }
 
 Outputs:
   SimulatorUrl:
-    Description: The API base the /supplierlink page calls (POST login).
+    Description: The API base the /supplierlink page calls (POST login); docs at docs.
     Value: !Sub https://${SimulatorApi}.execute-api.${AWS::Region}.amazonaws.com/

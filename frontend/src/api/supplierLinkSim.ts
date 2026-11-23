@@ -39,5 +39,8 @@ export async function signIn(form: SignInForm): Promise<SignInResult> {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(form),
   })
-  return (await reply.json()) as SignInResult
+  const body = await reply.json()
+  // 400: the simulator refused the form before signing or sending anything ({detail}).
+  if (!reply.ok) return { error: typeof body?.detail === 'string' ? body.detail : JSON.stringify(body) }
+  return body as SignInResult
 }

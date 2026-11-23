@@ -38,9 +38,9 @@ def entry(monkeypatch):
     monkeypatch.setattr(web, "_KEY", None)
     from supplier_portal import lambda_entry
 
-    lambda_entry._adapter.app.dependency_overrides[web.links] = lambda: None
+    lambda_entry.handler.app.dependency_overrides[web.links] = lambda: None
     yield lambda_entry
-    lambda_entry._adapter.app.dependency_overrides.clear()
+    lambda_entry.handler.app.dependency_overrides.clear()
 
 
 def test_a_request_is_followable_and_leaks_nothing(entry, caplog):
@@ -48,7 +48,7 @@ def test_a_request_is_followable_and_leaks_nothing(entry, caplog):
     response = entry.handler(_event("/session", body={"assertion": SECRET_ASSERTION},
                                     headers={"authorization": f"Bearer {SECRET_TOKEN}",
                                              "x-csrf-token": "csrf-value-never-logged"},
-                                    authorizer={"tenant_id": "acme", "AccessKeyId": "ASIA-never-logged"}))
+                                    authorizer={"tenant_id": "acme", "AccessKeyId": "ASIA-never-logged"}), None)
     assert response["statusCode"] == 503  # no key parameter in the test: network_key_unavailable
 
     lines = [r.getMessage() for r in caplog.records]
@@ -73,7 +73,7 @@ def test_the_preflight_decision_is_traced(entry, caplog):
     entry.handler(_event("/sample/suppliers/link", method="OPTIONS", mapping_key=None, headers={
         "origin": "https://acme.porth-dau.ems.estynsoftware.cloud",
         "access-control-request-method": "GET",
-        "access-control-request-headers": "authorization,x-csrf-token"}))
+        "access-control-request-headers": "authorization,x-csrf-token"}), None)
     cors = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("cors "))
     assert "granted=True" in cors and "own_ui=https://acme.porth-dau.ems.estynsoftware.cloud" in cors
     assert "requested_headers=authorization,x-csrf-token" in cors

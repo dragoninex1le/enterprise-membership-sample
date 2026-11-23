@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import time
 from typing import Any
 
 log = logging.getLogger("sample_app.trace")
@@ -60,3 +61,53 @@ def authorization_shape(value: str | None) -> str:
 
 def cookie_names(cookies: list[str] | None) -> list[str]:
     return sorted({c.split("=", 1)[0].strip() for c in cookies or [] if c})
+
+
+#: Authorizer-context values safe to log. Everything else there (credentials among it)
+#: is logged by key name only.
+CONTEXT_SHOWN = ("tenant_id", "environment", "auth_source", "connector_type", "is_platform_admin")
+
+
+class RequestTrace:
+    """Middleware: one ``request.in`` and one ``request.out`` line for every request."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        lambda_event = scope.get("aws.event") or {}
+        context = lambda_event.get("requestContext") or {}
+        headers = {k.lower(): v for k, v in (lambda_event.get("headers") or {}).items()}
+        authorizer = (context.get("authorizer") or {}).get("lambda") or {}
+        set_request(context.get("requestId"))
+        event(
+            "request.in", logging.INFO,
+            method=scope["method"], route=lambda_event.get("routeKey"),
+            raw_path=lambda_event.get("rawPath"), path=scope["path"],
+            mapping_key=(lambda_event.get("stageVariables") or {}).get("mapping_key"),
+            host=headers.get("host"), origin=headers.get("origin"),
+            authorization=authorization_shape(headers.get("authorization")),
+            cookies=cookie_names(lambda_event.get("cookies")),
+            csrf_header="x-csrf-token" in headers,
+            authorizer_keys=sorted(authorizer),
+            **{k: authorizer.get(k) for k in CONTEXT_SHOWN if k in authorizer},
+        )
+
+        started = time.monotonic()
+        status = None
+
+        async def send_noting_status(message):
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_noting_status)
+        except Exception:
+            event("request.crashed", logging.ERROR, ms=round((time.monotonic() - started) * 1000, 1))
+            raise
+        event("request.out", logging.INFO, status=status, ms=round((time.monotonic() - started) * 1000, 1))
