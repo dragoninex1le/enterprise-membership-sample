@@ -1,0 +1,72 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  SupplierLink sign-in simulator - a page that signs a supplier login as SupplierLink and
+  trades it at the EMS supplier portal for a Porth token. Its own stack; EMS is unchanged.
+
+Parameters:
+  EnvironmentSlot:
+    Type: String
+    AllowedValues: [porth-dau, porth-sample]
+  ApiApex:
+    Type: String
+    Description: EMS's API apex for the slot, e.g. porth-dau.ems.estynsoftware.cloud
+
+Resources:
+  SimulatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ems-supplierlink-sim-${EnvironmentSlot}
+      Description: SupplierLink simulator - reads the slot's SupplierLink signing key.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: read-supplierlink-key
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/ems/${EnvironmentSlot}/suppliers/supplierlink/simulator-private-key
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+
+  SimulatorApi:
+    Type: AWS::Serverless::HttpApi
+
+  SimulatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ems-supplierlink-sim-${EnvironmentSlot}
+      CodeUri: src/
+      Handler: app.handler
+      Runtime: python3.12
+      MemorySize: 512
+      Timeout: 29
+      Role: !GetAtt SimulatorRole.Arn
+      Environment:
+        Variables:
+          ENVIRONMENT_SLOT: !Ref EnvironmentSlot
+          API_APEX: !Ref ApiApex
+      Events:
+        Page:
+          Type: HttpApi
+          Properties: { ApiId: !Ref SimulatorApi, Path: /, Method: GET }
+        Login:
+          Type: HttpApi
+          Properties: { ApiId: !Ref SimulatorApi, Path: /login, Method: POST }
+
+Outputs:
+  SimulatorUrl:
+    Description: Open this in a browser.
+    Value: !Sub https://${SimulatorApi}.execute-api.${AWS::Region}.amazonaws.com/

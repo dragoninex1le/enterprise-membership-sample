@@ -16,6 +16,8 @@ on:
       - '.github/workflows/deploy-provisioning-adapter.yml'
       - 'infra/qa-tools/**'
       - '.github/workflows/deploy-qa-tools.yml'
+      - 'supplierlink_sim/**'
+      - '.github/workflows/deploy-supplierlink-sim.yml'
       # The Porth install has its own pipeline (porth-install.yml); its blob
       # builder is used by nothing else.
       - '.github/workflows/porth-install.yml'

@@ -1,0 +1,84 @@
+name: Deploy SupplierLink simulator
+
+# supplierlink_sim/: a page that plays SupplierLink, signs a supplier login, and trades it
+# at the EMS supplier portal for a Porth token. Its own stack; EMS's stack is not touched.
+#
+# Which slot: a push to main deploys porth-sample, a push to any other branch deploys
+# porth-dau, and a manual run deploys the slot chosen.
+#
+# The stack name starts with enterprise-membership-sample- because that is the stack
+# prefix EMS's deploy role may manage; no IAM change was needed.
+
+on:
+  push:
+    paths:
+      - 'supplierlink_sim/**'
+      - '.github/workflows/deploy-supplierlink-sim.yml'
+  workflow_dispatch:
+    inputs:
+      environment_slot:
+        description: 'Which slot'
+        type: choice
+        default: porth-dau
+        options: [porth-dau, porth-sample]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  SLOT: ${{ inputs.environment_slot || (github.ref == 'refs/heads/main' && 'porth-sample' || 'porth-dau') }}
+
+concurrency:
+  group: supplierlink-sim-${{ inputs.environment_slot || (github.ref == 'refs/heads/main' && 'porth-sample' || 'porth-dau') }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Test and deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: sample-app-deploy
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test
+        run: |
+          python -m pip install --quiet pytest "cryptography>=42"
+          python -m pytest supplierlink_sim/tests -q
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Read EMS's API apex for the slot
+        run: bash supplierlink_sim/scripts/resolve-apex.sh
+
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: SAM build
+        run: sam build --template-file supplierlink_sim/template.yml
+
+      - name: SAM deploy
+        run: |
+          sam deploy \
+            --stack-name "enterprise-membership-sample-supplierlink-sim-$SLOT" \
+            --region "$AWS_REGION" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --resolve-s3 \
+            --s3-prefix "enterprise-membership-sample-supplierlink-sim-$SLOT" \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides "EnvironmentSlot=$SLOT" "ApiApex=$API_APEX"
+
+      - name: Check the page answers
+        run: bash supplierlink_sim/scripts/smoke.sh
