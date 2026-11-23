@@ -95,16 +95,9 @@ jobs:
           UAT_ROLE_ARN=$(sample_output PorthUatRunnerRoleArn)
           PORTH_BRANCH=$(porth_param Environment)
 
-          # The signer needs the key. Taken from the STACK'S OWN PARAMETERS,
-          # not from SSM: deploy.yml already resolved it once and passed it in,
-          # and the deploy role's SSM access is the thing that cannot be relied
-          # on (run 32442832244). DescribeStacks is already permitted, and this
-          # way the proof signs with exactly the key the deployed function was
-          # told to verify against — reading SSM again could disagree with it.
-          CONTEXT_KEY_ARN=$(aws cloudformation describe-stacks \
-            --stack-name "$SAM_STACK_NAME" \
-            --query "Stacks[0].Parameters[?ParameterKey=='PorthContextSigningKeyArn'].ParameterValue" \
-            --output text)
+          # The signer needs no key named here (porth-common 0.0.18+): it signs with
+          # ffug's request key, found in Porth's services/ffug document under
+          # PORTH_BRANCH, so the branch is what has to be right.
           WIRED=$(sample_output FfugInternalPlaneWired)
           if [ "$WIRED" != "yes" ]; then
             echo "::error::The stack reports FfugInternalPlaneWired=$WIRED."
@@ -120,7 +113,7 @@ jobs:
           [ -z "$FFUG_FUNCTION_ARN" ] || [ "$FFUG_FUNCTION_ARN" == "None" ] && MISSING+=("FfugFunctionArn")
           [ -z "$FFUG_TABLE_NAME" ] || [ "$FFUG_TABLE_NAME" == "None" ] && MISSING+=("FfugTableName")
           [ -z "$UAT_ROLE_ARN" ] || [ "$UAT_ROLE_ARN" == "None" ] && MISSING+=("PorthUatRunnerRoleArn")
-          [ -z "$CONTEXT_KEY_ARN" ] || [ "$CONTEXT_KEY_ARN" == "None" ] && MISSING+=("context-signing-key-arn")
+          [ -z "$PORTH_BRANCH" ] || [ "$PORTH_BRANCH" == "None" ] && MISSING+=("Porth Environment")
           if [ ${#MISSING[@]} -gt 0 ]; then
             echo "::error::could not resolve: ${MISSING[*]}"
             echo "If FfugLifecycleFunctionArn and friends are absent, the stack predates"
@@ -132,7 +125,7 @@ jobs:
             echo "FFUG_FUNCTION_ARN=$FFUG_FUNCTION_ARN"
             echo "FFUG_TABLE_NAME=$FFUG_TABLE_NAME"
             echo "UAT_ROLE_ARN=$UAT_ROLE_ARN"
-            echo "PORTH_CONTEXT_SIGNING_KEY_ALIAS=$CONTEXT_KEY_ARN"
+            echo "PORTH_BRANCH=$PORTH_BRANCH"
           } >> "$GITHUB_ENV"
 
           echo "ffug function : $FFUG_FUNCTION_ARN"

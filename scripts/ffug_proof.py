@@ -179,8 +179,7 @@ def stage_b(tenants: list[dict]) -> None:
 
         envelope = build_envelope(
             caller,
-            source_service="porth",
-            audience="ffug",
+            service_id="ffug",
             trace_id=f"ffug-proof-{tenant_id}",
         )
         response = client.invoke(
@@ -210,12 +209,11 @@ def stage_b(tenants: list[dict]) -> None:
             fail(
                 f"ffug refused tenant {tenant_id}: {code} - {body.get('error', {}).get('message')}",
                 "",
-                "  source_service_refused  the D3 registry does not list 'porth' as",
+                "  service_refused         the D3 registry does not list 'ffug' as",
                 "                          active. The registry is a Porth-side SSM",
-                "                          document at /porth/{branch}/services, and an",
-                "                          ABSENT document fails closed on every lookup",
-                "                          — which is correct, and looks identical to a",
-                "                          rejected caller. Check the parameter exists.",
+                "                          document at /porth/{branch}/services/ffug, and",
+                "                          an ABSENT document fails closed on every",
+                "                          lookup. Check the parameter exists.",
                 "  environment_mismatch    the envelope's environment disagrees with",
                 "                          the slot these rows are keyed under. This USED",
                 "                          to mean PORTH_FIXED_ENVIRONMENT on the function;",
@@ -298,8 +296,7 @@ def stage_c(tenants: list[dict]) -> None:
     def probe(caller_environment: str, **args) -> dict:
         envelope = build_envelope(
             Caller(environment=caller_environment, tenant_id=tenant_id),
-            source_service="porth",
-            audience="ffug",
+            service_id="ffug",
             trace_id=f"ffug-proof-env-{caller_environment}",
         )
         response = client.invoke(
@@ -335,7 +332,7 @@ def stage_c(tenants: list[dict]) -> None:
         )
     row = named[0]
     print(f"    {row['attempt']}")
-    print(f"    outcome: {row['outcome']}   allowed: {row['allowed']}")
+    print(f"    detail: {row['detail']}   allowed: {row['allowed']}")
     if row["allowed"]:
         fail(
             f"{environment}'s credentials READ {other}'s partition.",

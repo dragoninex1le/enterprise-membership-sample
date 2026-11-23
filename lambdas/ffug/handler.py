@@ -520,10 +520,10 @@ def _op_hash_async(args: dict[str, Any], director: FfugDirector) -> dict[str, An
     none either: the party receiving an answer is the one that knows where it
     listens, so it says so when it asks.
 
-    ffug still cannot be turned into a way to reach an arbitrary target. What
-    it is pointed at only receives a token minted for the VERIFIED
-    `source_service` of this crossing, so an answer delivered anywhere other
-    than that service's ingress is refused on `aud` before its payload is read.
+    ffug still cannot be turned into a way to reach an arbitrary target. A
+    completion is signed with ffug's own RESPONSE key and bound to the work by the correlation hash, so an answer
+    delivered to an ingress that did not start the work is refused before its
+    payload is read.
     Misdirection fails at the receiver, which is what lets this path stay free
     of a per-call validation.
     """
@@ -562,9 +562,9 @@ def _op_hash_async(args: dict[str, Any], director: FfugDirector) -> dict[str, An
             "payload": payload,
             # Operation and the caller's own address. Stored as given —
             # ffug does not resolve it, does not check it against a registered
-            # one, and gains nothing by doing either: the completion is minted
-            # for the VERIFIED source_service, so an answer sent anywhere else
-            # is refused on `aud` at whatever ingress receives it (PORTH-624).
+            # one, and gains nothing by doing either: the completion is signed
+            # with ffug's response key and bound by the correlation hash, so an
+            # ingress that did not start the work refuses it (PORTH-624, 0.0.18).
             "callback": {"operation": operation, "endpoint": endpoint},
         },
         separators=(",", ":"),
@@ -574,7 +574,7 @@ def _op_hash_async(args: dict[str, Any], director: FfugDirector) -> dict[str, An
     log.info(
         "ffug.queued operation=hash_async tenant_id=%s answering=%s callback_op=%s "
         "trace_id=%s",
-        director.tenant_id, director.source_service or "-", operation,
+        director.tenant_id, director.called_service or "-", operation,
         director.async_trace_id,
     )
     return {
@@ -616,7 +616,7 @@ def _build_director(event: dict[str, Any], context: Any) -> FfugDirector:
         # The signature verified; the service it names is not one this install
         # will accept calls from. A different fault from a bad signature, and
         # worth its own code — one is forgery, the other is configuration.
-        raise FfugError("source_service_refused", str(exc)) from exc
+        raise FfugError("service_refused", str(exc)) from exc
     except ServicesConfigError as exc:
         raise FfugError("services_config_unreadable", str(exc)) from exc
 
@@ -663,11 +663,11 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
         # something the caller asserted. The pairing with the line above is the
         # point: what was sent, then what survived being checked.
         log.debug(
-            "ffug.verified environment=%s tenant_id=%s source_service=%s "
+            "ffug.verified environment=%s tenant_id=%s called_service=%s "
             "authenticated=%s internal=%s trace_id=%s",
             director.environment,
             director.tenant_id,
-            director.source_service or "-",
+            director.called_service or "-",
             director.is_authenticated,
             getattr(director, "is_internal_call", "?"),
             director.trace_id or "-",
@@ -710,11 +710,11 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
         # unrepeatable: there is no longer a per-op choice to get wrong.
         result = fn(event.get("payload") or {}, director)
         log.info(
-            "ffug.served operation=%s environment=%s tenant_id=%s source_service=%s trace_id=%s",
+            "ffug.served operation=%s environment=%s tenant_id=%s called_service=%s trace_id=%s",
             op,
             director.environment,
             director.tenant_id,
-            director.source_service or "-",
+            director.called_service or "-",
             director.trace_id or "-",
         )
         return result

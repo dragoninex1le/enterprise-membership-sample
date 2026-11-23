@@ -412,9 +412,11 @@ def test_every_signer_signs_with_the_key_its_direction_entitles_it_to(template):
       service holds response authority and nothing else, so it cannot
       originate work even as itself — the capability is absent rather than
       unused.
-    * the UAT runner mints as `porth`, on the install key. It is the one
-      remaining holder of that key here, and deliberately: it stands outside
-      the app, minting as a third party to exercise the boundary.
+    * the UAT runner signs REQUESTS on ffug's REQUEST key too. Since
+      porth-common 0.0.18 a caller has no identity of its own on the internal
+      plane - signing with the called service's request key IS the authority -
+      so there is no "minting as porth" left to do; it stands outside the app
+      and calls ffug the only way anything can.
 
     The app and the worker now hold DIFFERENT keys for the same service, which
     is the per-direction property doing its job: a compromised completion path
@@ -431,7 +433,7 @@ def test_every_signer_signs_with_the_key_its_direction_entitles_it_to(template):
     """
     expected = {
         "SampleAppFunction": {"Ref": "FfugRequestSigningKeyArn"},
-        "PorthUatRunnerRole": {"Ref": "PorthContextSigningKeyArn"},
+        "PorthUatRunnerRole": {"Ref": "FfugRequestSigningKeyArn"},
         "FfugWorkerFunctionRole": {"Ref": "FfugResponseSigningKeyArn"},
         "SupplierPortalRole": {"Sub": "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*"},
     }

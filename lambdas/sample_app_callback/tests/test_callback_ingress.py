@@ -43,7 +43,7 @@ def service_context(tenant_id=TENANT, environment=ENVIRONMENT, source="ffug", tr
         "_boundary": "service",
         "tenant_id": tenant_id,
         "environment": environment,
-        "source_service": source,
+        "called_service": source,
         "trace_id": trace,
         "organization_id": "", "user_id": "", "external_id": "", "porth_user_id": "",
         "roles": "", "permissions": "", "user_email": "", "user_display_name": "",
@@ -67,7 +67,7 @@ def expected_hash(environment=ENVIRONMENT, tenant_id=TENANT, trace=TRACE):
     """
     return context_hash(
         environment=environment, tenant_id=tenant_id,
-        source_service="ffug", trace_id=trace,
+        service_id="ffug", trace_id=trace,
     )
 
 

@@ -75,7 +75,8 @@ def test_what_is_queued_is_a_context_the_worker_can_restore(porth, table, queue)
 
     assert restored.tenant_id == "acme"
     assert restored.environment == "prod"
-    assert restored.source_service == "porth"
+    # porth-common 0.0.18+: the context names no caller - there is none to name.
+    assert "source_service" not in json.loads(_sent(queue)["context"])
 
 
 def test_accepting_work_writes_nothing_to_the_table(porth, table, queue):
@@ -127,7 +128,6 @@ def _record(message_id, tenant="acme"):
                     {
                         "environment": "prod",
                         "tenant_id": tenant,
-                        "source_service": "porth",
                         "trace_id": f"trace-{tenant}",
                         "verified_at": 1,
                     }
@@ -145,9 +145,8 @@ class _Scoped:
         self.index = 0
         self.director = MagicMock(
             environment="prod", tenant_id=tenant, async_trace_id=f"trace-{tenant}",
-            # Who asked. Resumed from the PersistedContext in the real worker,
-            # and the value the completion is addressed to (PORTH-623).
-            source_service="alpha",
+            # The service this work concerns - ffug itself (porth-common 0.0.18+).
+            called_service="ffug",
         )
         self.director.table = table
 
@@ -224,7 +223,7 @@ def test_one_failing_record_does_not_take_its_neighbours(monkeypatch, table):
     def send(director, declaration, payload):
         if director.tenant_id == "globex":
             raise RuntimeError("callee unreachable")
-        calls.append((director.source_service, declaration.operation, payload))
+        calls.append((director.called_service, declaration.operation, payload))
 
     monkeypatch.setattr(w, "send_callback", send)
 
@@ -232,7 +231,7 @@ def test_one_failing_record_does_not_take_its_neighbours(monkeypatch, table):
 
     assert result["batchItemFailures"] == [{"itemIdentifier": "bad"}]
     # Answered its own requester, taken from the Director rather than the body.
-    assert calls and calls[0][:2] == ("alpha", "fingerprint-complete")
+    assert calls and calls[0][:2] == ("ffug", "fingerprint-complete")
 
 
 def test_the_completion_is_addressed_to_whoever_asked(monkeypatch, table):
@@ -244,8 +243,8 @@ def test_the_completion_is_addressed_to_whoever_asked(monkeypatch, table):
     exactly one requester; the second's answers would have gone to the first's
     ingress.
 
-    Now the worker passes only the operation, and `send_callback` addresses the
-    answer to the `source_service` it resumed with. ffug still holds no address
+    Now the worker passes only the operation and the requester's own address,
+    and the completion names ffug (porth-common 0.0.18+). ffug still holds no address
     and still cannot be pointed at one — and it can now answer any number of
     requesters, each at its own ingress.
     """
@@ -266,7 +265,7 @@ def test_the_completion_is_addressed_to_whoever_asked(monkeypatch, table):
         w, "send_callback",
         lambda d, decl, payload: seen.update(
             operation=decl.operation, endpoint=decl.endpoint,
-            answering=d.source_service, payload=payload,
+            answering=d.called_service, payload=payload,
         ),
     )
 
@@ -278,7 +277,7 @@ def test_the_completion_is_addressed_to_whoever_asked(monkeypatch, table):
     # The AUDIENCE comes from the Director resumed from the persisted record,
     # never from the body. Keeping these two apart is what makes an unchecked
     # address safe.
-    assert seen["answering"] == "alpha"
+    assert seen["answering"] == "ffug"
     assert seen["payload"]["prime"] == ACME_PRIME
     assert len(seen["payload"]["digest"]) == 64
 

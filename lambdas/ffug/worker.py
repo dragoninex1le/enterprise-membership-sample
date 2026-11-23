@@ -135,11 +135,10 @@ def _complete(scoped: Any) -> None:
             "fall back on — by design — so it cannot be delivered. Re-request "
             "the work; retrying this message will produce this same refusal"
         )
-    # The AUDIENCE comes from the Director — the verified source_service this
-    # worker resumed with. The ADDRESS comes from the requester, relayed
-    # untouched. Keeping those two apart is what makes an unchecked address
-    # safe: the token is minted for whoever asked, so delivering it elsewhere
-    # produces a refusal rather than a leak (PORTH-624).
+    # The ADDRESS comes from the requester, relayed untouched. It is safe
+    # unchecked because the completion is signed with ffug's own response key
+    # and bound to the work by the correlation hash: delivered elsewhere, it is
+    # refused rather than leaked (PORTH-624; porth-common 0.0.18).
     send_callback(
         director,
         CallbackDeclaration(
@@ -149,7 +148,7 @@ def _complete(scoped: Any) -> None:
     )
     log.info(
         "ffug.worker.completed tenant_id=%s answering=%s operation=%s digest=%s trace_id=%s",
-        director.tenant_id, director.source_service or "-", declared["operation"],
+        director.tenant_id, director.called_service or "-", declared["operation"],
         digest[:12], director.async_trace_id,
     )
 

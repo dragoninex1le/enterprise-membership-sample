@@ -338,9 +338,9 @@ def test_one_service_is_spelled_one_way_everywhere():
     * `CallbackDirector.SERVICE_ID`  — recomputes the hash on arrival
 
     There were four. The callback's `service_id` — where ffug addressed the
-    answer — is gone entirely (PORTH-623/624): the audience comes from the
-    verified `source_service`, and the address is the requester's own, supplied
-    per request. Neither is a spelling of this service that anybody writes
+    answer — is gone entirely (PORTH-623/624): the completion names ffug and is
+    signed with its response key, and the address is the requester's own,
+    supplied per request. Neither is a spelling of this service that anybody writes
     down. One fewer place to disagree, which beats checking it.
 
     `SOURCE_SERVICE` is derived from the Director rather than restated, so it

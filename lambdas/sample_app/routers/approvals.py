@@ -125,7 +125,7 @@ def approve(record_type: str, record_id: str, director: SampleAppDirector = Depe
             tenant_id=director.tenant_id,
             # OUR id, not ffug's. The hash is anchored to the initiator, which
             # is what the callback's verified `aud` will name.
-            source_service=SOURCE_SERVICE,
+            service_id=SOURCE_SERVICE,
             trace_id=trace_id,
         ),
     )

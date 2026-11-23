@@ -122,9 +122,9 @@ FINGERPRINT_OPERATION = "fingerprint-complete"
 #: listens, so it says so when it asks.
 #:
 #: This being un-validated at the far end is fine, and it is worth knowing why:
-#: the address is not the authority. ffug mints the completion for the VERIFIED
-#: `source_service` of the request, so an answer delivered anywhere else carries
-#: the wrong `aud` and is refused before its payload is read.
+#: the address is not the authority. A completion is signed with ffug's own RESPONSE key and bound to the work by the correlation hash
+#: (porth-common 0.0.18+), so an answer delivered to an ingress that did not start
+#: the work is refused before its payload is read.
 CALLBACK_TARGET_ENV = "SAMPLE_APP_CALLBACK_TARGET"
 
 
