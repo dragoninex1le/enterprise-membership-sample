@@ -137,6 +137,10 @@ concurrency:
 
 env:
   AWS_REGION: us-east-1
+  # EMS's settings table (PORTH-669). porth-install >= 0.4.21 (Porth 0.4.31)
+  # reads Porth's settings from it in reconcile-permissions and check.
+  ESTYN_SETTINGS_PROVIDER: aws
+  ESTYN_SETTINGS_TABLE: ${{ vars.ESTYN_SETTINGS_TABLE || 'ems-settings' }}
   # PORTH-657 — Porth releases live here, in the Estyn Components account, readable by
   # principals in the Estyn Organization (porth-install-role needs s3:GetObject on porth/*).
   PORTH_RELEASE_BUCKET: porth-releases-084847995635
@@ -382,12 +386,22 @@ jobs:
               ;;
           esac
 
+      # Porth 0.4.31 reads settings 0.4.30's install never wrote (roles.*,
+      # tenants.*, directory.*, jwks.*, delegated.*, internal.*): write them
+      # before the stack update, or the new functions fail naming the missing
+      # item. Run again after auth-config below; that run is a no-op.
+      - name: Write Porth's settings before the stack update
+        if: steps.preflight.outputs.action != 'install'
+        env:
+          CA_OWNER: ${{ vars.PORTH_CODEARTIFACT_OWNER || '084847995635' }}
+          ESTYN_SETTINGS_SECRET: ${{ vars.ESTYN_SETTINGS_SECRET || 'ems-settings/key' }}
+        run: scripts/porth-settings-apply.sh
+
       - name: Create change set
         id: changeset
         env:
           STACK: ${{ env.EFF_STACK_NAME }}
           CFN_EXECUTION_ROLE_ARN: ${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}
-          ESTYN_SETTINGS_TABLE: ${{ vars.ESTYN_SETTINGS_TABLE || 'ems-settings' }}
         run: |
           set -euo pipefail
           if [ "${{ steps.preflight.outputs.action }}" = "install" ]; then
@@ -797,7 +811,6 @@ jobs:
       - name: Write Porth's settings (porth-install settings apply)
         env:
           CA_OWNER: ${{ vars.PORTH_CODEARTIFACT_OWNER || '084847995635' }}
-          ESTYN_SETTINGS_TABLE: ${{ vars.ESTYN_SETTINGS_TABLE || 'ems-settings' }}
           ESTYN_SETTINGS_SECRET: ${{ vars.ESTYN_SETTINGS_SECRET || 'ems-settings/key' }}
         run: scripts/porth-settings-apply.sh
 

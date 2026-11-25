@@ -8,17 +8,17 @@
 #   ENV_SCOPES              JSON array of declared environments, e.g. ["porth-sample","porth-dau"]
 #   PRUNE                   "skip" = register only; "false" = also list retired
 #                           permissions (dry run); "true" = delete them and their grants
-#   CA_DOMAIN CA_REPO CA_OWNER AWS_REGION   (optional; defaults below)
+#   ESTYN_SETTINGS_PROVIDER ESTYN_SETTINGS_TABLE   EMS's settings table (porth-install >= 0.4.21)
+#   CA_OWNER AWS_REGION     (optional; porth-install-pip.sh defaults them)
 set -euo pipefail
 
 : "${PORTH_INSTALL_VERSION:?resolve-porth-release.sh did not set PORTH_INSTALL_VERSION}"
 : "${ENV_NAME:?ENV_NAME is empty — cannot resolve the table names}"
 : "${ENV_SCOPES:?ENV_SCOPES is empty — no declared environments}"
 
-aws codeartifact login --tool pip --domain "${CA_DOMAIN:-porth}" \
-  --domain-owner "${CA_OWNER:-084847995635}" --repository "${CA_REPO:-porth-py}" \
-  --region "${AWS_REGION:-us-east-1}"
-pip install --quiet "porth-install==${PORTH_INSTALL_VERSION}"
+# From porth-install 0.4.21 reconcile reads Porth's settings: the job sets
+# ESTYN_SETTINGS_PROVIDER and ESTYN_SETTINGS_TABLE.
+"$(dirname "$0")/porth-install-pip.sh" "$PORTH_INSTALL_VERSION"
 
 HAS_PRUNE=false
 porth-install reconcile-permissions --help | grep -q -- '--prune-retired' && HAS_PRUNE=true
