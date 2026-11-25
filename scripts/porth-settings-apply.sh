@@ -23,20 +23,28 @@ fi
 : "${PORTH_INSTALL_VERSION:?}" "${ESTYN_SETTINGS_TABLE:?}" "${ESTYN_SETTINGS_SECRET:?}"
 : "${CA_OWNER:?}" "${AWS_REGION:?}"
 
-index_for() {
-  local domain="$1" repo="$2" token endpoint
-  token=$(aws codeartifact get-authorization-token --domain "$domain" \
-    --domain-owner "$CA_OWNER" --region "$AWS_REGION" \
-    --query authorizationToken --output text)
-  endpoint=$(aws codeartifact get-repository-endpoint --domain "$domain" \
-    --domain-owner "$CA_OWNER" --repository "$repo" --format pypi \
-    --region "$AWS_REGION" --query repositoryEndpoint --output text)
-  echo "::add-mask::$token"
-  printf 'https://aws:%s@%ssimple/' "$token" "${endpoint#https://}"
+# Each token is masked before it is used. The ::add-mask:: line must reach the
+# runner on the step's own stdout: printed inside a $(...) it is captured
+# instead, the token goes unmasked and pip prints it in its warnings.
+token_for() {
+  aws codeartifact get-authorization-token --domain "$1" --domain-owner "$CA_OWNER" \
+    --region "$AWS_REGION" --query authorizationToken --output text
+}
+endpoint_for() {
+  aws codeartifact get-repository-endpoint --domain "$1" --domain-owner "$CA_OWNER" \
+    --repository "$2" --format pypi --region "$AWS_REGION" --query repositoryEndpoint --output text
 }
 
-porth_index=$(index_for porth porth-py)
-platform_index=$(index_for estyn-platform estyn-platform-py)
+porth_token=$(token_for porth)
+echo "::add-mask::$porth_token"
+platform_token=$(token_for estyn-platform)
+echo "::add-mask::$platform_token"
+
+porth_endpoint=$(endpoint_for porth porth-py)
+platform_endpoint=$(endpoint_for estyn-platform estyn-platform-py)
+
+porth_index="https://aws:${porth_token}@${porth_endpoint#https://}simple/"
+platform_index="https://aws:${platform_token}@${platform_endpoint#https://}simple/"
 
 pip install --quiet \
   --index-url "$porth_index" \
