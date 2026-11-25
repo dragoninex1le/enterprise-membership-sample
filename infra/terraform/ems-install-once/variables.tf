@@ -135,3 +135,39 @@ variable "supplier_portal_slots" {
   type        = list(string)
   default     = ["porth-sample", "porth-dau"]
 }
+
+variable "settings_table_name" {
+  description = <<-EOT
+    The application's estyn-settings table (settings.tf). Porth's stack takes it
+    as SettingsTableName; porth-install.yml reads the same name from the
+    repository variable ESTYN_SETTINGS_TABLE, defaulting to this value.
+  EOT
+  type        = string
+  default     = "ems-settings"
+}
+
+variable "settings_secret_name" {
+  description = <<-EOT
+    The settings table's key secret, created empty here and filled by
+    `porth-install settings apply --apply`. porth-install.yml reads the same
+    name from ESTYN_SETTINGS_SECRET, defaulting to this value.
+  EOT
+  type        = string
+  default     = "ems-settings/key"
+}
+
+variable "porth_install_role_name" {
+  description = <<-EOT
+    The role porth-install.yml runs as (Porth's receiving-account bootstrap).
+    It writes Porth's settings, so it gets the installer grants on the table
+    and secret. Empty to skip.
+  EOT
+  type        = string
+  default     = "porth-install-role"
+}
+
+variable "codeartifact_owner" {
+  description = "The Estyn Components account, which owns the estyn-platform CodeArtifact domain."
+  type        = string
+  default     = "084847995635"
+}
