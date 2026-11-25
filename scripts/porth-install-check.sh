@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 # PORTH-656 — run `porth-install check` against the declared environments.
 #
-#   CA_DOMAIN CA_REPO CA_OWNER        the porth-py CodeArtifact repository
+#   CA_OWNER                          the publisher account (CodeArtifact domains)
+#   ESTYN_SETTINGS_PROVIDER/_TABLE    EMS's settings table (porth-install >= 0.4.21 reads it)
 #   PORTH_INSTALL_CHECK_VERSION       the release's porth-install, from its manifest
 #   EFF_PORTH_VERSION                 the Porth release installed (limits the migrations checked)
 #   PORTH_ENV_NAME                    the Porth stack's Environment (dev)
 #   AUTH0_MGMT_CLIENT_ID/_SECRET      optional; enables the Auth0 checks
 set -euo pipefail
 
-aws codeartifact login --tool pip --domain "$CA_DOMAIN" --domain-owner "$CA_OWNER" \
-  --repository "$CA_REPO" --region "$AWS_REGION"
 : "${PORTH_INSTALL_CHECK_VERSION:?the install job did not output porth_install_version}"
-pip install --quiet "porth-install==${PORTH_INSTALL_CHECK_VERSION}"
+"$(dirname "$0")/porth-install-pip.sh" "$PORTH_INSTALL_CHECK_VERSION"
 
 # The declared file, from main, exactly as the install read it.
 git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main

@@ -49,6 +49,9 @@ jobs:
     environment: porth-install
     env:
       AWS_REGION: us-east-1
+      # porth-install >= 0.4.21 reads Porth's settings (PORTH-669).
+      ESTYN_SETTINGS_PROVIDER: aws
+      ESTYN_SETTINGS_TABLE: ${{ vars.ESTYN_SETTINGS_TABLE || 'ems-settings' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -67,6 +67,10 @@ env:
   CA_DOMAIN: porth
   CA_REPO: porth-py
   CA_OWNER: '084847995635'
+  # porth-install >= 0.4.21 (Porth 0.4.31) reads Porth's settings from EMS's
+  # settings table in reconcile-permissions, check, tenants apply, platform-marker.
+  ESTYN_SETTINGS_PROVIDER: aws
+  ESTYN_SETTINGS_TABLE: ${{ vars.ESTYN_SETTINGS_TABLE || 'ems-settings' }}
   # PORTH-656: no pin. The porth-install run is the one the installed Porth
   # release was cut with (its manifest), so a task never runs an older tool than
   # the release it is operating on (this was pinned to 0.2.5 under Porth 0.4.11).
@@ -103,28 +107,11 @@ jobs:
           [ -n "$VERSION" ] || VERSION="$(scripts/installed-porth-version.sh)"
           scripts/resolve-porth-release.sh "$VERSION"
 
+      # Exact, from the release manifest (previous step): a floating install once
+      # backtracked to an old porth-install that lacked the command. With the
+      # settings extra, from porth-py and estyn-platform-py.
       - name: Install porth-install from CodeArtifact
-        run: |
-          set -euo pipefail
-          aws codeartifact login --tool pip \
-            --domain "$CA_DOMAIN" --domain-owner "$CA_OWNER" \
-            --repository "$CA_REPO" --region "$AWS_REGION"
-          # Pinned, not floating. `pip install porth-install` takes whatever is
-          # latest THAT IT CAN RESOLVE, and on 2026-08-18 that silently meant an
-          # old one: 0.2.3 requires porth-common>=0.0.6, 0.0.6 had not been
-          # published yet, so pip backtracked to 0.2.1 — whose floor it could
-          # satisfy — and installed that. The symptom was
-          #
-          #   porth-install: error: argument command: invalid choice: 'migrate-keys'
-          #
-          # which reads as a broken workflow rather than an unpublished
-          # dependency, and it survived a re-run because nothing about it was
-          # transient. A pin turns that into "no matching distribution", which
-          # names the real problem.
-          #
-          # Exact, from the release manifest (previous step), for the reason above.
-          pip install --quiet "porth-install==${PORTH_INSTALL_VERSION}"
-          echo "porth-install $(pip show porth-install | awk '/^Version:/ {print $2}')"
+        run: scripts/porth-install-pip.sh "$PORTH_INSTALL_VERSION"
 
       - name: Run the task
         env:
