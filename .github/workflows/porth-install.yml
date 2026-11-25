@@ -387,6 +387,7 @@ jobs:
         env:
           STACK: ${{ env.EFF_STACK_NAME }}
           CFN_EXECUTION_ROLE_ARN: ${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}
+          ESTYN_SETTINGS_TABLE: ${{ vars.ESTYN_SETTINGS_TABLE || 'ems-settings' }}
         run: |
           set -euo pipefail
           if [ "${{ steps.preflight.outputs.action }}" = "install" ]; then
@@ -430,6 +431,14 @@ jobs:
           if scripts/porth-version-at-least.sh 0.4.16 "${{ env.EFF_PORTH_VERSION }}"; then
             PARAMS+=( "ParameterKey=BrowserGatewayCacheTtl,ParameterValue=${{ env.EFF_BROWSER_CACHE_TTL }}" )
             echo "Browser gateway cache: ${{ env.EFF_BROWSER_CACHE_TTL }} s"
+          fi
+
+          # PORTH-669 ruling 3: Porth >= 0.4.30 reads its settings from EMS's
+          # estyn-settings table (infra/terraform/ems-install-once/settings.tf).
+          # The "Write Porth's settings" step below fills it.
+          if scripts/porth-version-at-least.sh 0.4.30 "${{ env.EFF_PORTH_VERSION }}"; then
+            PARAMS+=( "ParameterKey=SettingsTableName,ParameterValue=${ESTYN_SETTINGS_TABLE}" )
+            echo "Settings table: ${ESTYN_SETTINGS_TABLE}"
           fi
 
           # PORTH-655: no AuthTestToken. The static-token bypass is gone from Porth
@@ -778,6 +787,19 @@ jobs:
           porth-install auth-config \
             --root-url "$PORTH_ROOT_URL_RESOLVED" \
             --environments "${PORTH_AUTH_ENVIRONMENTS_RAW:-}"
+
+      # ── Porth's settings (PORTH-669 ruling 3, Porth >= 0.4.30) ──────────────
+      # After auth-config, because `settings apply` copies the conformed
+      # /porth/auth blob into the table, with the values Porth used to hard-code.
+      # Until it has run once, a 0.4.30 stack has no settings and sign-in is
+      # inert, as it was before the blob existed. The table and its key secret
+      # are EMS's (ems-install-once); the script skips older releases.
+      - name: Write Porth's settings (porth-install settings apply)
+        env:
+          CA_OWNER: ${{ vars.PORTH_CODEARTIFACT_OWNER || '084847995635' }}
+          ESTYN_SETTINGS_TABLE: ${{ vars.ESTYN_SETTINGS_TABLE || 'ems-settings' }}
+          ESTYN_SETTINGS_SECRET: ${{ vars.ESTYN_SETTINGS_SECRET || 'ems-settings/key' }}
+        run: scripts/porth-settings-apply.sh
 
       # ── Porth's permissions match this release's catalogue ─────────────────
       # PORTH-656. Before the migrations, because the 0.4.1 catalogue migration

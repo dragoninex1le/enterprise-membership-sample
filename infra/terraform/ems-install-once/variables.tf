@@ -135,3 +135,73 @@ variable "supplier_portal_slots" {
   type        = list(string)
   default     = ["porth-sample", "porth-dau"]
 }
+
+variable "settings_table_name" {
+  description = <<-EOT
+    The application's estyn-settings table (settings.tf). Porth's stack takes it
+    as SettingsTableName; porth-install.yml reads the same name from the
+    repository variable ESTYN_SETTINGS_TABLE, defaulting to this value.
+  EOT
+  type        = string
+  default     = "ems-settings"
+}
+
+variable "settings_secret_name" {
+  description = <<-EOT
+    The settings table's key secret, created empty here and filled by
+    `porth-install settings apply --apply`. porth-install.yml reads the same
+    name from ESTYN_SETTINGS_SECRET, defaulting to this value.
+  EOT
+  type        = string
+  default     = "ems-settings/key"
+}
+
+variable "porth_install_role_name" {
+  description = <<-EOT
+    The role porth-install.yml runs as (Porth's receiving-account bootstrap).
+    It writes Porth's settings, so it gets the installer grants on the table
+    and secret. Empty to skip.
+  EOT
+  type        = string
+  default     = "porth-install-role"
+}
+
+variable "codeartifact_owner" {
+  description = "The Estyn Components account, which owns the estyn-platform CodeArtifact domain."
+  type        = string
+  default     = "084847995635"
+}
+
+variable "delegated_mint_caller_slots" {
+  description = <<-EOT
+    Per Porth environment (porth_branch), the slots whose supplier portal may mint
+    a delegated session (ADR-Z12; porth.tf). Named as SLOTS, not ARNs: the role
+    is template.yml's ems-supplier-portal-{slot}, and the account comes from the
+    caller identity.
+
+    THIS IS THE CONTROL. Porth's key policy grants kms:Sign by name and gives the
+    account root nothing, so a slot that is not here cannot get a session minted,
+    whatever its own IAM says. Adding one is a reviewed change, which is the
+    intended friction.
+
+    In code rather than a tfvars file on purpose: tfvars are gitignored, so a
+    value there is neither reviewed nor reproducible. An environment this map does
+    not name gets an empty list — minting off.
+  EOT
+  type        = map(list(string))
+  default = {
+    dev = ["porth-sample", "porth-dau"]
+  }
+}
+
+variable "porth_tenant_host_zone" {
+  description = "Porth install-once's tenant_host_zone (PORTH-656): the Route 53 zone tenant-host certificates validate in."
+  type        = string
+  default     = "ems.estynsoftware.cloud"
+}
+
+variable "porth_tenant_host_slots" {
+  description = "Porth install-once's tenant_host_slots (PORTH-656): one certificate per slot. Every slot in deploy/porth/environments.json."
+  type        = list(string)
+  default     = ["porth-sample", "porth-dau"]
+}

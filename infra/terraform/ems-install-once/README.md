@@ -91,6 +91,23 @@ run afterwards, and nothing the application deploy does.
 | `aws_ssm_parameter.signing_keys["ffug"]` | `services/ffug` — **the** document: status, both addresses, both keys |
 | `aws_ssm_parameter.service_signing_key_arn[…]` | the ARN, for the deploy to pass as a stack parameter |
 | `aws_iam_role_policy.deploy_role_async_work` | what the deploy role needs to create THIS app's resources |
+| `aws_dynamodb_table.settings` | `ems-settings`: the application's estyn-settings table, which Porth >= 0.4.30 reads (PORTH-669) |
+| `aws_secretsmanager_secret.settings_key` | `ems-settings/key`: created empty; `porth-install settings apply` puts the private key |
+| `aws_iam_role_policy.porth_install_settings` | what `porth-install-role` needs to write Porth's settings, and to install estyn-settings |
+
+### The settings table is the application's
+
+Richard, 2026-11-24: "The application deploys the settings table, and the Porth
+install writes Porth's values into it." So the table and its key secret are
+here, created once and destroyed never (deletion protection and point-in-time
+recovery are on). `porth-install.yml` passes the table to Porth's stack as
+`SettingsTableName` and runs `scripts/porth-settings-apply.sh` after
+`auth-config`, for Porth 0.4.30 and later. **Apply this module before the first
+0.4.30 install**: without the table, Porth's sign-in has no settings.
+
+The names default to `ems-settings` and `ems-settings/key`; the workflow reads
+the same names from the repository variables `ESTYN_SETTINGS_TABLE` and
+`ESTYN_SETTINGS_SECRET`, with the same defaults.
 
 ### The deploy role's grants are ours, not Porth's
 

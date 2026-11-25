@@ -40,3 +40,13 @@ output "signing_key_arns" {
   EOT
   value       = { for k, v in aws_kms_key.service_signing : k => v.arn }
 }
+
+output "settings_table_name" {
+  description = "The application's estyn-settings table: Porth's SettingsTableName."
+  value       = aws_dynamodb_table.settings.name
+}
+
+output "settings_secret_name" {
+  description = "The settings table's key secret, filled by `porth-install settings apply`."
+  value       = aws_secretsmanager_secret.settings_key.name
+}
